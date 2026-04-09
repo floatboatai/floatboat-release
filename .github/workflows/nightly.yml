@@ -50,6 +50,7 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ steps.ref.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
+          fetch-depth: 0
 
       - name: Determine nightly version
         id: version
@@ -68,6 +69,90 @@ jobs:
           else
             echo "platforms=macos,windows" >> $GITHUB_OUTPUT
           fi
+
+      - name: Collect recent changes (last 24h)
+        id: changes
+        run: |
+          SINCE=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S 2>/dev/null || date -u -v-24H +%Y-%m-%dT%H:%M:%S)
+          echo "since=$SINCE" >> $GITHUB_OUTPUT
+
+          # Get commits from last 24h
+          COMMITS=$(git log --since="$SINCE" --pretty=format:"- %s (%an)" --no-merges 2>/dev/null || echo "")
+          COMMIT_COUNT=$(git log --since="$SINCE" --oneline --no-merges 2>/dev/null | wc -l | tr -d ' ')
+          echo "commit_count=$COMMIT_COUNT" >> $GITHUB_OUTPUT
+
+          # Get merged PRs from last 24h
+          PR_DATA=$(gh pr list --repo "${{ vars.SOURCE_REPO }}" --state merged --search "merged:>=$SINCE" --limit 30 --json number,title,body --jq '[.[] | {number, title, body: (.body // "" | .[0:500])}]' 2>/dev/null || echo "[]")
+          PR_COUNT=$(echo "$PR_DATA" | jq length)
+          echo "pr_count=$PR_COUNT" >> $GITHUB_OUTPUT
+
+          # Save for AI summary
+          echo "$COMMITS" > /tmp/recent_commits.txt
+          echo "$PR_DATA" > /tmp/recent_prs.json
+        env:
+          GH_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Generate nightly release notes with AI
+        id: changelog
+        continue-on-error: true
+        run: |
+          VERSION="${{ steps.version.outputs.nightly_version }}"
+          COMMIT_COUNT="${{ steps.changes.outputs.commit_count }}"
+          PR_COUNT="${{ steps.changes.outputs.pr_count }}"
+          COMMITS=$(cat /tmp/recent_commits.txt)
+          PR_DATA=$(cat /tmp/recent_prs.json)
+
+          if [ "$COMMIT_COUNT" == "0" ] && [ "$PR_COUNT" == "0" ]; then
+            echo "No changes in last 24h" > /tmp/release_notes.md
+            exit 0
+          fi
+
+          PROMPT="You are generating nightly build notes for Floatboat Desktop ${VERSION}.
+
+          Below are the changes from the last 24 hours. Summarize them as a concise changelog in bilingual format (Chinese + English).
+
+          Rules:
+          - Group by: 新功能/Features, 修复/Fixes, 改进/Improvements
+          - One line per change, keep it brief
+          - Skip CI/chore/docs unless significant
+          - If changes are minor, say so briefly
+
+          Recent commits (${COMMIT_COUNT}):
+          ${COMMITS}
+
+          Merged PRs (${PR_COUNT}):
+          ${PR_DATA}"
+
+          NOTES=""
+          for attempt in 1 2 3; do
+            RESPONSE=$(curl -s --max-time 120 -X POST "${{ vars.AI_API_ENDPOINT }}" \
+              -H "Content-Type: application/json" \
+              -H "x-api-key: $AI_API_KEY" \
+              -H "anthropic-version: 2023-06-01" \
+              -d "$(jq -n \
+                --arg model "${{ vars.AI_MODEL }}" \
+                --arg prompt "$PROMPT" \
+                '{model: $model, max_tokens: 1024, messages: [{role: "user", content: $prompt}]}')")
+            NOTES=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
+            if [ -n "$NOTES" ]; then break; fi
+            [ "$attempt" -lt 3 ] && sleep 3
+          done
+
+          if [ -z "$NOTES" ]; then
+            # Fallback: list commits directly
+            NOTES="## Nightly ${VERSION}\n\n### Recent changes (last 24h)\n\n${COMMITS}"
+          fi
+
+          echo "$NOTES" > /tmp/release_notes.md
+        env:
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-release-notes
+          path: /tmp/release_notes.md
+          retention-days: 1
 
   build-macos-arm64:
     name: Build macOS (arm64)
@@ -289,9 +374,16 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Download all artifacts
+      - name: Download release notes
         uses: actions/download-artifact@v4
         with:
+          name: nightly-release-notes
+          path: /tmp/
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-*
           path: artifacts/
 
       - name: Collect artifacts
@@ -319,9 +411,7 @@ jobs:
         with:
           tag_name: nightly-${{ needs.prepare.outputs.version }}
           name: "Nightly ${{ needs.prepare.outputs.version }}"
-          body: |
-            Automated nightly build from `dev` branch.
-            Version: ${{ needs.prepare.outputs.version }}
+          body_path: /tmp/release_notes.md
           draft: false
           prerelease: true
           files: |
