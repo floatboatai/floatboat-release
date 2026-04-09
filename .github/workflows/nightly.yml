@@ -107,21 +107,30 @@ jobs:
             exit 0
           fi
 
-          PROMPT="You are generating nightly build notes for Floatboat Desktop ${VERSION}.
+          PROMPT="You are writing public-facing nightly build notes for Floatboat Desktop ${VERSION}.
 
-          Below are the changes from the last 24 hours. Summarize them as a concise changelog in bilingual format (Chinese + English).
+          Below is internal development data from the last 24 hours. Transform it into user-friendly update notes. Important rules:
+          - Write from the USER's perspective (what they gain), not the developer's perspective
+          - Do NOT expose commit hashes, PR numbers, branch names, internal module names, file paths, or implementation details
+          - Do NOT mention refactoring, code cleanup, or internal architecture changes unless they improve user experience
+          - Skip CI/docs/test/chore changes entirely
+          - If a change is purely internal with no user-visible impact, omit it
+          - Use bilingual format (Chinese + English), Chinese first
+          - Keep each item to one concise line
+          - If all changes are internal, just write a brief note saying this is a routine nightly build with stability improvements
 
-          Rules:
-          - Group by: 新功能/Features, 修复/Fixes, 改进/Improvements
-          - One line per change, keep it brief
-          - Skip CI/chore/docs unless significant
-          - If changes are minor, say so briefly
+          Format:
+          ## 每日构建 / Nightly Build ${VERSION}
+          ### ✨ 新功能 / New Features
+          - 中文描述 / English description
+          ### 🐛 问题修复 / Bug Fixes
+          - 中文描述 / English description
+          ### 💪 体验优化 / Improvements
+          - 中文描述 / English description
 
-          Recent commits (${COMMIT_COUNT}):
-          ${COMMITS}
-
-          Merged PRs (${PR_COUNT}):
-          ${PR_DATA}"
+          Internal data (${COMMIT_COUNT} commits, ${PR_COUNT} PRs):
+          Commits: ${COMMITS}
+          PRs: ${PR_DATA}"
 
           NOTES=""
           for attempt in 1 2 3; do

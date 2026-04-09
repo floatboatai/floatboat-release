@@ -98,20 +98,27 @@ jobs:
             RELEASE_TYPE="Official Release"
           fi
 
-          PROMPT="You are generating release notes for Floatboat Desktop v${VERSION} (${RELEASE_TYPE}, previous release: ${PREV_TAG}).
+          PROMPT="You are writing public-facing release notes for Floatboat Desktop v${VERSION} (${RELEASE_TYPE}).
 
-          Below are ${PR_COUNT} merged pull requests with their titles and descriptions. Generate bilingual (Chinese + English) release notes. Output Chinese section first, then English section. Group by category (features, bug fixes, improvements). Use markdown format. Keep it brief - one line per change. Skip CI/docs/chore changes unless significant.
+          Below is internal development data (PR titles and descriptions). Your job is to transform these into user-friendly release notes. Important rules:
+          - Write from the USER's perspective (what they gain), not the developer's perspective
+          - Do NOT expose PR numbers, branch names, internal module names, file paths, or implementation details
+          - Do NOT mention refactoring, code cleanup, or internal architecture changes unless they improve user experience
+          - Skip CI/docs/test/chore changes entirely
+          - If a change is purely internal with no user-visible impact, omit it
+          - Use bilingual format (Chinese + English), Chinese first
+          - Keep each item to one concise line describing the user benefit
 
           Format:
           ## 更新内容 / What's Changed
-          ### 新功能 / Features
+          ### ✨ 新功能 / New Features
           - 中文描述 / English description
-          ### 问题修复 / Bug Fixes
+          ### 🐛 问题修复 / Bug Fixes
           - 中文描述 / English description
-          ### 改进 / Improvements
+          ### 💪 体验优化 / Improvements
           - 中文描述 / English description
 
-          PRs:
+          Internal data (${PR_COUNT} PRs since ${PREV_TAG}):
           ${PR_DATA}"
 
           NOTES=""
