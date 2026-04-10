@@ -358,6 +358,19 @@ jobs:
           NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
 
+      - name: Normalize EXE filename (spaces to dashes)
+        shell: bash
+        run: |
+          find out/make -name "*.exe" | while read f; do
+            dir=$(dirname "$f")
+            base=$(basename "$f")
+            newname=$(echo "$base" | tr ' ' '-')
+            if [ "$base" != "$newname" ]; then
+              mv "$f" "$dir/$newname"
+              echo "Renamed: $base -> $newname"
+            fi
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
