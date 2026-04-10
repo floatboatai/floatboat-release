@@ -63,93 +63,31 @@ jobs:
           "
           echo "✅ package.json version set to $VERSION"
 
-      - name: Collect PR descriptions since last release
-        id: prs
-        run: |
-          VERSION="${{ inputs.version }}"
-          PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "v${VERSION}" | head -1)
-          if [ -z "$PREV_TAG" ]; then
-            echo "No previous tag found, using all merged PRs from last 30 days"
-            PR_DATA=$(gh pr list --repo "${{ vars.SOURCE_REPO }}" --state merged --limit 50 --json number,title,body --jq '[.[] | {number, title, body: (.body // "" | .[0:500])}]')
-          else
-            echo "Previous tag: $PREV_TAG"
-            SINCE=$(git log -1 --format=%aI "$PREV_TAG")
-            PR_DATA=$(gh pr list --repo "${{ vars.SOURCE_REPO }}" --state merged --search "merged:>=$SINCE" --limit 50 --json number,title,body --jq '[.[] | {number, title, body: (.body // "" | .[0:500])}]')
-          fi
-          echo "$PR_DATA" > /tmp/pr_data.json
-          echo "pr_count=$(echo "$PR_DATA" | jq length)" >> $GITHUB_OUTPUT
-          echo "prev_tag=${PREV_TAG:-none}" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+      # --- Changelog generation disabled ---
+      # To re-enable: uncomment the "Collect PR descriptions" and "Generate release notes with AI" steps below
+      #
+      # - name: Collect PR descriptions since last release
+      #   id: prs
+      #   run: |
+      #     VERSION="${{ inputs.version }}"
+      #     PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "v${VERSION}" | head -1)
+      #     ...
+      #
+      # - name: Generate release notes with AI
+      #   id: changelog
+      #   continue-on-error: true
+      #   run: |
+      #     ...
 
-      - name: Generate release notes with AI
-        id: changelog
-        continue-on-error: true
+      - name: Generate placeholder release notes
         run: |
           VERSION="${{ inputs.version }}"
           IS_RC="${{ inputs.is_rc }}"
-          PREV_TAG="${{ steps.prs.outputs.prev_tag }}"
-          PR_COUNT="${{ steps.prs.outputs.pr_count }}"
-          PR_DATA=$(cat /tmp/pr_data.json)
-
           if [ "$IS_RC" == "true" ]; then
-            RELEASE_TYPE="Release Candidate"
+            echo "Release Candidate v${VERSION}" > /tmp/release_notes.md
           else
-            RELEASE_TYPE="Official Release"
+            echo "Release v${VERSION}" > /tmp/release_notes.md
           fi
-
-          PROMPT="You are writing public-facing release notes for Floatboat Desktop v${VERSION} (${RELEASE_TYPE}).
-
-          Below is internal development data (PR titles and descriptions). Your job is to transform these into user-friendly release notes. Important rules:
-          - Write from the USER's perspective (what they gain), not the developer's perspective
-          - Do NOT expose PR numbers, branch names, internal module names, file paths, or implementation details
-          - Do NOT mention refactoring, code cleanup, or internal architecture changes unless they improve user experience
-          - Skip CI/docs/test/chore changes entirely
-          - If a change is purely internal with no user-visible impact, omit it
-          - Use bilingual format (Chinese + English), Chinese first
-          - Keep each item to one concise line describing the user benefit
-
-          Format:
-          ## 更新内容 / What's Changed
-          ### ✨ 新功能 / New Features
-          - 中文描述 / English description
-          ### 🐛 问题修复 / Bug Fixes
-          - 中文描述 / English description
-          ### 💪 体验优化 / Improvements
-          - 中文描述 / English description
-
-          Internal data (${PR_COUNT} PRs since ${PREV_TAG}):
-          ${PR_DATA}"
-
-          NOTES=""
-          for attempt in 1 2 3; do
-            echo "AI API attempt ${attempt}/3..."
-            RESPONSE=$(curl -s --max-time 600 -X POST "${{ vars.AI_API_ENDPOINT }}" \
-              -H "Content-Type: application/json" \
-              -H "x-api-key: $AI_API_KEY" \
-              -H "anthropic-version: 2023-06-01" \
-              -d "$(jq -n \
-                --arg model "${{ vars.AI_MODEL }}" \
-                --arg prompt "$PROMPT" \
-                '{model: $model, max_tokens: 2048, messages: [{role: "user", content: $prompt}]}')")
-            NOTES=$(echo "$RESPONSE" | jq -r '.content[0].text // empty')
-            if [ -n "$NOTES" ]; then
-              echo "✅ AI API succeeded on attempt ${attempt}"
-              break
-            fi
-            echo "⚠️ Attempt ${attempt} failed: $(echo "$RESPONSE" | jq -r '.error.message // "unknown error"')"
-            [ "$attempt" -lt 3 ] && sleep 5
-          done
-
-          if [ -z "$NOTES" ]; then
-            echo "❌ AI API failed after 3 attempts, falling back to PR list"
-            NOTES="## Changes in v${VERSION}\n\n"
-            NOTES+=$(echo "$PR_DATA" | jq -r '.[] | "- #\(.number) \(.title)"')
-          fi
-
-          echo "$NOTES" > /tmp/release_notes.md
-        env:
-          AI_API_KEY: ${{ secrets.AI_API_KEY }}
 
       - name: Upload release notes artifact
         uses: actions/upload-artifact@v4
