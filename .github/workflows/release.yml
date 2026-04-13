@@ -429,6 +429,54 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # ===========================================
+      # S3 Deploy (official releases only)
+      # ===========================================
+      - name: Configure AWS Credentials
+        if: inputs.is_rc == false
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload installers to S3
+        if: inputs.is_rc == false
+        run: |
+          echo "📤 Uploading installers to S3..."
+
+          # Upload all installer files
+          for f in out/make/*.dmg out/make/*.zip out/make/*.exe; do
+            [ -f "$f" ] || continue
+            filename=$(basename "$f")
+            echo "  Uploading: $filename"
+            aws s3 cp "$f" "s3://aoe-desktop-releases/$filename" --no-progress
+          done
+
+          # Upload update metadata
+          for f in dist/latest-mac.yml dist/latest.yml; do
+            [ -f "$f" ] || continue
+            filename=$(basename "$f")
+            echo "  Uploading: $filename"
+            aws s3 cp "$f" "s3://aoe-desktop-releases/$filename" --no-progress
+          done
+
+          echo ""
+          echo "✅ S3 upload complete. Uploaded files:"
+          aws s3 ls "s3://aoe-desktop-releases/" | grep "${{ inputs.version }}" || true
+          aws s3 ls "s3://aoe-desktop-releases/latest" || true
+
+      - name: Invalidate CloudFront cache
+        if: inputs.is_rc == false
+        run: |
+          INVALIDATION=$(aws cloudfront create-invalidation \
+            --distribution-id EOFLQQ0A8KCX1 \
+            --paths "/latest.yml" "/latest-mac.yml" \
+            --output json)
+
+          echo "$INVALIDATION" | jq '{Id: .Invalidation.Id, Status: .Invalidation.Status, CreateTime: .Invalidation.CreateTime}'
+          echo "✅ CloudFront invalidation created"
+
   # ===========================================
   # Release Summary
   # ===========================================
@@ -451,5 +499,9 @@ jobs:
           echo "   Windows x64:  ${{ needs.build-windows.result || 'skipped' }}"
           echo ""
           echo "📤 Upload:       ${{ needs.upload.result || 'skipped' }}"
+          if [ "${{ inputs.is_rc }}" != "true" ]; then
+          echo "☁️  S3 Deploy:    included in upload job"
+          echo "🌐 CDN:          https://release.aoe.chat/"
+          fi
           echo ""
           echo "🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
