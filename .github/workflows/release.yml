@@ -580,7 +580,7 @@ jobs:
         run: |
           INVALIDATION=$(aws cloudfront create-invalidation \
             --distribution-id EOFLQQ0A8KCX1 \
-            --paths "/latest.yml" "/latest-mac.yml" \
+            --paths "/*" \
             --output json)
 
           echo "$INVALIDATION" | jq '{Id: .Invalidation.Id, Status: .Invalidation.Status, CreateTime: .Invalidation.CreateTime}'
