@@ -170,37 +170,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/macos-arm64
-          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) ! -name "*with-e2e-recorder*" -exec cp {} dist/macos-arm64/ \;
+          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} dist/macos-arm64/ \;
           echo "✅ macOS arm64 production artifacts:"
           find dist/macos-arm64 -maxdepth 1 -type f | while read f; do echo "  - $(basename "$f")"; done
-          rm -rf out/make
-
-      - name: Build and package (arm64 with e2e-recorder)
-        run: |
-          pnpm run bundle:e2e-recorder
-          pnpm run forge:make:arm64
-        env:
-          NODE_OPTIONS: --max-old-space-size=8192
-          BUILD_OBFUSCATE: "true"
-          INCLUDE_E2E_RECORDER: "true"
-          ENABLE_E2E_PLAYWRIGHT_ELECTRON: "true"
-          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
-          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
-
-      - name: Collect arm64 e2e-recorder artifacts
-        shell: bash
-        run: |
-          mkdir -p dist/macos-arm64
-          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) | while read f; do
-            base=$(basename "$f")
-            ext="${base##*.}"
-            stem="${base%.*}"
-            cp "$f" "dist/macos-arm64/${stem}-with-e2e-recorder.${ext}"
-          done
-          echo "✅ macOS arm64 e2e-recorder artifacts:"
-          find dist/macos-arm64 -maxdepth 1 -type f -name "*with-e2e-recorder.*" | while read f; do echo "  - $(basename "$f")"; done
 
       - name: Upload arm64 artifacts
         uses: actions/upload-artifact@v4
@@ -284,37 +256,9 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist/macos-x64
-          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) ! -name "*with-e2e-recorder*" -exec cp {} dist/macos-x64/ \;
+          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} dist/macos-x64/ \;
           echo "✅ macOS x64 production artifacts:"
           find dist/macos-x64 -maxdepth 1 -type f | while read f; do echo "  - $(basename "$f")"; done
-          rm -rf out/make
-
-      - name: Build and package (x64 with e2e-recorder)
-        run: |
-          pnpm run bundle:e2e-recorder
-          pnpm run forge:make:x64
-        env:
-          NODE_OPTIONS: --max-old-space-size=8192
-          BUILD_OBFUSCATE: "true"
-          INCLUDE_E2E_RECORDER: "true"
-          ENABLE_E2E_PLAYWRIGHT_ELECTRON: "true"
-          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
-          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
-
-      - name: Collect x64 e2e-recorder artifacts
-        shell: bash
-        run: |
-          mkdir -p dist/macos-x64
-          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) | while read f; do
-            base=$(basename "$f")
-            ext="${base##*.}"
-            stem="${base%.*}"
-            cp "$f" "dist/macos-x64/${stem}-with-e2e-recorder.${ext}"
-          done
-          echo "✅ macOS x64 e2e-recorder artifacts:"
-          find dist/macos-x64 -maxdepth 1 -type f -name "*with-e2e-recorder.*" | while read f; do echo "  - $(basename "$f")"; done
 
       - name: Upload x64 artifacts
         uses: actions/upload-artifact@v4
@@ -385,38 +329,10 @@ jobs:
               echo "Renamed: $base -> $newname"
             fi
           done
-          PROD_EXE=$(find out/make -type f -name "*.exe" ! -name "*with-e2e-recorder*" | head -1)
+          PROD_EXE=$(find out/make -type f -name "*.exe" | head -1)
           [ -n "$PROD_EXE" ] || { echo "Production EXE not found"; exit 1; }
           cp "$PROD_EXE" "dist/windows/"
           echo "✅ Production Windows artifact: $(basename "$PROD_EXE")"
-
-      - name: Build and package (with e2e-recorder)
-        run: |
-          pnpm run bundle:e2e-recorder
-          pnpm run build:windows:installer
-        env:
-          BUILD_OBFUSCATE: "true"
-          INCLUDE_E2E_RECORDER: "true"
-          ENABLE_E2E_PLAYWRIGHT_ELECTRON: "true"
-
-      - name: Collect e2e-recorder Windows artifact
-        shell: bash
-        run: |
-          mkdir -p dist/windows
-          find out/make -name "*.exe" | while read f; do
-            dir=$(dirname "$f")
-            base=$(basename "$f")
-            newname=$(echo "$base" | tr ' ' '-')
-            if [ "$base" != "$newname" ]; then
-              mv "$f" "$dir/$newname"
-              echo "Renamed: $base -> $newname"
-            fi
-          done
-          E2E_EXE=$(find out/make -type f -name "*.exe" | head -1)
-          [ -n "$E2E_EXE" ] || { echo "E2E EXE not found"; exit 1; }
-          E2E_NAME="$(basename "${E2E_EXE%.exe}")-with-e2e-recorder.exe"
-          cp "$E2E_EXE" "dist/windows/$E2E_NAME"
-          echo "✅ E2E Windows artifact: $E2E_NAME"
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -507,7 +423,7 @@ jobs:
           chmod +x scripts/generate-latest-yml.sh
           rm -rf meta-work
           mkdir -p meta-work/out/make meta-work/dist
-          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) ! -name "*with-e2e-recorder*" -exec cp {} meta-work/out/make/ \;
+          find out/make -type f \( -name "*.dmg" -o -name "*.zip" \) -exec cp {} meta-work/out/make/ \;
           (
             cd meta-work
             ../scripts/generate-latest-yml.sh --platform mac
@@ -518,7 +434,7 @@ jobs:
         if: needs.build-windows.result == 'success'
         run: |
           chmod +x scripts/generate-latest-yml.sh
-          EXE_FILE=$(find out/make -name "*.exe" ! -name "*with-e2e-recorder*" | head -1)
+          EXE_FILE=$(find out/make -name "*.exe" | head -1)
           [ -n "$EXE_FILE" ] && ./scripts/generate-latest-yml.sh --platform win "$EXE_FILE"
 
       - name: Create GitHub Release
