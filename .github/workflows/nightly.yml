@@ -291,38 +291,10 @@ jobs:
               echo "Renamed: $base -> $newname"
             fi
           done
-          PROD_EXE=$(find out/make -type f -name "*.exe" ! -name "*with-e2e-recorder*" | head -1)
+          PROD_EXE=$(find out/make -type f -name "*.exe" | head -1)
           [ -n "$PROD_EXE" ] || { echo "Production EXE not found"; exit 1; }
           cp "$PROD_EXE" "dist/windows/"
           echo "✅ Production Windows artifact: $(basename "$PROD_EXE")"
-
-      - name: Build and package (with e2e-recorder)
-        run: |
-          pnpm run bundle:e2e-recorder
-          pnpm run build:windows:installer
-        env:
-          BUILD_OBFUSCATE: "true"
-          INCLUDE_E2E_RECORDER: "true"
-          ENABLE_E2E_PLAYWRIGHT_ELECTRON: "true"
-
-      - name: Collect e2e-recorder Windows artifact
-        shell: bash
-        run: |
-          mkdir -p dist/windows
-          find out/make -name "*.exe" | while read f; do
-            dir=$(dirname "$f")
-            base=$(basename "$f")
-            newname=$(echo "$base" | tr ' ' '-')
-            if [ "$base" != "$newname" ]; then
-              mv "$f" "$dir/$newname"
-              echo "Renamed: $base -> $newname"
-            fi
-          done
-          E2E_EXE=$(find out/make -type f -name "*.exe" | head -1)
-          [ -n "$E2E_EXE" ] || { echo "E2E EXE not found"; exit 1; }
-          E2E_NAME="$(basename "${E2E_EXE%.exe}")-with-e2e-recorder.exe"
-          cp "$E2E_EXE" "dist/windows/$E2E_NAME"
-          echo "✅ E2E Windows artifact: $E2E_NAME"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -378,7 +350,7 @@ jobs:
         if: needs.build-windows.result == 'success'
         run: |
           chmod +x scripts/generate-latest-yml.sh
-          EXE_FILE=$(find out/make -name "*.exe" ! -name "*with-e2e-recorder*" | head -1)
+          EXE_FILE=$(find out/make -name "*.exe" | head -1)
           [ -n "$EXE_FILE" ] && ./scripts/generate-latest-yml.sh --platform win "$EXE_FILE"
 
       - name: Create Nightly Release
