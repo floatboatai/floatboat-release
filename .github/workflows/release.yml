@@ -25,6 +25,11 @@ on:
         required: false
         default: true
         type: boolean
+      windows_msstore:
+        description: 'Also build Windows AppX for Microsoft Store submission'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -341,6 +346,38 @@ jobs:
           path: |
             dist/windows/*.exe
           retention-days: 3
+          if-no-files-found: error
+
+      # ---------- Microsoft Store AppX ----------
+      # 复用上面 forge:make 的 prepackaged dir (out/Floatboat-win32-x64/)，仅重新跑 electron-builder 的 appx target。
+      - name: Build Microsoft Store AppX
+        if: ${{ inputs.windows_msstore }}
+        run: pnpm run build:windows:appx
+        env:
+          SKIP_FORGE_PACKAGE: "true"
+          BUILD_OBFUSCATE: "true"
+          MSSTORE_IDENTITY_NAME: ${{ secrets.MSSTORE_IDENTITY_NAME }}
+          MSSTORE_PUBLISHER: ${{ secrets.MSSTORE_PUBLISHER }}
+          MSSTORE_PUBLISHER_DISPLAY: ${{ vars.MSSTORE_PUBLISHER_DISPLAY }}
+
+      - name: Collect AppX artifact
+        if: ${{ inputs.windows_msstore }}
+        shell: bash
+        run: |
+          mkdir -p dist/windows-appx
+          APPX_FILE=$(find out/make -type f -name "*.appx" | head -1)
+          [ -n "$APPX_FILE" ] || { echo "AppX file not found"; exit 1; }
+          cp "$APPX_FILE" "dist/windows-appx/"
+          echo "✅ Microsoft Store AppX: $(basename "$APPX_FILE")"
+
+      - name: Upload AppX artifact
+        if: ${{ inputs.windows_msstore }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64-appx
+          path: |
+            dist/windows-appx/*.appx
+          retention-days: 30
           if-no-files-found: error
 
   # ===========================================
