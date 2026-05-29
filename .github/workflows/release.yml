@@ -41,6 +41,8 @@ jobs:
       version: ${{ inputs.version }}
       is_rc: ${{ inputs.is_rc }}
       platforms: ${{ inputs.platforms }}
+      changelog_file: ${{ steps.changelog.outputs.changelog_file }}
+      prev_tag: ${{ steps.changelog.outputs.prev_tag }}
 
     steps:
       - name: Checkout source repo
@@ -63,38 +65,106 @@ jobs:
           "
           echo "✅ package.json version set to $VERSION"
 
-      # --- Changelog generation disabled ---
-      # To re-enable: uncomment the "Collect PR descriptions" and "Generate release notes with AI" steps below
-      #
-      # - name: Collect PR descriptions since last release
-      #   id: prs
-      #   run: |
-      #     VERSION="${{ inputs.version }}"
-      #     PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "v${VERSION}" | head -1)
-      #     ...
-      #
-      # - name: Generate release notes with AI
-      #   id: changelog
-      #   continue-on-error: true
-      #   run: |
-      #     ...
-
-      - name: Generate placeholder release notes
+      - name: Generate changelog
+        id: changelog
         run: |
+          set -e
           VERSION="${{ inputs.version }}"
           IS_RC="${{ inputs.is_rc }}"
+          CURRENT_TAG="v${VERSION}"
+
+          echo "🔍 Finding previous tag for ${CURRENT_TAG} (is_rc=${IS_RC})"
+
           if [ "$IS_RC" == "true" ]; then
-            echo "Release Candidate v${VERSION}" > /tmp/release_notes.md
+            # Extract base version (e.g., 0.4.1 from 0.4.1-rc.12)
+            BASE_VERSION=$(echo "$VERSION" | sed 's/-rc\.[0-9]*$//')
+            # Find previous RC for this base version
+            PREV_TAG=$(git tag -l "v${BASE_VERSION}-rc.*" --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -1)
+            if [ -z "$PREV_TAG" ]; then
+              # First RC: compare to previous official release
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+              echo "  → First RC for ${BASE_VERSION}, comparing to previous release: ${PREV_TAG:-none}"
+            else
+              echo "  → Previous RC: ${PREV_TAG}"
+            fi
           else
-            echo "Release v${VERSION}" > /tmp/release_notes.md
+            # Official release: find previous official release
+            PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${CURRENT_TAG}$" | head -1)
+            echo "  → Previous release: ${PREV_TAG:-none}"
           fi
 
-      - name: Upload release notes artifact
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG_FILE="changelog-initial-${CURRENT_TAG}.md"
+          else
+            CHANGELOG_FILE="changelog-${PREV_TAG}-${CURRENT_TAG}.md"
+          fi
+
+          echo "changelog_file=${CHANGELOG_FILE}" >> $GITHUB_OUTPUT
+          echo "prev_tag=${PREV_TAG}" >> $GITHUB_OUTPUT
+
+          # Generate changelog content
+          {
+            if [ "$IS_RC" == "true" ]; then
+              echo "# Release Candidate ${CURRENT_TAG}"
+            else
+              echo "# Release ${CURRENT_TAG}"
+            fi
+            echo ""
+
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Changes since ${PREV_TAG}:**"
+              echo ""
+              git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200
+            else
+              echo "_This is the initial release — no previous tag found._"
+            fi
+
+            echo ""
+            echo "---"
+            echo "*Generated $(date -u '+%Y-%m-%d %H:%M UTC') · [View on GitHub](https://github.com/${{ github.repository }}/releases/tag/${CURRENT_TAG})*"
+          } > "/tmp/${CHANGELOG_FILE}"
+
+          echo ""
+          echo "✅ Changelog: ${CHANGELOG_FILE}"
+          echo "--- Content preview ---"
+          head -30 "/tmp/${CHANGELOG_FILE}"
+          echo "---"
+
+      - name: Commit changelog to source repo
+        continue-on-error: true
+        run: |
+          CHANGELOG_FILE="${{ steps.changelog.outputs.changelog_file }}"
+          SOURCE_REPO="${{ vars.SOURCE_REPO }}"
+          PAT="${{ secrets.SOURCE_REPO_PAT }}"
+
+          echo "📝 Committing ${CHANGELOG_FILE} to source repo..."
+
+          TMPDIR_CLONE=$(mktemp -d)
+          git clone "https://x-access-token:${PAT}@github.com/${SOURCE_REPO}.git" \
+            "$TMPDIR_CLONE" --branch dev --depth 1 --quiet
+
+          mkdir -p "$TMPDIR_CLONE/changelogs"
+          cp "/tmp/${CHANGELOG_FILE}" "$TMPDIR_CLONE/changelogs/${CHANGELOG_FILE}"
+
+          cd "$TMPDIR_CLONE"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "changelogs/${CHANGELOG_FILE}"
+
+          if git diff --staged --quiet; then
+            echo "ℹ️  Changelog already exists in repo, skipping commit"
+          else
+            git commit -m "chore: add ${CHANGELOG_FILE}"
+            git push origin dev
+            echo "✅ Changelog committed to dev branch"
+          fi
+
+      - name: Upload changelog artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-notes
-          path: /tmp/release_notes.md
-          retention-days: 1
+          name: release-changelog
+          path: /tmp/changelog-*.md
+          retention-days: 7
 
   # ===========================================
   # macOS Build - arm64 (Apple Silicon)
@@ -380,11 +450,11 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Download release notes
+      - name: Download changelog
         uses: actions/download-artifact@v4
         with:
-          name: release-notes
-          path: /tmp/
+          name: release-changelog
+          path: /tmp/changelog/
 
       - name: Download macOS arm64 artifacts
         if: needs.build-macos-arm64.result == 'success'
@@ -455,12 +525,23 @@ jobs:
           EXE_FILE=$(find out/make -name "*.exe" | head -1)
           [ -n "$EXE_FILE" ] && ./scripts/generate-latest-yml.sh --platform win "$EXE_FILE"
 
+      - name: Resolve changelog path for release body
+        id: release_body
+        run: |
+          CHANGELOG=$(find /tmp/changelog -name "changelog-*.md" 2>/dev/null | head -1)
+          if [ -n "$CHANGELOG" ]; then
+            echo "path=${CHANGELOG}" >> $GITHUB_OUTPUT
+          else
+            echo "Release v${{ inputs.version }}" > /tmp/release_notes.md
+            echo "path=/tmp/release_notes.md" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
           name: ${{ inputs.is_rc == true && format('RC v{0}', inputs.version) || format('Release v{0}', inputs.version) }}
-          body_path: /tmp/release_notes.md
+          body_path: ${{ steps.release_body.outputs.path }}
           draft: false
           prerelease: ${{ inputs.is_rc }}
           files: |
@@ -521,7 +602,7 @@ jobs:
           echo "✅ CloudFront invalidation created"
 
   # ===========================================
-  # Release Summary
+  # Release Summary & Feishu Notification
   # ===========================================
   notify:
     name: Release Summary
@@ -530,6 +611,13 @@ jobs:
     if: always()
 
     steps:
+      - name: Download changelog
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: release-changelog
+          path: /tmp/changelog/
+
       - name: Summary
         run: |
           echo "=========================================="
@@ -548,3 +636,76 @@ jobs:
           fi
           echo ""
           echo "🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
+
+      - name: Send Feishu notification
+        run: |
+          python3 << 'PYEOF'
+          import json, urllib.request, glob, os, sys
+
+          version = "${{ inputs.version }}"
+          is_rc = "${{ inputs.is_rc }}" == "true"
+          repo = "${{ github.repository }}"
+          prev_tag = "${{ needs.prepare.outputs.prev_tag }}"
+
+          macos_arm64 = "${{ needs.build-macos-arm64.result }}" or "skipped"
+          macos_x64   = "${{ needs.build-macos-x64.result }}"   or "skipped"
+          windows     = "${{ needs.build-windows.result }}"     or "skipped"
+          upload      = "${{ needs.upload.result }}"            or "skipped"
+
+          # Read changelog
+          changelog_files = glob.glob("/tmp/changelog/changelog-*.md")
+          if changelog_files:
+              with open(changelog_files[0], encoding="utf-8") as f:
+                  changelog = f.read()
+          else:
+              changelog = "_Changelog not available._"
+
+          # Truncate to stay within Feishu message limits (~4000 chars for text)
+          MAX_LEN = 3500
+          if len(changelog) > MAX_LEN:
+              changelog = changelog[:MAX_LEN] + "\n\n_...(内容已截断，完整版见 Release 页)_"
+
+          def icon(s):
+              return {"success": "✅", "failure": "❌", "cancelled": "⏹️", "skipped": "⏭️"}.get(s, "❓")
+
+          emoji = "🚧" if is_rc else "🎉"
+          release_type = "RC 预发布" if is_rc else "正式发布"
+          range_hint = f"  (since {prev_tag})" if prev_tag else ""
+
+          text = f"""{emoji} AOE Desktop {release_type} v{version}
+
+          构建结果：
+            macOS arm64：{icon(macos_arm64)} {macos_arm64}
+            macOS x64：  {icon(macos_x64)} {macos_x64}
+            Windows x64：{icon(windows)} {windows}
+            上传：       {icon(upload)} {upload}
+
+          🔗 https://github.com/{repo}/releases/tag/v{version}
+
+          ────────────────────────
+          {changelog}"""
+
+          # De-indent (Python heredoc adds leading spaces)
+          import textwrap
+          text = textwrap.dedent(text).strip()
+
+          payload = json.dumps({
+              "msg_type": "text",
+              "content": {"text": text}
+          }, ensure_ascii=False)
+
+          webhook_url = "${{ secrets.FEISHU_WEBHOOK_URL }}"
+          req = urllib.request.Request(
+              webhook_url,
+              data=payload.encode("utf-8"),
+              headers={"Content-Type": "application/json; charset=utf-8"},
+              method="POST"
+          )
+          try:
+              with urllib.request.urlopen(req, timeout=15) as resp:
+                  body = resp.read().decode()
+                  print(f"✅ Feishu response: {body}")
+          except Exception as e:
+              print(f"⚠️  Feishu notification failed: {e}", file=sys.stderr)
+              sys.exit(1)
+          PYEOF
