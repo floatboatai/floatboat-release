@@ -297,6 +297,33 @@ jobs:
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
 
+      - name: Prepare Windows numeric file version
+        id: windows_version
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          FILE_VERSION=$(node -e "
+            const version = process.env.VERSION;
+            const match = version.match(/^(\\d+)\\.(\\d+)\\.(\\d+)(?:-.+?(\\d+))?$/);
+            if (!match) throw new Error('Unsupported Windows RC version: ' + version);
+            console.log([match[1], match[2], match[3], match[4] || process.env.GITHUB_RUN_NUMBER].join('.'));
+          ")
+          echo "file_version=$FILE_VERSION" >> "$GITHUB_OUTPUT"
+
+          node <<'NODE'
+          const fs = require('fs');
+          const configPath = 'forge.config.ts';
+          const source = fs.readFileSync(configPath, 'utf8');
+          const marker = '  packagerConfig: {\n';
+          if (!source.includes(marker)) {
+            throw new Error('Unable to locate packagerConfig block in forge.config.ts');
+          }
+          const injection = `  packagerConfig: {\n    ...(process.platform === 'win32' && process.env.AOE_WINDOWS_FILE_VERSION\n      ? { appVersion: process.env.AOE_WINDOWS_FILE_VERSION, buildVersion: process.env.AOE_WINDOWS_FILE_VERSION }\n      : {}),\n`;
+          fs.writeFileSync(configPath, source.replace(marker, injection));
+          NODE
+        env:
+          VERSION: ${{ inputs.version }}
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
@@ -316,6 +343,7 @@ jobs:
         env:
           NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
+          AOE_WINDOWS_FILE_VERSION: ${{ steps.windows_version.outputs.file_version }}
           SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
           SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
           SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
