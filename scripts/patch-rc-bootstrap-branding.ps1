@@ -80,15 +80,6 @@ FunctionEnd
   )
 }
 
-$oldDownloadDone = @"
-  SendMessage `$ProgressBarHandle `${PBM_SETPOS} 10000 0
-  DetailPrint "`$(TXT_VERIFYING)"
-
-  !insertmacro SendEvent "download_complete"
-
-  DetailPrint "`$(TXT_LAUNCHING)"
-"@
-
 $newDownloadDone = @"
   !insertmacro RefreshDownloadUi
   SendMessage `$ProgressBarHandle `${PBM_SETPOS} 10000 0
@@ -100,8 +91,15 @@ $newDownloadDone = @"
   DetailPrint "`$(TXT_LAUNCHING)"
 "@
 
-if ($source.Contains($oldDownloadDone)) {
-  $source = $source.Replace($oldDownloadDone, $newDownloadDone)
+$downloadDonePattern = '(?m)^  SendMessage \$ProgressBarHandle \$\{PBM_SETPOS\} 10000 0\r?\n  DetailPrint "\$\(TXT_VERIFYING\)"\r?\n\r?\n  !insertmacro SendEvent "download_complete"\r?\n\r?\n  DetailPrint "\$\(TXT_LAUNCHING\)"'
+
+if ([regex]::IsMatch($source, $downloadDonePattern)) {
+  $source = [regex]::Replace(
+    $source,
+    $downloadDonePattern,
+    [System.Text.RegularExpressions.MatchEvaluator] { param($match) $newDownloadDone.TrimEnd() },
+    1
+  )
 } elseif (-not $source.Contains('DetailPrint "$(TXT_READY_TO_LAUNCH)"')) {
   throw "Unable to patch DownloadDone completion state in $nsiPath"
 }
