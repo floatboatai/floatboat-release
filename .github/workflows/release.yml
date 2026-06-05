@@ -121,7 +121,7 @@ jobs:
 
             echo ""
             echo "---"
-            echo "*Generated $(date -u '+%Y-%m-%d %H:%M UTC') · [View on GitHub](https://github.com/${{ github.repository }}/releases/tag/${CURRENT_TAG})*"
+            echo "*Generated $(date -u '+%Y-%m-%d %H:%M UTC') · Internal release note for Feishu notification only.*"
           } > "/tmp/${CHANGELOG_FILE}"
 
           echo ""
@@ -129,35 +129,6 @@ jobs:
           echo "--- Content preview ---"
           head -30 "/tmp/${CHANGELOG_FILE}"
           echo "---"
-
-      - name: Commit changelog to source repo
-        continue-on-error: true
-        run: |
-          CHANGELOG_FILE="${{ steps.changelog.outputs.changelog_file }}"
-          SOURCE_REPO="${{ vars.SOURCE_REPO }}"
-          PAT="${{ secrets.SOURCE_REPO_PAT }}"
-
-          echo "📝 Committing ${CHANGELOG_FILE} to source repo..."
-
-          TMPDIR_CLONE=$(mktemp -d)
-          git clone "https://x-access-token:${PAT}@github.com/${SOURCE_REPO}.git" \
-            "$TMPDIR_CLONE" --branch dev --depth 1 --quiet
-
-          mkdir -p "$TMPDIR_CLONE/changelogs"
-          cp "/tmp/${CHANGELOG_FILE}" "$TMPDIR_CLONE/changelogs/${CHANGELOG_FILE}"
-
-          cd "$TMPDIR_CLONE"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "changelogs/${CHANGELOG_FILE}"
-
-          if git diff --staged --quiet; then
-            echo "ℹ️  Changelog already exists in repo, skipping commit"
-          else
-            git commit -m "chore: add ${CHANGELOG_FILE}"
-            git push origin dev
-            echo "✅ Changelog committed to dev branch"
-          fi
 
       - name: Upload changelog artifact
         uses: actions/upload-artifact@v4
@@ -525,23 +496,18 @@ jobs:
           EXE_FILE=$(find out/make -name "*.exe" | head -1)
           [ -n "$EXE_FILE" ] && ./scripts/generate-latest-yml.sh --platform win "$EXE_FILE"
 
-      - name: Resolve changelog path for release body
-        id: release_body
+      - name: Prepare empty public release body
         run: |
-          CHANGELOG=$(find /tmp/changelog -name "changelog-*.md" 2>/dev/null | head -1)
-          if [ -n "$CHANGELOG" ]; then
-            echo "path=${CHANGELOG}" >> $GITHUB_OUTPUT
-          else
-            echo "Release v${{ inputs.version }}" > /tmp/release_notes.md
-            echo "path=/tmp/release_notes.md" >> $GITHUB_OUTPUT
-          fi
+          # Release notes are internal-only and are sent to Feishu in the notify job.
+          # Keep the public GitHub Release body empty to avoid publishing internal notes.
+          : > /tmp/empty-release-body.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
           name: ${{ inputs.is_rc == true && format('RC v{0}', inputs.version) || format('Release v{0}', inputs.version) }}
-          body_path: ${{ steps.release_body.outputs.path }}
+          body_path: /tmp/empty-release-body.md
           draft: false
           prerelease: ${{ inputs.is_rc }}
           files: |
@@ -635,16 +601,20 @@ jobs:
           echo "🌐 CDN:          https://release.aoe.chat/"
           fi
           echo ""
-          echo "🔗 https://github.com/${{ github.repository }}/releases/tag/v${{ inputs.version }}"
+          echo "🔒 Release notes are sent internally to Feishu only."
 
       - name: Send Feishu notification
         run: |
           python3 << 'PYEOF'
-          import json, urllib.request, glob, os, sys
+          import glob
+          import json
+          import sys
+          import textwrap
+          import time
+          import urllib.request
 
           version = "${{ inputs.version }}"
           is_rc = "${{ inputs.is_rc }}" == "true"
-          repo = "${{ github.repository }}"
           prev_tag = "${{ needs.prepare.outputs.prev_tag }}"
 
           macos_arm64 = "${{ needs.build-macos-arm64.result }}" or "skipped"
@@ -652,18 +622,12 @@ jobs:
           windows     = "${{ needs.build-windows.result }}"     or "skipped"
           upload      = "${{ needs.upload.result }}"            or "skipped"
 
-          # Read changelog
           changelog_files = glob.glob("/tmp/changelog/changelog-*.md")
           if changelog_files:
               with open(changelog_files[0], encoding="utf-8") as f:
-                  changelog = f.read()
+                  changelog = f.read().strip()
           else:
               changelog = "_Changelog not available._"
-
-          # Truncate to stay within Feishu message limits (~4000 chars for text)
-          MAX_LEN = 3500
-          if len(changelog) > MAX_LEN:
-              changelog = changelog[:MAX_LEN] + "\n\n_...(内容已截断，完整版见 Release 页)_"
 
           def icon(s):
               return {"success": "✅", "failure": "❌", "cancelled": "⏹️", "skipped": "⏭️"}.get(s, "❓")
@@ -672,7 +636,7 @@ jobs:
           release_type = "RC 预发布" if is_rc else "正式发布"
           range_hint = f"  (since {prev_tag})" if prev_tag else ""
 
-          text = f"""{emoji} AOE Desktop {release_type} v{version}
+          header = f"""{emoji} AOE Desktop {release_type} v{version}
 
           构建结果：
             macOS arm64：{icon(macos_arm64)} {macos_arm64}
@@ -680,32 +644,54 @@ jobs:
             Windows x64：{icon(windows)} {windows}
             上传：       {icon(upload)} {upload}
 
-          🔗 https://github.com/{repo}/releases/tag/v{version}
+          🔒 Release note 仅内部发送到飞书机器人，不写入公开 GitHub Release 页面。
 
           ────────────────────────
-          {changelog}"""
+          Release Note{range_hint}："""
 
-          # De-indent (Python heredoc adds leading spaces)
-          import textwrap
-          text = textwrap.dedent(text).strip()
+          full_text = textwrap.dedent(header).strip() + "\n\n" + changelog
 
-          payload = json.dumps({
-              "msg_type": "text",
-              "content": {"text": text}
-          }, ensure_ascii=False)
+          # Feishu text messages have practical payload limits. Split conservatively
+          # by characters so long release notes are delivered as multiple messages.
+          MAX_CHARS = 3200
 
+          def split_text(text, max_chars):
+              chunks = []
+              remaining = text
+              while len(remaining) > max_chars:
+                  cut = remaining.rfind("\n", 0, max_chars)
+                  if cut < max_chars // 2:
+                      cut = max_chars
+                  chunks.append(remaining[:cut].rstrip())
+                  remaining = remaining[cut:].lstrip()
+              if remaining:
+                  chunks.append(remaining)
+              return chunks or [""]
+
+          chunks = split_text(full_text, MAX_CHARS)
+          total = len(chunks)
           webhook_url = "${{ secrets.FEISHU_WEBHOOK_URL }}"
-          req = urllib.request.Request(
-              webhook_url,
-              data=payload.encode("utf-8"),
-              headers={"Content-Type": "application/json; charset=utf-8"},
-              method="POST"
-          )
-          try:
-              with urllib.request.urlopen(req, timeout=15) as resp:
-                  body = resp.read().decode()
-                  print(f"✅ Feishu response: {body}")
-          except Exception as e:
-              print(f"⚠️  Feishu notification failed: {e}", file=sys.stderr)
-              sys.exit(1)
+
+          for index, chunk in enumerate(chunks, start=1):
+              text = chunk if total == 1 else f"【{index}/{total}】\n{chunk}"
+              payload = json.dumps({
+                  "msg_type": "text",
+                  "content": {"text": text}
+              }, ensure_ascii=False)
+
+              req = urllib.request.Request(
+                  webhook_url,
+                  data=payload.encode("utf-8"),
+                  headers={"Content-Type": "application/json; charset=utf-8"},
+                  method="POST"
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      body = resp.read().decode()
+                      print(f"✅ Feishu response [{index}/{total}]: {body}")
+              except Exception as e:
+                  print(f"⚠️  Feishu notification failed [{index}/{total}]: {e}", file=sys.stderr)
+                  sys.exit(1)
+              if index < total:
+                  time.sleep(0.5)
           PYEOF
