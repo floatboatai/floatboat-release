@@ -286,6 +286,14 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
 
+      - name: Checkout release packaging repo
+        if: ${{ inputs.is_rc }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository }}
+          ref: ${{ github.ref }}
+          path: .floatboat-release
+
       - name: Inject version into package.json
         shell: bash
         run: |
@@ -366,11 +374,20 @@ jobs:
           cp "$PROD_EXE" "dist/windows/"
           echo "✅ Production Windows artifact: $(basename "$PROD_EXE")"
 
+      - name: Prepare RC bootstrap branding
+        if: ${{ inputs.is_rc }}
+        shell: pwsh
+        run: |
+          .\.floatboat-release\scripts\patch-rc-bootstrap-branding.ps1 `
+            -InstallerDir "floatboat-installer\win" `
+            -AssetsDir ".floatboat-release\installer-assets\windows\bootstrap" `
+            -LaunchDelayMs 1500
+
       - name: Build RC bootstrap installer
         if: ${{ inputs.is_rc }}
         shell: pwsh
         env:
-          SETUP_URL: https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/Floatboat-Setup-rc-latest.exe
+          SETUP_URL: https://release.aoe.chat/rc/Floatboat-Setup-rc-latest.exe
           SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
           SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
           SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
@@ -525,6 +542,47 @@ jobs:
           EXE_FILE=$(find out/make -type f -name "*.exe" ! -name "Floatboat-Installer*.exe" ! -name "*latest*.exe" | sort | head -1)
           [ -n "$EXE_FILE" ] && ./scripts/generate-latest-yml.sh --platform win "$EXE_FILE"
 
+      - name: Configure AWS Credentials
+        if: inputs.is_rc == false || (inputs.is_rc == true && needs.build-windows.result == 'success')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload RC Windows bootstrap payload to S3
+        if: inputs.is_rc == true && needs.build-windows.result == 'success'
+        run: |
+          echo "📤 Uploading RC Windows bootstrap payload to S3..."
+
+          SETUP_ALIAS="out/make/Floatboat-Setup-rc-latest.exe"
+          BOOTSTRAP_EXE="out/make/Floatboat-Installer-RC.exe"
+
+          [ -f "$SETUP_ALIAS" ] || { echo "Missing $SETUP_ALIAS"; exit 1; }
+          [ -f "$BOOTSTRAP_EXE" ] || { echo "Missing $BOOTSTRAP_EXE"; exit 1; }
+
+          VERSIONED_SETUP=$(find out/make -type f -name "Floatboat-Setup-${{ inputs.version }}.exe" | sort | head -1)
+          [ -n "$VERSIONED_SETUP" ] || { echo "Missing versioned setup exe"; exit 1; }
+
+          aws s3 cp "$SETUP_ALIAS" "s3://aoe-desktop-releases/rc/Floatboat-Setup-rc-latest.exe" --no-progress
+          aws s3 cp "$VERSIONED_SETUP" "s3://aoe-desktop-releases/rc/$(basename "$VERSIONED_SETUP")" --no-progress
+          aws s3 cp "$BOOTSTRAP_EXE" "s3://aoe-desktop-releases/rc/Floatboat-Installer-RC.exe" --no-progress
+
+          echo "✅ RC CDN assets:"
+          echo "  https://release.aoe.chat/rc/Floatboat-Setup-rc-latest.exe"
+          echo "  https://release.aoe.chat/rc/Floatboat-Installer-RC.exe"
+
+      - name: Invalidate RC CloudFront cache
+        if: inputs.is_rc == true && needs.build-windows.result == 'success'
+        run: |
+          INVALIDATION=$(aws cloudfront create-invalidation \
+            --distribution-id EOFLQQ0A8KCX1 \
+            --paths "/rc/*" \
+            --output json)
+
+          echo "$INVALIDATION" | jq '{Id: .Invalidation.Id, Status: .Invalidation.Status, CreateTime: .Invalidation.CreateTime}'
+          echo "✅ RC CloudFront invalidation created"
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -545,14 +603,6 @@ jobs:
       # ===========================================
       # S3 Deploy (official releases only)
       # ===========================================
-      - name: Configure AWS Credentials
-        if: inputs.is_rc == false
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
-
       - name: Upload installers to S3
         if: inputs.is_rc == false
         run: |
