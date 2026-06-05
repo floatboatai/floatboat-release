@@ -314,7 +314,11 @@ jobs:
       - name: Build and package (production)
         run: pnpm run forge:make
         env:
+          NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
+          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
 
       - name: Collect production Windows artifact
         shell: bash
@@ -333,6 +337,62 @@ jobs:
           [ -n "$PROD_EXE" ] || { echo "Production EXE not found"; exit 1; }
           cp "$PROD_EXE" "dist/windows/"
           echo "✅ Production Windows artifact: $(basename "$PROD_EXE")"
+
+      - name: Build RC bootstrap installer
+        if: ${{ inputs.is_rc }}
+        shell: pwsh
+        env:
+          SETUP_URL: https://github.com/${{ github.repository }}/releases/download/v${{ inputs.version }}/Floatboat-Setup-rc-latest.exe
+          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
+        run: |
+          $setup = Get-ChildItem "dist\windows" -Filter "*.exe" |
+            Where-Object { $_.Name -notlike "Floatboat-Installer*" -and $_.Name -notlike "*latest*" } |
+            Select-Object -First 1
+          if (-not $setup) {
+            throw "Versioned Windows setup exe not found in dist\windows"
+          }
+
+          Copy-Item $setup.FullName "dist\windows\Floatboat-Setup-rc-latest.exe" -Force
+          Write-Host "Created RC setup alias: Floatboat-Setup-rc-latest.exe -> $($setup.Name)"
+
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+          }
+
+          Push-Location "floatboat-installer\win"
+          try {
+            .\build-bootstrap.ps1 `
+              -SetupUrl $env:SETUP_URL `
+              -OutFile "..\..\dist\windows\Floatboat-Installer-RC.exe"
+          } finally {
+            Pop-Location
+          }
+
+          node -e "require('./scripts/signWithRacent.cjs').signFileWithRacent({ projectDir: process.cwd(), filePath: require('node:path').resolve('dist/windows/Floatboat-Installer-RC.exe') })"
+
+      - name: Verify Windows signatures
+        if: ${{ inputs.is_rc }}
+        shell: pwsh
+        run: |
+          $files = @()
+          $mainExe = "out\Floatboat-win32-x64\Floatboat.exe"
+          if (Test-Path $mainExe) {
+            $files += (Get-Item $mainExe)
+          }
+          $files += Get-ChildItem "dist\windows" -Filter "*.exe"
+          if ($files.Count -eq 0) {
+            throw "No Windows executables found for signature verification."
+          }
+
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature $file.FullName
+            Write-Host "$($file.Name): $($signature.Status) $($signature.SignerCertificate.Subject)"
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature: $($file.FullName) ($($signature.Status))"
+            }
+          }
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -434,7 +494,7 @@ jobs:
         if: needs.build-windows.result == 'success'
         run: |
           chmod +x scripts/generate-latest-yml.sh
-          EXE_FILE=$(find out/make -name "*.exe" | head -1)
+          EXE_FILE=$(find out/make -type f -name "*.exe" ! -name "Floatboat-Installer*.exe" ! -name "*latest*.exe" | sort | head -1)
           [ -n "$EXE_FILE" ] && ./scripts/generate-latest-yml.sh --platform win "$EXE_FILE"
 
       - name: Create GitHub Release
