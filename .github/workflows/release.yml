@@ -25,6 +25,11 @@ on:
         required: false
         default: true
         type: boolean
+      notify_only:
+        description: 'Only send the internal Feishu release note; skip build/upload/GitHub Release mutation'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -144,7 +149,7 @@ jobs:
     name: Build macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -230,7 +235,7 @@ jobs:
     name: Build macOS (x64)
     needs: prepare
     runs-on: macos-latest
-    if: contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -316,7 +321,7 @@ jobs:
     name: Build Windows (x64)
     needs: prepare
     runs-on: windows-latest
-    if: contains(inputs.platforms, 'windows')
+    if: inputs.notify_only == false && contains(inputs.platforms, 'windows')
 
     steps:
       - name: Checkout source repo
@@ -410,6 +415,7 @@ jobs:
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows]
     runs-on: ubuntu-latest
     if: |
+      inputs.notify_only == false &&
       always() &&
       (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
 
@@ -670,7 +676,29 @@ jobs:
 
           chunks = split_text(full_text, MAX_CHARS)
           total = len(chunks)
-          webhook_url = "${{ secrets.FEISHU_WEBHOOK_URL }}"
+          webhook_url = "${{ secrets.FEISHU_WEBHOOK_URL }}".strip()
+
+          if not webhook_url or webhook_url == "***":
+              print("❌ FEISHU_WEBHOOK_URL is empty or unavailable", file=sys.stderr)
+              sys.exit(1)
+
+          print(
+              f"📨 Sending internal Feishu release note: version={version}, "
+              f"is_rc={is_rc}, prev_tag={prev_tag or 'none'}, chunks={total}, "
+              f"chars={len(full_text)}"
+          )
+
+          def parse_response(body):
+              try:
+                  return json.loads(body)
+              except json.JSONDecodeError as exc:
+                  raise RuntimeError(f"Feishu returned non-JSON response: {body!r}") from exc
+
+          def assert_feishu_success(data):
+              status_code = data.get("StatusCode")
+              code = data.get("code")
+              if status_code not in (None, 0) or code not in (None, 0):
+                  raise RuntimeError(f"Feishu business error: {data}")
 
           for index, chunk in enumerate(chunks, start=1):
               text = chunk if total == 1 else f"【{index}/{total}】\n{chunk}"
@@ -688,9 +716,14 @@ jobs:
               try:
                   with urllib.request.urlopen(req, timeout=15) as resp:
                       body = resp.read().decode()
-                      print(f"✅ Feishu response [{index}/{total}]: {body}")
+                  data = parse_response(body)
+                  assert_feishu_success(data)
+                  print(
+                      f"✅ Feishu delivered chunk [{index}/{total}] "
+                      f"chars={len(text)} response={data}"
+                  )
               except Exception as e:
-                  print(f"⚠️  Feishu notification failed [{index}/{total}]: {e}", file=sys.stderr)
+                  print(f"❌ Feishu notification failed [{index}/{total}]: {e}", file=sys.stderr)
                   sys.exit(1)
               if index < total:
                   time.sleep(0.5)
