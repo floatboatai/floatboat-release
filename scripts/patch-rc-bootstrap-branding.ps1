@@ -11,6 +11,11 @@ $downloadScriptPath = Join-Path $InstallerDir "download-installer.ps1"
 $setupProgressScriptPath = "build\setup-progress-monitor.ps1"
 $welcomeAssetPath = Join-Path $AssetsDir "welcome-product.bmp"
 $targetWelcomeAssetPath = Join-Path $InstallerDir "bootstrap-welcome-product.bmp"
+$carouselAssets = @(
+  @{ Source = (Join-Path $AssetsDir "carousel-work.bmp"); Target = (Join-Path $InstallerDir "bootstrap-carousel-1.bmp") },
+  @{ Source = (Join-Path $AssetsDir "carousel-combo.bmp"); Target = (Join-Path $InstallerDir "bootstrap-carousel-2.bmp") },
+  @{ Source = (Join-Path $AssetsDir "carousel-tacit.bmp"); Target = (Join-Path $InstallerDir "bootstrap-carousel-3.bmp") }
+)
 $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
 $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
 
@@ -71,6 +76,13 @@ if (-not (Test-Path -LiteralPath $welcomeAssetPath)) {
 }
 
 Copy-Item -LiteralPath $welcomeAssetPath -Destination $targetWelcomeAssetPath -Force
+foreach ($asset in $carouselAssets) {
+  if (-not (Test-Path -LiteralPath $asset.Source)) {
+    throw "RC bootstrap carousel image not found: $($asset.Source)"
+  }
+
+  Copy-Item -LiteralPath $asset.Source -Destination $asset.Target -Force
+}
 
 $source = Read-TextFile -Path $nsiPath
 $newline = if ($source.Contains("`r`n")) { "`r`n" } else { "`n" }
@@ -86,6 +98,169 @@ if (-not $source.Contains("LangString TXT_READY_TO_LAUNCH")) {
   $source = $source.Replace(
     'LangString TXT_LAUNCHING ${LANG_SIMPCHINESE} "正在启动完整安装器..."',
     "LangString TXT_LAUNCHING `${LANG_SIMPCHINESE} `"正在启动完整安装器...`"${newline}LangString TXT_READY_TO_LAUNCH `${LANG_ENGLISH} `"Download complete. Opening the full installer...`"${newline}LangString TXT_READY_TO_LAUNCH `${LANG_SIMPCHINESE} `"下载完成，正在打开完整安装器...`""
+  )
+}
+
+if (-not $source.Contains('!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow')) {
+  $source = $source.Replace(
+    "!insertmacro MUI_PAGE_WELCOME${newline}!insertmacro MUI_PAGE_INSTFILES",
+    "!insertmacro MUI_PAGE_WELCOME${newline}!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow${newline}!insertmacro MUI_PAGE_INSTFILES"
+  )
+}
+
+if (-not $source.Contains("Var ProductCarouselDialogHandle")) {
+  $source = $source.Replace(
+    "Var DownloadPollEmptyTicks",
+    "Var DownloadPollEmptyTicks${newline}Var ProductCarouselDialogHandle${newline}Var ProductCarouselHandle${newline}Var ProductCarouselBitmap1${newline}Var ProductCarouselBitmap2${newline}Var ProductCarouselBitmap3${newline}Var ProductCarouselFrame${newline}Var ProductCarouselTick"
+  )
+}
+
+if (-not $source.Contains("Function BootstrapInstFilesShow")) {
+  $functionBlock = Convert-Newlines -Newline $newline -Content @'
+
+!define FLOATBOAT_PRODUCT_PANEL_STYLE 0x5000000E
+!define FLOATBOAT_IMAGE_BITMAP 0
+!define FLOATBOAT_LR_LOADFROMFILE 0x00000010
+!define FLOATBOAT_STM_SETIMAGE 0x0172
+
+Function BootstrapFindInstFilesControls
+  FindWindow $ProductCarouselDialogHandle "#32770" "" $HWNDPARENT
+  ${If} $ProductCarouselDialogHandle != 0
+    GetDlgItem $ProgressBarHandle $ProductCarouselDialogHandle 1004
+  ${EndIf}
+FunctionEnd
+
+Function BootstrapWaitForInstFilesControls
+  StrCpy $R8 0
+
+  _bootstrapInstFilesControlWaitLoop:
+    Call BootstrapFindInstFilesControls
+    ${If} $ProductCarouselDialogHandle != 0
+    ${AndIf} $ProgressBarHandle != 0
+      Return
+    ${EndIf}
+
+    IntOp $R8 $R8 + 1
+    ${If} $R8 < 20
+      Sleep 50
+      Goto _bootstrapInstFilesControlWaitLoop
+    ${EndIf}
+FunctionEnd
+
+Function BootstrapInstFilesShow
+  InitPluginsDir
+  File /oname=$PLUGINSDIR\bootstrap-carousel-1.bmp "bootstrap-carousel-1.bmp"
+  File /oname=$PLUGINSDIR\bootstrap-carousel-2.bmp "bootstrap-carousel-2.bmp"
+  File /oname=$PLUGINSDIR\bootstrap-carousel-3.bmp "bootstrap-carousel-3.bmp"
+
+  Call BootstrapWaitForInstFilesControls
+  ${If} $ProductCarouselDialogHandle == 0
+    Return
+  ${EndIf}
+
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "", i ${FLOATBOAT_PRODUCT_PANEL_STYLE}, i 18, i 112, i 438, i 160, p $ProductCarouselDialogHandle, p 0, p 0, p 0) p.r0'
+  StrCpy $ProductCarouselHandle $0
+  ${If} $ProductCarouselHandle == 0
+    Return
+  ${EndIf}
+
+  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-1.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
+  StrCpy $ProductCarouselBitmap1 $0
+  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-2.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
+  StrCpy $ProductCarouselBitmap2 $0
+  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-3.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
+  StrCpy $ProductCarouselBitmap3 $0
+
+  StrCpy $ProductCarouselFrame 1
+  StrCpy $ProductCarouselTick 0
+  ${If} $ProductCarouselBitmap1 != 0
+    SendMessage $ProductCarouselHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap1
+  ${EndIf}
+FunctionEnd
+
+Function BootstrapUpdateProductCarousel
+  ${If} $ProductCarouselHandle == ""
+    Return
+  ${EndIf}
+  ${If} $ProductCarouselHandle == 0
+    Return
+  ${EndIf}
+
+  IntOp $ProductCarouselTick $ProductCarouselTick + 1
+  ${If} $ProductCarouselTick < 66
+    Return
+  ${EndIf}
+
+  StrCpy $ProductCarouselTick 0
+  ${If} $ProductCarouselFrame == 1
+    StrCpy $ProductCarouselFrame 2
+    ${If} $ProductCarouselBitmap2 != 0
+      SendMessage $ProductCarouselHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap2
+    ${EndIf}
+  ${ElseIf} $ProductCarouselFrame == 2
+    StrCpy $ProductCarouselFrame 3
+    ${If} $ProductCarouselBitmap3 != 0
+      SendMessage $ProductCarouselHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap3
+    ${EndIf}
+  ${Else}
+    StrCpy $ProductCarouselFrame 1
+    ${If} $ProductCarouselBitmap1 != 0
+      SendMessage $ProductCarouselHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap1
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+Function BootstrapDestroyProductCarousel
+  ${If} $ProductCarouselHandle != ""
+  ${AndIf} $ProductCarouselHandle != 0
+    System::Call 'USER32::DestroyWindow(p $ProductCarouselHandle)'
+    StrCpy $ProductCarouselHandle ""
+  ${EndIf}
+
+  ${If} $ProductCarouselBitmap1 != ""
+  ${AndIf} $ProductCarouselBitmap1 != 0
+    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap1)'
+    StrCpy $ProductCarouselBitmap1 ""
+  ${EndIf}
+
+  ${If} $ProductCarouselBitmap2 != ""
+  ${AndIf} $ProductCarouselBitmap2 != 0
+    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap2)'
+    StrCpy $ProductCarouselBitmap2 ""
+  ${EndIf}
+
+  ${If} $ProductCarouselBitmap3 != ""
+  ${AndIf} $ProductCarouselBitmap3 != 0
+    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap3)'
+    StrCpy $ProductCarouselBitmap3 ""
+  ${EndIf}
+FunctionEnd
+'@
+
+  $source = $source.Replace(
+    "Function BootstrapAbortCleanup",
+    "$functionBlock${newline}Function BootstrapAbortCleanup"
+  )
+}
+
+if (-not $source.Contains("Call BootstrapDestroyProductCarousel${newline}${newline}  `${If} `$DownloadPidFile")) {
+  $source = $source.Replace(
+    "Function BootstrapAbortCleanup${newline}  `${If} `$DownloadPidFile",
+    "Function BootstrapAbortCleanup${newline}  Call BootstrapDestroyProductCarousel${newline}${newline}  `${If} `$DownloadPidFile"
+  )
+}
+
+if ($source.Contains("GetDlgItem `$ProgressBarHandle `$HWNDPARENT 1004")) {
+  $source = $source.Replace(
+    "GetDlgItem `$ProgressBarHandle `$HWNDPARENT 1004",
+    "Call BootstrapFindInstFilesControls"
+  )
+}
+
+if (-not $source.Contains("DownloadPoll:${newline}  Call BootstrapUpdateProductCarousel")) {
+  $source = $source.Replace(
+    "DownloadPoll:${newline}  !insertmacro RefreshDownloadUi",
+    "DownloadPoll:${newline}  Call BootstrapUpdateProductCarousel${newline}  !insertmacro RefreshDownloadUi"
   )
 }
 
@@ -124,7 +299,11 @@ if ($source.Contains($oldFailureMessage)) {
 
 $requiredSnippets = @(
   '!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"',
+  '!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow',
   'LangString TXT_READY_TO_LAUNCH',
+  'Function BootstrapInstFilesShow',
+  'Call BootstrapFindInstFilesControls',
+  'Call BootstrapUpdateProductCarousel',
   'DetailPrint "$(TXT_READY_TO_LAUNCH)"',
   '$DownloadResult"'
 )
@@ -187,6 +366,68 @@ Patch-AtomicWriter `
   -RequiredSnippet '[System.IO.File]::Replace($tmpPath, $Path, $null, $true)' `
   -WriteBom $true
 
+$downloadSource = Read-TextFile -Path $downloadScriptPath
+if (-not $downloadSource.Contains('$responseAsyncResult = $request.BeginGetResponse($null, $null)')) {
+  $downloadNewline = if ($downloadSource.Contains("`r`n")) { "`r`n" } else { "`n" }
+  $oldConnectBlock = Convert-Newlines -Newline $downloadNewline -Content @'
+  $request = [System.Net.HttpWebRequest]::Create($Url)
+  $request.Method = 'GET'
+  $request.Timeout = 30000
+  $request.ReadWriteTimeout = 30000
+  $response = $request.GetResponse()
+  $totalBytes = [double]$response.ContentLength
+  $inputStream = $response.GetResponseStream()
+'@
+
+  $newConnectBlock = Convert-Newlines -Newline $downloadNewline -Content @'
+  $request = [System.Net.HttpWebRequest]::Create($Url)
+  $request.Method = 'GET'
+  $request.Timeout = $StallTimeoutMs
+  $request.ReadWriteTimeout = $StallTimeoutMs
+  $request.AllowAutoRedirect = $true
+  $request.UserAgent = 'FloatboatBootstrapInstaller/1.0'
+  $request.KeepAlive = $false
+
+  $response = $null
+  $connectStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+  $connectDisplayPercent = 0.0
+  $responseAsyncResult = $request.BeginGetResponse($null, $null)
+  try {
+    while (-not $responseAsyncResult.AsyncWaitHandle.WaitOne($ProgressWriteIntervalMs)) {
+      $elapsedMs = [double]$connectStopwatch.ElapsedMilliseconds
+      if ($elapsedMs -ge $StallTimeoutMs) {
+        $request.Abort()
+        throw (Get-Text -English 'The installer download could not connect to the server in time. Please check your network and try again.' -Chinese '安装包下载连接服务器超时，请检查网络后重试。')
+      }
+
+      $connectDisplayPercent = [Math]::Min(8.0, $connectDisplayPercent + 0.04)
+      $elapsedSeconds = [Math]::Max(1.0, $elapsedMs / 1000.0)
+      Write-ProgressSnapshot `
+        -DisplayPercent $connectDisplayPercent `
+        -StatusLine (Get-Text -English 'Connecting to the Floatboat download server' -Chinese '正在连接 Floatboat 下载服务器') `
+        -MetaLine (Get-Text -English ([string]::Format($InvariantCulture, '{0:F2}% | Connecting for {1:F0}s', $connectDisplayPercent, $elapsedSeconds)) -Chinese ([string]::Format($InvariantCulture, '{0:F2}% | 已连接 {1:F0} 秒', $connectDisplayPercent, $elapsedSeconds))) `
+        -State 'CONNECTING'
+    }
+
+    $response = [System.Net.HttpWebResponse]$request.EndGetResponse($responseAsyncResult)
+  } finally {
+    if ($responseAsyncResult.AsyncWaitHandle) {
+      $responseAsyncResult.AsyncWaitHandle.Close()
+    }
+  }
+
+  $totalBytes = [double]$response.ContentLength
+  $inputStream = $response.GetResponseStream()
+'@
+
+  if (-not $downloadSource.Contains($oldConnectBlock)) {
+    throw "Unable to patch connection watchdog in $downloadScriptPath"
+  }
+
+  $downloadSource = $downloadSource.Replace($oldConnectBlock, $newConnectBlock)
+  Write-Utf8BomFile -Path $downloadScriptPath -Content $downloadSource
+}
+
 $oldSetupProgressWriteAtomic = @'
 function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$Encoding) {
   if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -247,4 +488,6 @@ Write-Host "  installer script: $nsiPath"
 Write-Host "  downloader script: $downloadScriptPath"
 Write-Host "  setup progress script: $setupProgressScriptPath"
 Write-Host "  welcome image:    $targetWelcomeAssetPath"
+Write-Host "  carousel images:  bootstrap-carousel-1.bmp, bootstrap-carousel-2.bmp, bootstrap-carousel-3.bmp"
+Write-Host "  connection guard: enabled"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"
