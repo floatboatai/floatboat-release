@@ -589,11 +589,8 @@ function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$En
   $lastError = $null
   for ($attempt = 0; $attempt -lt 12; $attempt += 1) {
     try {
-      if ([System.IO.File]::Exists($Path)) {
-        [System.IO.File]::Replace($tmpPath, $Path, $null, $true)
-      } else {
-        [System.IO.File]::Move($tmpPath, $Path)
-      }
+      [System.IO.File]::Copy($tmpPath, $Path, $true)
+      [System.IO.File]::Delete($tmpPath)
       return
     } catch [System.IO.IOException] {
       $lastError = $_
@@ -615,7 +612,7 @@ Patch-AtomicWriter `
   -ScriptPath $downloadScriptPath `
   -OldBlock $oldDownloadWriteAtomic `
   -NewBlock $newDownloadWriteAtomic `
-  -RequiredSnippet '[System.IO.File]::Replace($tmpPath, $Path, $null, $true)' `
+  -RequiredSnippet '[System.IO.File]::Copy($tmpPath, $Path, $true)' `
   -WriteBom $true
 
 $downloadSource = Read-TextFile -Path $downloadScriptPath
@@ -1092,11 +1089,8 @@ function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$En
   $lastError = $null
   for ($attempt = 0; $attempt -lt 12; $attempt += 1) {
     try {
-      if ([System.IO.File]::Exists($Path)) {
-        [System.IO.File]::Replace($temporaryPath, $Path, $null, $true)
-      } else {
-        [System.IO.File]::Move($temporaryPath, $Path)
-      }
+      [System.IO.File]::Copy($temporaryPath, $Path, $true)
+      [System.IO.File]::Delete($temporaryPath)
       return
     } catch [System.IO.IOException] {
       $lastError = $_
@@ -1118,7 +1112,7 @@ Patch-AtomicWriter `
   -ScriptPath $setupProgressScriptPath `
   -OldBlock $oldSetupProgressWriteAtomic `
   -NewBlock $newSetupProgressWriteAtomic `
-  -RequiredSnippet '[System.IO.File]::Replace($temporaryPath, $Path, $null, $true)' `
+  -RequiredSnippet '[System.IO.File]::Copy($temporaryPath, $Path, $true)' `
   -WriteBom $false
 
 Write-Host "Prepared RC bootstrap branding:"
