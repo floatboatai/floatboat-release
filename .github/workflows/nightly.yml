@@ -73,9 +73,10 @@ jobs:
       # --- Changelog generation disabled ---
       # To re-enable: uncomment "Collect recent changes" and "Generate nightly release notes with AI" steps
 
-      - name: Generate placeholder release notes
+      - name: Prepare empty public release body
         run: |
-          echo "Nightly build ${{ steps.version.outputs.nightly_version }}" > /tmp/release_notes.md
+          # Nightly release notes must stay internal-only; keep the public GitHub Release body empty.
+          : > /tmp/release_notes.md
 
       - name: Upload release notes
         uses: actions/upload-artifact@v4
