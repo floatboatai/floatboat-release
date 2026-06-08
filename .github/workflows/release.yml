@@ -385,12 +385,19 @@ jobs:
               Write-Host "Installing uv from PyPI (attempt $attempt/4)..."
               python -m pip install --user --upgrade uv --retries 5 --timeout 60 --disable-pip-version-check
 
-              $userBase = python -m site --user-base
-              $uvExe = Join-Path $userBase "Scripts\uv.exe"
+              $scriptsDir = python -c "import sysconfig; print(sysconfig.get_path('scripts', scheme='nt_user'))"
+              $uvExe = Join-Path $scriptsDir "uv.exe"
               if (-not (Test-Path $uvExe)) {
                 $command = Get-Command uv.exe -ErrorAction SilentlyContinue
                 if ($command) {
                   $uvExe = $command.Source
+                }
+              }
+              if (-not (Test-Path $uvExe)) {
+                $userBase = python -m site --user-base
+                $found = Get-ChildItem $userBase -Recurse -Filter "uv.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($found) {
+                  $uvExe = $found.FullName
                 }
               }
               if (-not (Test-Path $uvExe)) {
