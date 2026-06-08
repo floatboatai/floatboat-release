@@ -556,8 +556,6 @@ $requiredSnippets = @(
   'Call BootstrapUpdateProductCarousel',
   'InvalidateRect',
   'DownloadStateStableTicks > 3000',
-  'Use-SystemProxy',
-  'Write-DownloadDebug',
   'DetailPrint "$(TXT_READY_TO_LAUNCH)"',
   '$DownloadResult"'
 )
@@ -1050,6 +1048,22 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     1
   )
   Write-Utf8BomFile -Path $downloadScriptPath -Content $downloadSource
+}
+
+$downloadSource = Read-TextFile -Path $downloadScriptPath
+$downloadRequiredSnippets = @(
+  'Write-DownloadDebug',
+  'Use-SystemProxy',
+  "'--user-agent', 'Floatboat Bootstrap Installer RC'",
+  "Write-DownloadDebug ('source {0} curl start {1}'",
+  "Write-DownloadDebug ('source {0} powershell start {1}'",
+  "Write-DownloadDebug ('source {0} bits start {1}'"
+)
+
+foreach ($snippet in $downloadRequiredSnippets) {
+  if (-not $downloadSource.Contains($snippet)) {
+    throw "RC downloader patch is incomplete; missing snippet: $snippet"
+  }
 }
 
 $oldSetupProgressWriteAtomic = @'
