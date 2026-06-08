@@ -119,7 +119,12 @@ jobs:
             if [ -n "$PREV_TAG" ]; then
               echo "**Changes since ${PREV_TAG}:**"
               echo ""
-              git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200
+              CHANGES=$(git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200)
+              if [ -n "$CHANGES" ]; then
+                echo "$CHANGES"
+              else
+                echo "_无更新。_"
+              fi
             else
               echo "_This is the initial release — no previous tag found._"
             fi
@@ -641,6 +646,16 @@ jobs:
           emoji = "🚧" if is_rc else "🎉"
           release_type = "RC 预发布" if is_rc else "正式发布"
           range_hint = f"  (since {prev_tag})" if prev_tag else ""
+          release_tag = f"v{version}"
+          release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
+          installer_names = [
+              f"Floatboat-{version}-arm64.dmg",
+              f"Floatboat-{version}-x64.dmg",
+              f"Floatboat-darwin-arm64-{version}.zip",
+              f"Floatboat-darwin-x64-{version}.zip",
+              f"Floatboat-Setup-{version}.exe",
+          ]
+          installer_links = "\n".join(f"- {name}: {release_base_url}/{name}" for name in installer_names)
 
           header = f"""{emoji} AOE Desktop {release_type} v{version}
 
@@ -649,6 +664,9 @@ jobs:
             macOS x64：  {icon(macos_x64)} {macos_x64}
             Windows x64：{icon(windows)} {windows}
             上传：       {icon(upload)} {upload}
+
+          安装包下载：
+          {installer_links}
 
           🔒 Release note 仅内部发送到飞书机器人，不写入公开 GitHub Release 页面。
 
