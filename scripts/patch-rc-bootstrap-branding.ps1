@@ -94,6 +94,10 @@ if (-not $source.Contains('!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welco
   )
 }
 
+if ($source.Contains('BrandingText "Floatboat Web Installer"')) {
+  $source = $source.Replace('BrandingText "Floatboat Web Installer"', 'BrandingText " "')
+}
+
 if (-not $source.Contains("LangString TXT_READY_TO_LAUNCH")) {
   $source = $source.Replace(
     'LangString TXT_LAUNCHING ${LANG_SIMPCHINESE} "正在启动完整安装器..."',
@@ -111,7 +115,7 @@ if (-not $source.Contains('!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFil
 if (-not $source.Contains("Var BootstrapPageDialogHandle")) {
   $source = $source.Replace(
     "Var DownloadPollEmptyTicks",
-    "Var DownloadPollEmptyTicks${newline}Var BootstrapPageDialogHandle${newline}Var BootstrapImageHandle${newline}Var BootstrapTitleHandle${newline}Var BootstrapStatusHandle${newline}Var BootstrapMetaHandle${newline}Var BootstrapPercentHandle${newline}Var ProductCarouselBitmap1${newline}Var ProductCarouselBitmap2${newline}Var ProductCarouselBitmap3${newline}Var ProductCarouselFrame${newline}Var ProductCarouselTick"
+    "Var DownloadPollEmptyTicks${newline}Var BootstrapPageDialogHandle${newline}Var BootstrapImageHandle${newline}Var BootstrapTitleHandle${newline}Var BootstrapSubtitleHandle${newline}Var BootstrapStatusHandle${newline}Var BootstrapMetaHandle${newline}Var BootstrapPercentHandle${newline}Var BootstrapHintHandle${newline}Var ProductCarouselBitmap1${newline}Var ProductCarouselBitmap2${newline}Var ProductCarouselBitmap3${newline}Var ProductCarouselFrame${newline}Var ProductCarouselTick"
   )
 }
 
@@ -121,14 +125,32 @@ if (-not $source.Contains("Function BootstrapInstFilesShow")) {
 !define FLOATBOAT_CHILD_VISIBLE 0x50000000
 !define FLOATBOAT_STATIC_BITMAP_STYLE 0x5000000E
 !define FLOATBOAT_STATIC_TEXT_STYLE 0x50000000
+!define FLOATBOAT_STATIC_CENTER_STYLE 0x50000001
+!define FLOATBOAT_STATIC_RIGHT_STYLE 0x50000002
 !define FLOATBOAT_PROGRESS_STYLE 0x50000000
 !define FLOATBOAT_IMAGE_BITMAP 0
 !define FLOATBOAT_LR_LOADFROMFILE 0x00000010
 !define FLOATBOAT_STM_SETIMAGE 0x0172
+!define FLOATBOAT_WINDOW_WIDTH 700
+!define FLOATBOAT_WINDOW_HEIGHT 600
+!define FLOATBOAT_PAGE_WIDTH 684
+!define FLOATBOAT_PAGE_HEIGHT 510
+!define FLOATBOAT_CANCEL_X 580
+!define FLOATBOAT_CANCEL_Y 534
+!define FLOATBOAT_SWP_NOZORDER_NOACTIVATE 0x0014
+!define FLOATBOAT_SWP_NOACTIVATE 0x0010
 !define FLOATBOAT_SW_HIDE 0
+!define FLOATBOAT_SW_SHOW 5
 
 !macro BootstrapHideControl ControlId
   GetDlgItem $0 $BootstrapPageDialogHandle ${ControlId}
+  ${If} $0 != 0
+    System::Call 'USER32::ShowWindow(p $0, i ${FLOATBOAT_SW_HIDE})'
+  ${EndIf}
+!macroend
+
+!macro BootstrapHideParentControl ControlId
+  GetDlgItem $0 $HWNDPARENT ${ControlId}
   ${If} $0 != 0
     System::Call 'USER32::ShowWindow(p $0, i ${FLOATBOAT_SW_HIDE})'
   ${EndIf}
@@ -157,6 +179,40 @@ Function BootstrapWaitForInstFilesDialog
     ${EndIf}
 FunctionEnd
 
+Function BootstrapResizeAndCleanWindow
+  System::Call 'USER32::GetSystemMetrics(i 0) i.r0'
+  System::Call 'USER32::GetSystemMetrics(i 1) i.r1'
+  IntOp $2 $0 - ${FLOATBOAT_WINDOW_WIDTH}
+  IntOp $2 $2 / 2
+  IntOp $3 $1 - ${FLOATBOAT_WINDOW_HEIGHT}
+  IntOp $3 $3 / 2
+  ${If} $2 < 0
+    StrCpy $2 0
+  ${EndIf}
+  ${If} $3 < 0
+    StrCpy $3 0
+  ${EndIf}
+
+  System::Call 'USER32::SetWindowPos(p $HWNDPARENT, p 0, i $2, i $3, i ${FLOATBOAT_WINDOW_WIDTH}, i ${FLOATBOAT_WINDOW_HEIGHT}, i ${FLOATBOAT_SWP_NOZORDER_NOACTIVATE})'
+  ${If} $BootstrapPageDialogHandle != $HWNDPARENT
+    System::Call 'USER32::SetWindowPos(p $BootstrapPageDialogHandle, p 0, i 0, i 0, i ${FLOATBOAT_PAGE_WIDTH}, i ${FLOATBOAT_PAGE_HEIGHT}, i ${FLOATBOAT_SWP_NOZORDER_NOACTIVATE})'
+  ${EndIf}
+
+  !insertmacro BootstrapHideParentControl 1
+  !insertmacro BootstrapHideParentControl 3
+  !insertmacro BootstrapHideParentControl 1028
+  !insertmacro BootstrapHideParentControl 1037
+  !insertmacro BootstrapHideParentControl 1038
+  !insertmacro BootstrapHideParentControl 1039
+
+  GetDlgItem $0 $HWNDPARENT 2
+  ${If} $0 != 0
+    System::Call 'USER32::SetWindowTextW(p $0, w "取消")'
+    System::Call 'USER32::ShowWindow(p $0, i ${FLOATBOAT_SW_SHOW})'
+    System::Call 'USER32::SetWindowPos(p $0, p 0, i ${FLOATBOAT_CANCEL_X}, i ${FLOATBOAT_CANCEL_Y}, i 84, i 28, i ${FLOATBOAT_SWP_NOACTIVATE})'
+  ${EndIf}
+FunctionEnd
+
 Function BootstrapInstFilesShow
   InitPluginsDir
   File /oname=$PLUGINSDIR\bootstrap-carousel-1.bmp "bootstrap-carousel-1.bmp"
@@ -168,36 +224,44 @@ Function BootstrapInstFilesShow
     Return
   ${EndIf}
 
+  Call BootstrapResizeAndCleanWindow
+
   !insertmacro BootstrapHideControl 1004
   !insertmacro BootstrapHideControl 1006
   !insertmacro BootstrapHideControl 1016
   !insertmacro BootstrapHideControl 1027
   !insertmacro BootstrapHideControl 1037
 
-  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "Floatboat", i ${FLOATBOAT_STATIC_TEXT_STYLE}, i 18, i 14, i 438, i 22, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "Floatboat 安装助手", i ${FLOATBOAT_STATIC_CENTER_STYLE}, i 40, i 24, i 604, i 28, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
   StrCpy $BootstrapTitleHandle $0
 
-  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "", i ${FLOATBOAT_STATIC_BITMAP_STYLE}, i 18, i 44, i 438, i 160, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "正在下载完整安装包，完成后会自动打开正式安装器", i ${FLOATBOAT_STATIC_CENTER_STYLE}, i 40, i 54, i 604, i 22, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  StrCpy $BootstrapSubtitleHandle $0
+
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "", i ${FLOATBOAT_STATIC_BITMAP_STYLE}, i 92, i 92, i 500, i 304, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
   StrCpy $BootstrapImageHandle $0
   ${If} $BootstrapImageHandle == 0
     Return
   ${EndIf}
 
-  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "$(TXT_PREPARING)", i ${FLOATBOAT_STATIC_TEXT_STYLE}, i 18, i 218, i 438, i 22, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "$(TXT_PREPARING)", i ${FLOATBOAT_STATIC_TEXT_STYLE}, i 92, i 412, i 330, i 24, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
   StrCpy $BootstrapStatusHandle $0
 
-  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "0.00% | $(TXT_DOWNLOADING)", i ${FLOATBOAT_STATIC_TEXT_STYLE}, i 18, i 242, i 344, i 18, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
-  StrCpy $BootstrapMetaHandle $0
-
-  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "0.00%", i ${FLOATBOAT_STATIC_TEXT_STYLE}, i 366, i 242, i 90, i 18, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "0.00%", i ${FLOATBOAT_STATIC_RIGHT_STYLE}, i 442, i 412, i 150, i 24, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
   StrCpy $BootstrapPercentHandle $0
 
-  System::Call 'USER32::CreateWindowExW(i 0, w "msctls_progress32", w "", i ${FLOATBOAT_PROGRESS_STYLE}, i 18, i 266, i 438, i 14, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  System::Call 'USER32::CreateWindowExW(i 0, w "msctls_progress32", w "", i ${FLOATBOAT_PROGRESS_STYLE}, i 92, i 446, i 500, i 18, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
   StrCpy $ProgressBarHandle $0
   ${If} $ProgressBarHandle != 0
     SendMessage $ProgressBarHandle ${PBM_SETRANGE32} 0 10000
     SendMessage $ProgressBarHandle ${PBM_SETPOS} 0 0
   ${EndIf}
+
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "0.00% | $(TXT_DOWNLOADING)", i ${FLOATBOAT_STATIC_TEXT_STYLE}, i 92, i 474, i 500, i 20, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  StrCpy $BootstrapMetaHandle $0
+
+  System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "请保持网络连接，下载异常会自动重试。", i ${FLOATBOAT_STATIC_CENTER_STYLE}, i 92, i 498, i 500, i 18, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
+  StrCpy $BootstrapHintHandle $0
 
   System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-1.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
   StrCpy $ProductCarouselBitmap1 $0
@@ -225,6 +289,12 @@ Function BootstrapEnsureProgressHandle
 FunctionEnd
 
 Function BootstrapRenderCustomStatus
+  ${If} $DownloadProgressText != ""
+    System::Call 'USER32::SetWindowTextW(p $HWNDPARENT, w "Floatboat 安装 - $DownloadProgressText")'
+  ${Else}
+    System::Call 'USER32::SetWindowTextW(p $HWNDPARENT, w "Floatboat 安装")'
+  ${EndIf}
+
   ${If} $BootstrapStatusHandle != ""
   ${AndIf} $BootstrapStatusHandle != 0
     System::Call 'USER32::SetWindowTextW(p $BootstrapStatusHandle, w "$DownloadStatusLine")'
@@ -286,6 +356,12 @@ Function BootstrapDestroyProductCarousel
     StrCpy $BootstrapTitleHandle ""
   ${EndIf}
 
+  ${If} $BootstrapSubtitleHandle != ""
+  ${AndIf} $BootstrapSubtitleHandle != 0
+    System::Call 'USER32::DestroyWindow(p $BootstrapSubtitleHandle)'
+    StrCpy $BootstrapSubtitleHandle ""
+  ${EndIf}
+
   ${If} $BootstrapStatusHandle != ""
   ${AndIf} $BootstrapStatusHandle != 0
     System::Call 'USER32::DestroyWindow(p $BootstrapStatusHandle)'
@@ -302,6 +378,12 @@ Function BootstrapDestroyProductCarousel
   ${AndIf} $BootstrapPercentHandle != 0
     System::Call 'USER32::DestroyWindow(p $BootstrapPercentHandle)'
     StrCpy $BootstrapPercentHandle ""
+  ${EndIf}
+
+  ${If} $BootstrapHintHandle != ""
+  ${AndIf} $BootstrapHintHandle != 0
+    System::Call 'USER32::DestroyWindow(p $BootstrapHintHandle)'
+    StrCpy $BootstrapHintHandle ""
   ${EndIf}
 
   ${If} $ProductCarouselBitmap1 != ""
@@ -393,10 +475,14 @@ if ($source.Contains($oldFailureMessage)) {
 
 $requiredSnippets = @(
   '!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"',
+  'BrandingText " "',
   '!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow',
   'LangString TXT_READY_TO_LAUNCH',
   'Var BootstrapPageDialogHandle',
+  'Var BootstrapSubtitleHandle',
   'Function BootstrapInstFilesShow',
+  'Function BootstrapResizeAndCleanWindow',
+  'BootstrapHideParentControl',
   'Call BootstrapEnsureProgressHandle',
   'Call BootstrapRenderCustomStatus',
   'Call BootstrapUpdateProductCarousel',
@@ -663,6 +749,6 @@ Write-Host "  downloader script: $downloadScriptPath"
 Write-Host "  setup progress script: $setupProgressScriptPath"
 Write-Host "  welcome image:    $targetWelcomeAssetPath"
 Write-Host "  carousel images:  bootstrap-carousel-1.bmp, bootstrap-carousel-2.bmp, bootstrap-carousel-3.bmp"
-Write-Host "  custom page:      enabled"
+Write-Host "  custom page:      enlarged window with hidden default header/details"
 Write-Host "  downloader:       Windows curl.exe with active file-size polling"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"
