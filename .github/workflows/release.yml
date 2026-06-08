@@ -489,7 +489,7 @@ jobs:
         if: ${{ inputs.is_rc }}
         shell: pwsh
         env:
-          SETUP_URL: "https://release.aoe.chat/rc/Floatboat-Setup-rc-latest.exe|https://github.com/floatboatai/floatboat-release/releases/download/v${{ inputs.version }}/Floatboat-Setup-${{ inputs.version }}.exe"
+          SETUP_URL: "https://release.aoe.chat/rc/Floatboat-Setup-rc-latest.exe"
           SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
           SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
           SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
@@ -512,7 +512,8 @@ jobs:
           try {
             .\build-bootstrap.ps1 `
               -SetupUrl $env:SETUP_URL `
-              -OutFile "..\..\dist\windows\Floatboat-Installer-RC.exe"
+              -OutFile "..\..\dist\windows\Floatboat-Installer-RC.exe" `
+              -InstallerDebugDefault 1
           } finally {
             Pop-Location
           }

@@ -556,6 +556,8 @@ $requiredSnippets = @(
   'Call BootstrapUpdateProductCarousel',
   'InvalidateRect',
   'DownloadStateStableTicks > 3000',
+  'Use-SystemProxy',
+  'Write-DownloadDebug',
   'DetailPrint "$(TXT_READY_TO_LAUNCH)"',
   '$DownloadResult"'
 )
@@ -656,6 +658,33 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     return ''
   }
 
+  $downloadDebugDir = Join-Path $env:LOCALAPPDATA 'Floatboat'
+  $downloadDebugLog = Join-Path $downloadDebugDir 'bootstrap-download-debug.log'
+
+  function Write-DownloadDebug([string]$Message) {
+    try {
+      if (-not (Test-Path -LiteralPath $downloadDebugDir)) {
+        [System.IO.Directory]::CreateDirectory($downloadDebugDir) | Out-Null
+      }
+
+      $timestamp = [DateTime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+      [System.IO.File]::AppendAllText($downloadDebugLog, "$timestamp $Message`r`n", [System.Text.Encoding]::UTF8)
+    } catch {
+    }
+  }
+
+  function Use-SystemProxy([System.Net.HttpWebRequest]$Request) {
+    try {
+      $proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+      if ($null -ne $proxy) {
+        $proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials
+        $Request.Proxy = $proxy
+      }
+    } catch {
+      Write-DownloadDebug ('system proxy setup failed: {0}' -f (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+    }
+  }
+
   function Reset-DownloadProgressVariables(
     [string]$StatusLine,
     [string]$MetaLine
@@ -716,6 +745,7 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
       '--show-error',
       '--http1.1',
       '--ssl-no-revoke',
+      '--user-agent', 'Floatboat Bootstrap Installer RC',
       '--connect-timeout', '20',
       '--speed-time', '30',
       '--speed-limit', '1024',
@@ -778,8 +808,6 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     [int]$SourceIndex,
     [int]$SourceCount
   ) {
-    Import-Module BitsTransfer -ErrorAction Stop
-
     $partialFile = "$OutFile.download"
     Remove-Item -LiteralPath $partialFile -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
@@ -787,6 +815,8 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     Reset-DownloadProgressVariables `
       -StatusLine (Get-Text -English "Connecting through Windows background transfer $SourceIndex of $SourceCount" -Chinese "正在通过 Windows 后台传输连接下载源 $SourceIndex/$SourceCount") `
       -MetaLine (Get-Text -English '0.00% | Windows BITS download' -Chinese '0.00% | 正在通过 Windows BITS 下载')
+
+    Import-Module BitsTransfer -ErrorAction Stop
 
     $bitsJob = $null
     $bitsCompleted = $false
@@ -883,6 +913,9 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     $request.Method = 'GET'
     $request.Timeout = 30000
     $request.ReadWriteTimeout = 30000
+    $request.AllowAutoRedirect = $true
+    $request.UserAgent = 'Floatboat Bootstrap Installer RC'
+    Use-SystemProxy -Request $request
     $response = $request.GetResponse()
 
     try {
@@ -950,32 +983,42 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
 
   $downloadErrors = @()
   $downloadCompleted = $false
+  Write-DownloadDebug ('download start urls={0}' -f ($downloadUrls -join ' | '))
   for ($sourceIndex = 0; $sourceIndex -lt $downloadUrls.Count; $sourceIndex += 1) {
     $sourceNumber = $sourceIndex + 1
     $candidateUrl = $downloadUrls[$sourceIndex]
 
     try {
-      Invoke-BitsDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
-      $downloadCompleted = $true
-      break
-    } catch {
-      $downloadErrors += ('source {0} bits: {1}' -f $sourceNumber, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
-    }
-
-    try {
+      Write-DownloadDebug ('source {0} curl start {1}' -f $sourceNumber, $candidateUrl)
       Invoke-CurlDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
       $downloadCompleted = $true
       break
     } catch {
-      $downloadErrors += ('source {0} curl: {1}' -f $sourceNumber, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+      $errorMessage = (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim())
+      Write-DownloadDebug ('source {0} curl failed: {1}' -f $sourceNumber, $errorMessage)
+      $downloadErrors += ('source {0} curl: {1}' -f $sourceNumber, $errorMessage)
     }
 
     try {
+      Write-DownloadDebug ('source {0} powershell start {1}' -f $sourceNumber, $candidateUrl)
       Invoke-DotNetDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
       $downloadCompleted = $true
       break
     } catch {
-      $downloadErrors += ('source {0} powershell: {1}' -f $sourceNumber, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+      $errorMessage = (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim())
+      Write-DownloadDebug ('source {0} powershell failed: {1}' -f $sourceNumber, $errorMessage)
+      $downloadErrors += ('source {0} powershell: {1}' -f $sourceNumber, $errorMessage)
+    }
+
+    try {
+      Write-DownloadDebug ('source {0} bits start {1}' -f $sourceNumber, $candidateUrl)
+      Invoke-BitsDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
+      $downloadCompleted = $true
+      break
+    } catch {
+      $errorMessage = (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim())
+      Write-DownloadDebug ('source {0} bits failed: {1}' -f $sourceNumber, $errorMessage)
+      $downloadErrors += ('source {0} bits: {1}' -f $sourceNumber, $errorMessage)
     }
 
     if ($sourceNumber -lt $downloadUrls.Count) {
@@ -990,6 +1033,7 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
 
   if (-not $downloadCompleted) {
     $joinedErrors = ($downloadErrors -join '; ')
+    Write-DownloadDebug ('download failed: {0}' -f $joinedErrors)
     throw (Get-Text -English "All installer download sources failed: $joinedErrors" -Chinese "所有安装包下载源都失败：$joinedErrors")
   }
 '@
@@ -1070,5 +1114,5 @@ Write-Host "  setup progress script: $setupProgressScriptPath"
 Write-Host "  welcome image:    $targetWelcomeAssetPath"
 Write-Host "  carousel images:  bootstrap-carousel-1.bmp, bootstrap-carousel-2.bmp, bootstrap-carousel-3.bmp"
 Write-Host "  custom page:      enlarged window with hidden default header/details"
-Write-Host "  downloader:       Windows BITS with curl/PowerShell fallback and backup URLs"
+Write-Host "  downloader:       release.aoe.chat via curl first, then PowerShell system proxy, then BITS"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"
