@@ -346,6 +346,53 @@ jobs:
       - name: Build Gemini CLI
         run: pnpm run build:gemini
 
+      - name: Prepare uv bundle source for RC
+        if: ${{ inputs.is_rc }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $dest = Join-Path $env:RUNNER_TEMP "uv-bundle-source"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+
+          $installed = $false
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              Write-Host "Installing uv from PyPI (attempt $attempt/4)..."
+              python -m pip install --user --upgrade uv --retries 5 --timeout 60 --disable-pip-version-check
+
+              $userBase = python -m site --user-base
+              $uvExe = Join-Path $userBase "Scripts\uv.exe"
+              if (-not (Test-Path $uvExe)) {
+                $command = Get-Command uv.exe -ErrorAction SilentlyContinue
+                if ($command) {
+                  $uvExe = $command.Source
+                }
+              }
+              if (-not (Test-Path $uvExe)) {
+                throw "uv.exe not found after pip install"
+              }
+
+              & $uvExe --version
+              Copy-Item $uvExe (Join-Path $dest "uv.exe") -Force
+              $installed = $true
+              break
+            } catch {
+              Write-Warning "uv install attempt $attempt failed: $($_.Exception.Message)"
+              if ($attempt -eq 4) {
+                throw
+              }
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+
+          if (-not $installed) {
+            throw "Failed to prepare uv bundle source"
+          }
+
+          "UV_BUNDLE_SOURCE_DIR=$dest" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Prepared UV_BUNDLE_SOURCE_DIR=$dest"
+
       - name: Build and package (production)
         run: pnpm run forge:make
         env:
