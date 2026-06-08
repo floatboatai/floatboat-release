@@ -467,7 +467,7 @@ if (-not $source.Contains("StrCpy `$DownloadStateStableTicks 0")) {
   }
 }
 
-if (-not $source.Contains("DownloadStateStableTicks > 300")) {
+if (-not $source.Contains("DownloadStateStableTicks > 3000")) {
   $oldDownloadPollBlock = Convert-Newlines -Newline $newline -Content @'
   ${If} $0 == "ERROR:"
     StrCpy $DownloadResult $DownloadResult "" 6
@@ -486,7 +486,7 @@ if (-not $source.Contains("DownloadStateStableTicks > 300")) {
   ${If} $DownloadProgressValue == $DownloadLastProgressValue
   ${AndIf} $DownloadResult == $DownloadLastStateValue
     IntOp $DownloadStateStableTicks $DownloadStateStableTicks + 1
-    ${If} $DownloadStateStableTicks > 300
+    ${If} $DownloadStateStableTicks > 3000
       StrCpy $DownloadResult "下载器状态长时间没有更新，请检查网络连接或代理设置。"
       Goto DownloadFailed
     ${EndIf}
@@ -555,7 +555,7 @@ $requiredSnippets = @(
   'Call BootstrapRenderCustomStatus',
   'Call BootstrapUpdateProductCarousel',
   'InvalidateRect',
-  'DownloadStateStableTicks > 300',
+  'DownloadStateStableTicks > 3000',
   'DetailPrint "$(TXT_READY_TO_LAUNCH)"',
   '$DownloadResult"'
 )
@@ -773,6 +773,99 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     Assert-DownloadedInstaller -PartialFile $partialFile
   }
 
+  function Invoke-BitsDownload(
+    [string]$DownloadUrl,
+    [int]$SourceIndex,
+    [int]$SourceCount
+  ) {
+    Import-Module BitsTransfer -ErrorAction Stop
+
+    $partialFile = "$OutFile.download"
+    Remove-Item -LiteralPath $partialFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+
+    Reset-DownloadProgressVariables `
+      -StatusLine (Get-Text -English "Connecting through Windows background transfer $SourceIndex of $SourceCount" -Chinese "正在通过 Windows 后台传输连接下载源 $SourceIndex/$SourceCount") `
+      -MetaLine (Get-Text -English '0.00% | Windows BITS download' -Chinese '0.00% | 正在通过 Windows BITS 下载')
+
+    $bitsJob = $null
+    $bitsCompleted = $false
+    $lastBitsBytes = 0.0
+    $bitsStallTimeoutMs = [Math]::Max(90000, ($StallTimeoutMs * 3))
+
+    try {
+      $bitsJob = Start-BitsTransfer `
+        -Source $DownloadUrl `
+        -Destination $partialFile `
+        -DisplayName 'Floatboat installer download' `
+        -Description 'Floatboat setup package' `
+        -Asynchronous `
+        -TransferType Download `
+        -ErrorAction Stop
+
+      $bitsJobId = $bitsJob.JobId
+      while ($true) {
+        $currentJob = Get-BitsTransfer -ErrorAction Stop | Where-Object { $_.JobId -eq $bitsJobId } | Select-Object -First 1
+        if ($null -eq $currentJob) {
+          throw (Get-Text -English 'Windows background transfer job disappeared.' -Chinese 'Windows 后台传输任务已消失。')
+        }
+
+        $currentBytes = [double]$currentJob.BytesTransferred
+        if ($currentBytes -gt $script:downloadedBytes) {
+          $script:downloadedBytes = $currentBytes
+          $script:lastNetworkActivityAtMs = [double]$script:stopwatch.ElapsedMilliseconds
+          $lastBitsBytes = $currentBytes
+        }
+
+        if ($currentJob.BytesTotal -gt 0 -and $currentJob.BytesTotal -lt [UInt64]::MaxValue) {
+          $script:totalBytes = [double]$currentJob.BytesTotal
+        }
+
+        Update-DownloadProgressFrame -ForceWrite $true
+
+        $stateName = [string]$currentJob.JobState
+        if ($stateName -eq 'Transferred') {
+          Complete-BitsTransfer -BitsJob $currentJob -ErrorAction Stop
+          $bitsCompleted = $true
+          break
+        }
+
+        if ($stateName -eq 'Error' -or $stateName -eq 'TransientError') {
+          $bitsError = [string]$currentJob.ErrorDescription
+          if ([string]::IsNullOrWhiteSpace($bitsError)) {
+            $bitsError = "BITS job state $stateName"
+          }
+
+          if ($stateName -eq 'TransientError' -and (($script:stopwatch.ElapsedMilliseconds - $script:lastNetworkActivityAtMs) -lt $bitsStallTimeoutMs)) {
+            Start-Sleep -Milliseconds $ProgressWriteIntervalMs
+            continue
+          }
+
+          throw (Get-Text -English "Windows background transfer failed: $bitsError" -Chinese "Windows 后台传输失败：$bitsError")
+        }
+
+        if ($stateName -eq 'Suspended') {
+          Resume-BitsTransfer -BitsJob $currentJob -Asynchronous -ErrorAction SilentlyContinue | Out-Null
+        }
+
+        if (($script:stopwatch.ElapsedMilliseconds - $script:lastNetworkActivityAtMs) -ge $bitsStallTimeoutMs) {
+          throw (Get-Text -English 'Windows background transfer did not receive data in time.' -Chinese 'Windows 后台传输长时间没有收到数据。')
+        }
+
+        Start-Sleep -Milliseconds $ProgressWriteIntervalMs
+      }
+    } finally {
+      if (-not $bitsCompleted -and $null -ne $bitsJob) {
+        Remove-BitsTransfer -BitsJob $bitsJob -Confirm:$false -ErrorAction SilentlyContinue
+      }
+    }
+
+    if ($lastBitsBytes -gt 0) {
+      $script:downloadedBytes = $lastBitsBytes
+    }
+    Assert-DownloadedInstaller -PartialFile $partialFile
+  }
+
   function Invoke-DotNetDownload(
     [string]$DownloadUrl,
     [int]$SourceIndex,
@@ -860,6 +953,14 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
   for ($sourceIndex = 0; $sourceIndex -lt $downloadUrls.Count; $sourceIndex += 1) {
     $sourceNumber = $sourceIndex + 1
     $candidateUrl = $downloadUrls[$sourceIndex]
+
+    try {
+      Invoke-BitsDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
+      $downloadCompleted = $true
+      break
+    } catch {
+      $downloadErrors += ('source {0} bits: {1}' -f $sourceNumber, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+    }
 
     try {
       Invoke-CurlDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
@@ -969,5 +1070,5 @@ Write-Host "  setup progress script: $setupProgressScriptPath"
 Write-Host "  welcome image:    $targetWelcomeAssetPath"
 Write-Host "  carousel images:  bootstrap-carousel-1.bmp, bootstrap-carousel-2.bmp, bootstrap-carousel-3.bmp"
 Write-Host "  custom page:      enlarged window with hidden default header/details"
-Write-Host "  downloader:       Windows curl.exe with PowerShell fallback and backup URLs"
+Write-Host "  downloader:       Windows BITS with curl/PowerShell fallback and backup URLs"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"
