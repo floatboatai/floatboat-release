@@ -628,16 +628,6 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     New-Item -ItemType Directory -Path $outDir -Force | Out-Null
   }
 
-  $curlExe = Join-Path $env:SystemRoot 'System32\curl.exe'
-  if (-not (Test-Path -LiteralPath $curlExe)) {
-    $curlCommand = Get-Command curl.exe -ErrorAction SilentlyContinue
-    if ($null -eq $curlCommand) {
-      throw (Get-Text -English 'Windows curl.exe is not available on this system.' -Chinese '当前系统找不到 Windows curl.exe。')
-    }
-
-    $curlExe = $curlCommand.Source
-  }
-
   function Join-ProcessArguments([string[]]$Arguments) {
     $quoted = @()
     foreach ($argument in $Arguments) {
@@ -652,99 +642,255 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     return ($quoted -join ' ')
   }
 
-  $partialFile = "$OutFile.download"
-  Remove-Item -LiteralPath $partialFile -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
-
-  $totalBytes = 0.0
-  $downloadedBytes = 0.0
-  $actualPercent = 0.0
-  $displayPercent = 0.0
-  $unknownSizePercent = 0.0
-  $smoothedSpeedBytesPerSecond = 0.0
-  $lastSpeedSampleBytes = 0.0
-  $lastSpeedSampleAtMs = 0.0
-  $lastProgressWriteAtMs = -1.0
-  $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-  $lastNetworkActivityAtMs = 0.0
-
-  Write-ProgressSnapshot `
-    -DisplayPercent 0.0 `
-    -StatusLine (Get-Text -English 'Starting the Floatboat installer download' -Chinese '正在启动 Floatboat 安装包下载') `
-    -MetaLine (Get-Text -English '0.00% | Connecting through Windows curl' -Chinese '0.00% | 正在通过 Windows curl 建立连接') `
-    -State 'STARTING'
-
-  $curlArguments = @(
-    '--location',
-    '--fail',
-    '--silent',
-    '--show-error',
-    '--http1.1',
-    '--ipv4',
-    '--ssl-no-revoke',
-    '--connect-timeout', '20',
-    '--speed-time', '30',
-    '--speed-limit', '1024',
-    '--retry', '2',
-    '--retry-delay', '1',
-    '--output', $partialFile,
-    $Url
-  )
-
-  $processInfo = New-Object System.Diagnostics.ProcessStartInfo
-  $processInfo.FileName = $curlExe
-  $processInfo.Arguments = Join-ProcessArguments -Arguments $curlArguments
-  $processInfo.UseShellExecute = $false
-  $processInfo.CreateNoWindow = $true
-  $processInfo.RedirectStandardError = $true
-
-  $curlProcess = [System.Diagnostics.Process]::Start($processInfo)
-  if ($null -eq $curlProcess) {
-    throw (Get-Text -English 'Unable to start Windows curl.exe for the installer download.' -Chinese '无法启动 Windows curl.exe 下载安装包。')
-  }
-
-  while (-not $curlProcess.HasExited) {
-    if (Test-Path -LiteralPath $partialFile) {
-      $currentBytes = [double](Get-Item -LiteralPath $partialFile).Length
-      if ($currentBytes -gt $downloadedBytes) {
-        $downloadedBytes = $currentBytes
-        $lastNetworkActivityAtMs = [double]$stopwatch.ElapsedMilliseconds
-      }
+  function Get-CurlPath() {
+    $curlExe = Join-Path $env:SystemRoot 'System32\curl.exe'
+    if (Test-Path -LiteralPath $curlExe) {
+      return $curlExe
     }
 
-    Update-DownloadProgressFrame -ForceWrite $true
+    $curlCommand = Get-Command curl.exe -ErrorAction SilentlyContinue
+    if ($null -ne $curlCommand) {
+      return $curlCommand.Source
+    }
 
-    if (($stopwatch.ElapsedMilliseconds - $lastNetworkActivityAtMs) -ge $StallTimeoutMs) {
+    return ''
+  }
+
+  function Reset-DownloadProgressVariables(
+    [string]$StatusLine,
+    [string]$MetaLine
+  ) {
+    $script:totalBytes = 0.0
+    $script:downloadedBytes = 0.0
+    $script:actualPercent = 0.0
+    $script:displayPercent = 0.0
+    $script:unknownSizePercent = 0.0
+    $script:smoothedSpeedBytesPerSecond = 0.0
+    $script:lastSpeedSampleBytes = 0.0
+    $script:lastSpeedSampleAtMs = 0.0
+    $script:lastProgressWriteAtMs = -1.0
+    $script:stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $script:lastNetworkActivityAtMs = 0.0
+
+    Write-ProgressSnapshot `
+      -DisplayPercent 0.0 `
+      -StatusLine $StatusLine `
+      -MetaLine $MetaLine `
+      -State 'STARTING'
+  }
+
+  function Assert-DownloadedInstaller([string]$PartialFile) {
+    if (Test-Path -LiteralPath $PartialFile) {
+      $script:downloadedBytes = [double](Get-Item -LiteralPath $PartialFile).Length
+    }
+
+    if ($script:downloadedBytes -le 0) {
+      throw (Get-Text -English 'The installer download completed without data.' -Chinese '安装包下载完成但文件为空。')
+    }
+
+    Move-Item -LiteralPath $PartialFile -Destination $OutFile -Force
+  }
+
+  function Invoke-CurlDownload(
+    [string]$DownloadUrl,
+    [int]$SourceIndex,
+    [int]$SourceCount
+  ) {
+    $curlExe = Get-CurlPath
+    if ([string]::IsNullOrWhiteSpace($curlExe)) {
+      throw (Get-Text -English 'Windows curl.exe is not available on this system.' -Chinese '当前系统找不到 Windows curl.exe。')
+    }
+
+    $partialFile = "$OutFile.download"
+    Remove-Item -LiteralPath $partialFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+
+    Reset-DownloadProgressVariables `
+      -StatusLine (Get-Text -English "Connecting to Floatboat download source $SourceIndex of $SourceCount" -Chinese "正在连接 Floatboat 下载源 $SourceIndex/$SourceCount") `
+      -MetaLine (Get-Text -English '0.00% | Windows curl download' -Chinese '0.00% | 正在通过 Windows curl 下载')
+
+    $curlArguments = @(
+      '--location',
+      '--fail',
+      '--silent',
+      '--show-error',
+      '--http1.1',
+      '--ssl-no-revoke',
+      '--connect-timeout', '20',
+      '--speed-time', '30',
+      '--speed-limit', '1024',
+      '--retry', '2',
+      '--retry-delay', '1',
+      '--output', $partialFile,
+      $DownloadUrl
+    )
+
+    $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processInfo.FileName = $curlExe
+    $processInfo.Arguments = Join-ProcessArguments -Arguments $curlArguments
+    $processInfo.UseShellExecute = $false
+    $processInfo.CreateNoWindow = $true
+    $processInfo.RedirectStandardError = $true
+
+    $curlProcess = [System.Diagnostics.Process]::Start($processInfo)
+    if ($null -eq $curlProcess) {
+      throw (Get-Text -English 'Unable to start Windows curl.exe for the installer download.' -Chinese '无法启动 Windows curl.exe 下载安装包。')
+    }
+
+    while (-not $curlProcess.HasExited) {
+      if (Test-Path -LiteralPath $partialFile) {
+        $currentBytes = [double](Get-Item -LiteralPath $partialFile).Length
+        if ($currentBytes -gt $script:downloadedBytes) {
+          $script:downloadedBytes = $currentBytes
+          $script:lastNetworkActivityAtMs = [double]$script:stopwatch.ElapsedMilliseconds
+        }
+      }
+
+      Update-DownloadProgressFrame -ForceWrite $true
+
+      if (($script:stopwatch.ElapsedMilliseconds - $script:lastNetworkActivityAtMs) -ge $StallTimeoutMs) {
+        try {
+          $curlProcess.Kill()
+        } catch {
+        }
+
+        throw (Get-Text -English 'The installer download did not receive data in time.' -Chinese '安装包下载长时间没有收到数据。')
+      }
+
+      Start-Sleep -Milliseconds $ProgressWriteIntervalMs
+    }
+
+    $curlError = $curlProcess.StandardError.ReadToEnd()
+    if ($curlProcess.ExitCode -ne 0) {
+      $curlError = ($curlError -replace '\r', ' ' -replace '\n', ' ').Trim()
+      if ([string]::IsNullOrWhiteSpace($curlError)) {
+        $curlError = "curl.exe exit code $($curlProcess.ExitCode)"
+      }
+
+      throw (Get-Text -English "The installer download failed: $curlError" -Chinese "安装包下载失败：$curlError")
+    }
+
+    Assert-DownloadedInstaller -PartialFile $partialFile
+  }
+
+  function Invoke-DotNetDownload(
+    [string]$DownloadUrl,
+    [int]$SourceIndex,
+    [int]$SourceCount
+  ) {
+    $partialFile = "$OutFile.download"
+    Remove-Item -LiteralPath $partialFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+
+    Reset-DownloadProgressVariables `
+      -StatusLine (Get-Text -English "Trying backup download source $SourceIndex of $SourceCount" -Chinese "正在尝试备用下载源 $SourceIndex/$SourceCount") `
+      -MetaLine (Get-Text -English '0.00% | PowerShell backup download' -Chinese '0.00% | 正在通过 PowerShell 备用下载')
+
+    $request = [System.Net.HttpWebRequest]::Create($DownloadUrl)
+    $request.Method = 'GET'
+    $request.Timeout = 30000
+    $request.ReadWriteTimeout = 30000
+    $response = $request.GetResponse()
+
+    try {
+      $script:totalBytes = [double]$response.ContentLength
+      $inputStream = $response.GetResponseStream()
+      $outputStream = [System.IO.File]::Open($partialFile, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+      $buffer = New-Object byte[] 65536
+
       try {
-        $curlProcess.Kill()
-      } catch {
+        Update-DownloadProgressFrame -ForceWrite $true
+
+        while ($true) {
+          $readAsyncResult = $inputStream.BeginRead($buffer, 0, $buffer.Length, $null, $null)
+          try {
+            while (-not $readAsyncResult.AsyncWaitHandle.WaitOne($ProgressWriteIntervalMs)) {
+              Update-DownloadProgressFrame
+
+              if (($script:stopwatch.ElapsedMilliseconds - $script:lastNetworkActivityAtMs) -ge $StallTimeoutMs) {
+                throw (Get-Text -English 'The installer download stalled for too long.' -Chinese '安装包下载长时间没有响应。')
+              }
+            }
+
+            $read = $inputStream.EndRead($readAsyncResult)
+          } finally {
+            if ($readAsyncResult.AsyncWaitHandle) {
+              $readAsyncResult.AsyncWaitHandle.Close()
+            }
+          }
+
+          if ($read -le 0) {
+            break
+          }
+
+          $outputStream.Write($buffer, 0, $read)
+          $script:downloadedBytes += $read
+          $script:lastNetworkActivityAtMs = [double]$script:stopwatch.ElapsedMilliseconds
+          Update-DownloadProgressFrame -ForceWrite $true
+        }
+      } finally {
+        if ($outputStream) {
+          $outputStream.Close()
+        }
+        if ($inputStream) {
+          $inputStream.Close()
+        }
       }
-
-      throw (Get-Text -English 'The installer download did not receive data in time. Please check your network and try again.' -Chinese '安装包下载长时间没有收到数据，请检查网络后重试。')
+    } finally {
+      $response.Close()
     }
 
-    Start-Sleep -Milliseconds $ProgressWriteIntervalMs
+    Assert-DownloadedInstaller -PartialFile $partialFile
   }
 
-  $curlError = $curlProcess.StandardError.ReadToEnd()
-  if ($curlProcess.ExitCode -ne 0) {
-    $curlError = ($curlError -replace '\r', ' ' -replace '\n', ' ').Trim()
-    if ([string]::IsNullOrWhiteSpace($curlError)) {
-      $curlError = "curl.exe exit code $($curlProcess.ExitCode)"
+  $downloadUrls = @()
+  foreach ($candidate in ($Url -split '\|')) {
+    $trimmedCandidate = ([string]$candidate).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($trimmedCandidate)) {
+      $downloadUrls += $trimmedCandidate
+    }
+  }
+
+  if ($downloadUrls.Count -eq 0) {
+    throw (Get-Text -English 'No installer download URL is configured.' -Chinese '没有配置安装包下载地址。')
+  }
+
+  $downloadErrors = @()
+  $downloadCompleted = $false
+  for ($sourceIndex = 0; $sourceIndex -lt $downloadUrls.Count; $sourceIndex += 1) {
+    $sourceNumber = $sourceIndex + 1
+    $candidateUrl = $downloadUrls[$sourceIndex]
+
+    try {
+      Invoke-CurlDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
+      $downloadCompleted = $true
+      break
+    } catch {
+      $downloadErrors += ('source {0} curl: {1}' -f $sourceNumber, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
     }
 
-    throw (Get-Text -English "The installer download failed: $curlError" -Chinese "安装包下载失败：$curlError")
+    try {
+      Invoke-DotNetDownload -DownloadUrl $candidateUrl -SourceIndex $sourceNumber -SourceCount $downloadUrls.Count
+      $downloadCompleted = $true
+      break
+    } catch {
+      $downloadErrors += ('source {0} powershell: {1}' -f $sourceNumber, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+    }
+
+    if ($sourceNumber -lt $downloadUrls.Count) {
+      Write-ProgressSnapshot `
+        -DisplayPercent 0.0 `
+        -StatusLine (Get-Text -English 'Switching to the next Floatboat download source' -Chinese '正在切换到下一个 Floatboat 下载源') `
+        -MetaLine (Get-Text -English '0.00% | Retrying with backup source' -Chinese '0.00% | 正在使用备用源重试') `
+        -State 'STARTING'
+      Start-Sleep -Milliseconds 800
+    }
   }
 
-  if (Test-Path -LiteralPath $partialFile) {
-    $downloadedBytes = [double](Get-Item -LiteralPath $partialFile).Length
+  if (-not $downloadCompleted) {
+    $joinedErrors = ($downloadErrors -join '; ')
+    throw (Get-Text -English "All installer download sources failed: $joinedErrors" -Chinese "所有安装包下载源都失败：$joinedErrors")
   }
-
-  if ($downloadedBytes -le 0) {
-    throw (Get-Text -English 'The installer download completed without data.' -Chinese '安装包下载完成但文件为空。')
-  }
-
-  Move-Item -LiteralPath $partialFile -Destination $OutFile -Force
 '@
 
   $downloadPattern = '(?s)  \$request = \[System\.Net\.HttpWebRequest\]::Create\(\$Url\).*?  \$response\.Close\(\)\r?\n'
@@ -823,5 +969,5 @@ Write-Host "  setup progress script: $setupProgressScriptPath"
 Write-Host "  welcome image:    $targetWelcomeAssetPath"
 Write-Host "  carousel images:  bootstrap-carousel-1.bmp, bootstrap-carousel-2.bmp, bootstrap-carousel-3.bmp"
 Write-Host "  custom page:      enlarged window with hidden default header/details"
-Write-Host "  downloader:       Windows curl.exe with active file-size polling"
+Write-Host "  downloader:       Windows curl.exe with PowerShell fallback and backup URLs"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"
