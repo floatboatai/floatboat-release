@@ -112,6 +112,13 @@ if (-not $source.Contains('!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFil
   )
 }
 
+if (-not $source.Contains("Var DownloadLastProgressValue")) {
+  $source = $source.Replace(
+    "Var DownloadPollEmptyTicks",
+    "Var DownloadPollEmptyTicks${newline}Var DownloadLastProgressValue${newline}Var DownloadLastStateValue${newline}Var DownloadStateStableTicks"
+  )
+}
+
 if (-not $source.Contains("Var BootstrapPageDialogHandle")) {
   $source = $source.Replace(
     "Var DownloadPollEmptyTicks",
@@ -130,6 +137,8 @@ if (-not $source.Contains("Function BootstrapInstFilesShow")) {
 !define FLOATBOAT_PROGRESS_STYLE 0x50000000
 !define FLOATBOAT_IMAGE_BITMAP 0
 !define FLOATBOAT_LR_LOADFROMFILE 0x00000010
+!define FLOATBOAT_LR_CREATEDIBSECTION 0x00002000
+!define FLOATBOAT_LR_BITMAP_FLAGS 0x00002010
 !define FLOATBOAT_STM_SETIMAGE 0x0172
 !define FLOATBOAT_WINDOW_WIDTH 700
 !define FLOATBOAT_WINDOW_HEIGHT 600
@@ -263,17 +272,19 @@ Function BootstrapInstFilesShow
   System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "请保持网络连接，下载异常会自动重试。", i ${FLOATBOAT_STATIC_CENTER_STYLE}, i 92, i 498, i 500, i 18, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
   StrCpy $BootstrapHintHandle $0
 
-  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-1.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
+  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-1.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_BITMAP_FLAGS}) p.r0'
   StrCpy $ProductCarouselBitmap1 $0
-  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-2.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
+  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-2.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_BITMAP_FLAGS}) p.r0'
   StrCpy $ProductCarouselBitmap2 $0
-  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-3.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
+  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-3.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_BITMAP_FLAGS}) p.r0'
   StrCpy $ProductCarouselBitmap3 $0
 
   StrCpy $ProductCarouselFrame 1
   StrCpy $ProductCarouselTick 0
   ${If} $ProductCarouselBitmap1 != 0
     SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap1
+    System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
+    System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
   ${EndIf}
 FunctionEnd
 
@@ -329,16 +340,22 @@ Function BootstrapUpdateProductCarousel
     StrCpy $ProductCarouselFrame 2
     ${If} $ProductCarouselBitmap2 != 0
       SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap2
+      System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
+      System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
     ${EndIf}
   ${ElseIf} $ProductCarouselFrame == 2
     StrCpy $ProductCarouselFrame 3
     ${If} $ProductCarouselBitmap3 != 0
       SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap3
+      System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
+      System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
     ${EndIf}
   ${Else}
     StrCpy $ProductCarouselFrame 1
     ${If} $ProductCarouselBitmap1 != 0
       SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap1
+      System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
+      System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
     ${EndIf}
   ${EndIf}
 FunctionEnd
@@ -440,6 +457,55 @@ if (-not $source.Contains("DownloadPoll:${newline}  Call BootstrapUpdateProductC
   )
 }
 
+if (-not $source.Contains("StrCpy `$DownloadStateStableTicks 0")) {
+  $source = $source.Replace(
+    "  StrCpy `$DownloadPollEmptyTicks 0${newline}  DetailPrint `"`$(TXT_PREPARING)`"",
+    "  StrCpy `$DownloadPollEmptyTicks 0${newline}  StrCpy `$DownloadLastProgressValue -1${newline}  StrCpy `$DownloadLastStateValue `"`"${newline}  StrCpy `$DownloadStateStableTicks 0${newline}  DetailPrint `"`$(TXT_PREPARING)`""
+  )
+  if (-not $source.Contains("StrCpy `$DownloadStateStableTicks 0")) {
+    throw "Unable to patch download stale-state counters in $nsiPath"
+  }
+}
+
+if (-not $source.Contains("DownloadStateStableTicks > 300")) {
+  $oldDownloadPollBlock = Convert-Newlines -Newline $newline -Content @'
+  ${If} $0 == "ERROR:"
+    StrCpy $DownloadResult $DownloadResult "" 6
+    Goto DownloadFailed
+  ${EndIf}
+
+  ${If} $DownloadResult == ""
+'@
+
+  $newDownloadPollBlock = Convert-Newlines -Newline $newline -Content @'
+  ${If} $0 == "ERROR:"
+    StrCpy $DownloadResult $DownloadResult "" 6
+    Goto DownloadFailed
+  ${EndIf}
+
+  ${If} $DownloadProgressValue == $DownloadLastProgressValue
+  ${AndIf} $DownloadResult == $DownloadLastStateValue
+    IntOp $DownloadStateStableTicks $DownloadStateStableTicks + 1
+    ${If} $DownloadStateStableTicks > 300
+      StrCpy $DownloadResult "下载器状态长时间没有更新，请检查网络连接或代理设置。"
+      Goto DownloadFailed
+    ${EndIf}
+  ${Else}
+    StrCpy $DownloadLastProgressValue $DownloadProgressValue
+    StrCpy $DownloadLastStateValue $DownloadResult
+    StrCpy $DownloadStateStableTicks 0
+  ${EndIf}
+
+  ${If} $DownloadResult == ""
+'@
+
+  if (-not $source.Contains($oldDownloadPollBlock)) {
+    throw "Unable to patch download stale-state guard in $nsiPath"
+  }
+
+  $source = $source.Replace($oldDownloadPollBlock, $newDownloadPollBlock)
+}
+
 $newDownloadDone = @"
   !insertmacro RefreshDownloadUi
   SendMessage `$ProgressBarHandle `${PBM_SETPOS} 10000 0
@@ -479,13 +545,17 @@ $requiredSnippets = @(
   '!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow',
   'LangString TXT_READY_TO_LAUNCH',
   'Var BootstrapPageDialogHandle',
+  'Var DownloadStateStableTicks',
   'Var BootstrapSubtitleHandle',
+  '!define FLOATBOAT_LR_BITMAP_FLAGS',
   'Function BootstrapInstFilesShow',
   'Function BootstrapResizeAndCleanWindow',
   'BootstrapHideParentControl',
   'Call BootstrapEnsureProgressHandle',
   'Call BootstrapRenderCustomStatus',
   'Call BootstrapUpdateProductCarousel',
+  'InvalidateRect',
+  'DownloadStateStableTicks > 300',
   'DetailPrint "$(TXT_READY_TO_LAUNCH)"',
   '$DownloadResult"'
 )
@@ -609,6 +679,9 @@ if (-not $downloadSource.Contains('$curlExe = Join-Path $env:SystemRoot')) {
     '--fail',
     '--silent',
     '--show-error',
+    '--http1.1',
+    '--ipv4',
+    '--ssl-no-revoke',
     '--connect-timeout', '20',
     '--speed-time', '30',
     '--speed-limit', '1024',
