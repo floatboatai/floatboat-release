@@ -9,8 +9,8 @@ $ErrorActionPreference = "Stop"
 $nsiPath = Join-Path $InstallerDir "bootstrap-installer.nsi"
 $downloadScriptPath = Join-Path $InstallerDir "download-installer.ps1"
 $setupProgressScriptPath = "build\setup-progress-monitor.ps1"
-$assetPath = Join-Path $AssetsDir "product-panel.bmp"
-$targetAssetPath = Join-Path $InstallerDir "bootstrap-product-panel.bmp"
+$welcomeAssetPath = Join-Path $AssetsDir "welcome-product.bmp"
+$targetWelcomeAssetPath = Join-Path $InstallerDir "bootstrap-welcome-product.bmp"
 $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
 $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
 
@@ -30,27 +30,55 @@ function Convert-Newlines([string]$Content, [string]$Newline) {
   return ($Content -replace "\r?\n", $Newline)
 }
 
+function Patch-AtomicWriter(
+  [string]$ScriptPath,
+  [string]$OldBlock,
+  [string]$NewBlock,
+  [string]$RequiredSnippet,
+  [bool]$WriteBom
+) {
+  if (-not (Test-Path -LiteralPath $ScriptPath)) {
+    throw "Script not found: $ScriptPath"
+  }
+
+  $source = Read-TextFile -Path $ScriptPath
+  if ($source.Contains($RequiredSnippet)) {
+    return
+  }
+
+  $newline = if ($source.Contains("`r`n")) { "`r`n" } else { "`n" }
+  $oldNormalized = Convert-Newlines -Content $OldBlock -Newline $newline
+  $newNormalized = Convert-Newlines -Content $NewBlock -Newline $newline
+
+  if (-not $source.Contains($oldNormalized)) {
+    throw "Unable to patch Write-Atomic in $ScriptPath"
+  }
+
+  $source = $source.Replace($oldNormalized, $newNormalized)
+  if ($WriteBom) {
+    Write-Utf8BomFile -Path $ScriptPath -Content $source
+  } else {
+    Write-Utf8NoBomFile -Path $ScriptPath -Content $source
+  }
+}
+
 if (-not (Test-Path -LiteralPath $nsiPath)) {
   throw "NSIS bootstrap script not found: $nsiPath"
 }
 
-if (-not (Test-Path -LiteralPath $downloadScriptPath)) {
-  throw "Bootstrap downloader script not found: $downloadScriptPath"
+if (-not (Test-Path -LiteralPath $welcomeAssetPath)) {
+  throw "RC bootstrap welcome image not found: $welcomeAssetPath"
 }
 
-if (-not (Test-Path -LiteralPath $assetPath)) {
-  throw "RC bootstrap product panel not found: $assetPath"
-}
-
-Copy-Item -LiteralPath $assetPath -Destination $targetAssetPath -Force
+Copy-Item -LiteralPath $welcomeAssetPath -Destination $targetWelcomeAssetPath -Force
 
 $source = Read-TextFile -Path $nsiPath
 $newline = if ($source.Contains("`r`n")) { "`r`n" } else { "`n" }
 
-if (-not $source.Contains('!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow')) {
+if (-not $source.Contains('!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"')) {
   $source = $source.Replace(
-    "!insertmacro MUI_PAGE_WELCOME${newline}!insertmacro MUI_PAGE_INSTFILES",
-    "!insertmacro MUI_PAGE_WELCOME${newline}!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow${newline}!insertmacro MUI_PAGE_INSTFILES"
+    '!define MUI_UNICON "..\..\resources\icon.ico"',
+    "!define MUI_UNICON `"..\..\resources\icon.ico`"${newline}!define MUI_WELCOMEFINISHPAGE_BITMAP `"bootstrap-welcome-product.bmp`""
   )
 }
 
@@ -58,117 +86,6 @@ if (-not $source.Contains("LangString TXT_READY_TO_LAUNCH")) {
   $source = $source.Replace(
     'LangString TXT_LAUNCHING ${LANG_SIMPCHINESE} "正在启动完整安装器..."',
     "LangString TXT_LAUNCHING `${LANG_SIMPCHINESE} `"正在启动完整安装器...`"${newline}LangString TXT_READY_TO_LAUNCH `${LANG_ENGLISH} `"Download complete. Opening the full installer...`"${newline}LangString TXT_READY_TO_LAUNCH `${LANG_SIMPCHINESE} `"下载完成，正在打开完整安装器...`""
-  )
-}
-
-if (-not $source.Contains("Var ProductPanelDialogHandle")) {
-  $source = $source.Replace(
-    "Var DownloadPollEmptyTicks",
-    "Var DownloadPollEmptyTicks${newline}Var ProductPanelDialogHandle${newline}Var ProductPanelHandle${newline}Var ProductPanelBitmap"
-  )
-}
-
-if (-not $source.Contains("Function BootstrapInstFilesShow")) {
-  $functionBlock = @"
-
-!define FLOATBOAT_PRODUCT_PANEL_STYLE 0x5000000E
-!define FLOATBOAT_IMAGE_BITMAP 0
-!define FLOATBOAT_LR_LOADFROMFILE 0x00000010
-!define FLOATBOAT_STM_SETIMAGE 0x0172
-!define FLOATBOAT_SW_HIDE 0
-
-Function BootstrapFindInstFilesControls
-  FindWindow `$ProductPanelDialogHandle "#32770" "" `$HWNDPARENT
-  `${If} `$ProductPanelDialogHandle != 0
-    GetDlgItem `$ProgressBarHandle `$ProductPanelDialogHandle 1004
-  `${EndIf}
-FunctionEnd
-
-Function BootstrapWaitForInstFilesControls
-  StrCpy `$R8 0
-
-  _bootstrapInstFilesControlWaitLoop:
-    Call BootstrapFindInstFilesControls
-    `${If} `$ProductPanelDialogHandle != 0
-    `${AndIf} `$ProgressBarHandle != 0
-      Return
-    `${EndIf}
-
-    IntOp `$R8 `$R8 + 1
-    `${If} `$R8 < 30
-      Sleep 80
-      Goto _bootstrapInstFilesControlWaitLoop
-    `${EndIf}
-FunctionEnd
-
-Function BootstrapInstFilesShow
-  InitPluginsDir
-  File /oname=`$PLUGINSDIR\bootstrap-product-panel.bmp "bootstrap-product-panel.bmp"
-
-  Call BootstrapWaitForInstFilesControls
-  `${If} `$ProductPanelDialogHandle == 0
-    Return
-  `${EndIf}
-
-  GetDlgItem `$0 `$ProductPanelDialogHandle 1006
-  `${If} `$0 != 0
-    System::Call 'USER32::ShowWindow(p `$0, i `${FLOATBOAT_SW_HIDE})'
-  `${EndIf}
-
-  GetDlgItem `$0 `$ProductPanelDialogHandle 1016
-  `${If} `$0 != 0
-    System::Call 'USER32::MoveWindow(p `$0, i 18, i 208, i 438, i 34, i 1)'
-  `${EndIf}
-
-  `${If} `$ProgressBarHandle != 0
-    System::Call 'USER32::MoveWindow(p `$ProgressBarHandle, i 18, i 184, i 438, i 14, i 1)'
-  `${EndIf}
-
-  System::Call 'USER32::CreateWindowEx(i 0, t "STATIC", t "", i `${FLOATBOAT_PRODUCT_PANEL_STYLE}, i 18, i 12, i 438, i 160, p `$ProductPanelDialogHandle, p 0, p 0, p 0) p.r0'
-  StrCpy `$ProductPanelHandle `$0
-  `${If} `$ProductPanelHandle == 0
-    Return
-  `${EndIf}
-
-  System::Call 'USER32::LoadImage(p 0, t "`$PLUGINSDIR\bootstrap-product-panel.bmp", i `${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i `${FLOATBOAT_LR_LOADFROMFILE}) p.r0'
-  StrCpy `$ProductPanelBitmap `$0
-  `${If} `$ProductPanelBitmap != 0
-    SendMessage `$ProductPanelHandle `${FLOATBOAT_STM_SETIMAGE} `${FLOATBOAT_IMAGE_BITMAP} `$ProductPanelBitmap
-  `${EndIf}
-FunctionEnd
-
-Function BootstrapDestroyProductPanel
-  `${If} `$ProductPanelHandle != ""
-  `${AndIf} `$ProductPanelHandle != 0
-    System::Call 'USER32::DestroyWindow(p `$ProductPanelHandle)'
-    StrCpy `$ProductPanelHandle ""
-  `${EndIf}
-
-  `${If} `$ProductPanelBitmap != ""
-  `${AndIf} `$ProductPanelBitmap != 0
-    System::Call 'GDI32::DeleteObject(p `$ProductPanelBitmap)'
-    StrCpy `$ProductPanelBitmap ""
-  `${EndIf}
-FunctionEnd
-"@
-
-  $source = $source.Replace(
-    "Function BootstrapAbortCleanup",
-    "$functionBlock${newline}Function BootstrapAbortCleanup"
-  )
-}
-
-if (-not $source.Contains("Call BootstrapDestroyProductPanel${newline}${newline}  `${If} `$DownloadPidFile")) {
-  $source = $source.Replace(
-    "Function BootstrapAbortCleanup${newline}  `${If} `$DownloadPidFile",
-    "Function BootstrapAbortCleanup${newline}  Call BootstrapDestroyProductPanel${newline}${newline}  `${If} `$DownloadPidFile"
-  )
-}
-
-if ($source.Contains("GetDlgItem `$ProgressBarHandle `$HWNDPARENT 1004")) {
-  $source = $source.Replace(
-    "GetDlgItem `$ProgressBarHandle `$HWNDPARENT 1004",
-    "Call BootstrapFindInstFilesControls"
   )
 }
 
@@ -196,15 +113,6 @@ if ([regex]::IsMatch($source, $downloadDonePattern)) {
   throw "Unable to patch DownloadDone completion state in $nsiPath"
 }
 
-if (-not $source.Contains("Call BootstrapDestroyProductPanel${newline}  Quit")) {
-  $oldExecQuit = '  Exec ''"$DownloadedExe"''' + $newline + '  Quit'
-  $newExecQuit = '  Exec ''"$DownloadedExe"''' + $newline + '  Call BootstrapDestroyProductPanel' + $newline + '  Quit'
-  $source = $source.Replace(
-    $oldExecQuit,
-    $newExecQuit
-  )
-}
-
 $oldFailureMessage = 'MessageBox MB_ICONSTOP|MB_OK "$(TXT_DOWNLOAD_FAILED_GENERIC)$\r$\n$(TXT_DOWNLOAD_ATTEMPTS_EXHAUSTED)"'
 $newFailureMessage = 'MessageBox MB_ICONSTOP|MB_OK "$(TXT_DOWNLOAD_FAILED_GENERIC)$\r$\n$(TXT_DOWNLOAD_ATTEMPTS_EXHAUSTED)$\r$\n$\r$\n$DownloadResult"'
 
@@ -215,29 +123,21 @@ if ($source.Contains($oldFailureMessage)) {
 }
 
 $requiredSnippets = @(
-  '!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow',
+  '!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"',
   'LangString TXT_READY_TO_LAUNCH',
-  'Var ProductPanelDialogHandle',
-  'Var ProductPanelHandle',
-  'Function BootstrapFindInstFilesControls',
-  'Function BootstrapInstFilesShow',
-  'Call BootstrapFindInstFilesControls',
   'DetailPrint "$(TXT_READY_TO_LAUNCH)"',
   '$DownloadResult"'
 )
 
 foreach ($snippet in $requiredSnippets) {
   if (-not $source.Contains($snippet)) {
-    throw "RC bootstrap branding patch is incomplete; missing snippet: $snippet"
+    throw "RC bootstrap patch is incomplete; missing snippet: $snippet"
   }
 }
 
 Write-Utf8BomFile -Path $nsiPath -Content $source
 
-$downloadSource = Read-TextFile -Path $downloadScriptPath
-if (-not $downloadSource.Contains('[System.IO.File]::Replace($tmpPath, $Path, $null, $true)')) {
-  $downloadNewline = if ($downloadSource.Contains("`r`n")) { "`r`n" } else { "`n" }
-  $oldDownloadWriteAtomic = @'
+$oldDownloadWriteAtomic = @'
 function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$Encoding) {
   $tmpPath = "$Path.tmp"
   [System.IO.File]::WriteAllText($tmpPath, $Content, $Encoding)
@@ -245,7 +145,7 @@ function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$En
 }
 '@
 
-  $newDownloadWriteAtomic = @'
+$newDownloadWriteAtomic = @'
 function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$Encoding) {
   $parentDirectory = Split-Path -Parent $Path
   if ($parentDirectory -and -not (Test-Path -LiteralPath $parentDirectory)) {
@@ -280,21 +180,14 @@ function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$En
 }
 '@
 
-  $oldDownloadWriteAtomic = Convert-Newlines -Content $oldDownloadWriteAtomic -Newline $downloadNewline
-  $newDownloadWriteAtomic = Convert-Newlines -Content $newDownloadWriteAtomic -Newline $downloadNewline
+Patch-AtomicWriter `
+  -ScriptPath $downloadScriptPath `
+  -OldBlock $oldDownloadWriteAtomic `
+  -NewBlock $newDownloadWriteAtomic `
+  -RequiredSnippet '[System.IO.File]::Replace($tmpPath, $Path, $null, $true)' `
+  -WriteBom $true
 
-  if (-not $downloadSource.Contains($oldDownloadWriteAtomic)) {
-    throw "Unable to patch Write-Atomic in $downloadScriptPath"
-  }
-  $downloadSource = $downloadSource.Replace($oldDownloadWriteAtomic, $newDownloadWriteAtomic)
-  Write-Utf8BomFile -Path $downloadScriptPath -Content $downloadSource
-}
-
-if (Test-Path -LiteralPath $setupProgressScriptPath) {
-  $setupProgressSource = Read-TextFile -Path $setupProgressScriptPath
-  if (-not $setupProgressSource.Contains('[System.IO.File]::Replace($temporaryPath, $Path, $null, $true)')) {
-    $setupProgressNewline = if ($setupProgressSource.Contains("`r`n")) { "`r`n" } else { "`n" }
-    $oldSetupProgressWriteAtomic = @'
+$oldSetupProgressWriteAtomic = @'
 function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$Encoding) {
   if ([string]::IsNullOrWhiteSpace($Path)) {
     return
@@ -307,7 +200,7 @@ function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$En
 }
 '@
 
-    $newSetupProgressWriteAtomic = @'
+$newSetupProgressWriteAtomic = @'
 function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$Encoding) {
   if ([string]::IsNullOrWhiteSpace($Path)) {
     return
@@ -342,20 +235,16 @@ function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$En
 }
 '@
 
-    $oldSetupProgressWriteAtomic = Convert-Newlines -Content $oldSetupProgressWriteAtomic -Newline $setupProgressNewline
-    $newSetupProgressWriteAtomic = Convert-Newlines -Content $newSetupProgressWriteAtomic -Newline $setupProgressNewline
-
-    if (-not $setupProgressSource.Contains($oldSetupProgressWriteAtomic)) {
-      throw "Unable to patch Write-Atomic in $setupProgressScriptPath"
-    }
-    $setupProgressSource = $setupProgressSource.Replace($oldSetupProgressWriteAtomic, $newSetupProgressWriteAtomic)
-    Write-Utf8NoBomFile -Path $setupProgressScriptPath -Content $setupProgressSource
-  }
-}
+Patch-AtomicWriter `
+  -ScriptPath $setupProgressScriptPath `
+  -OldBlock $oldSetupProgressWriteAtomic `
+  -NewBlock $newSetupProgressWriteAtomic `
+  -RequiredSnippet '[System.IO.File]::Replace($temporaryPath, $Path, $null, $true)' `
+  -WriteBom $false
 
 Write-Host "Prepared RC bootstrap branding:"
 Write-Host "  installer script: $nsiPath"
 Write-Host "  downloader script: $downloadScriptPath"
 Write-Host "  setup progress script: $setupProgressScriptPath"
-Write-Host "  product panel:    $targetAssetPath"
+Write-Host "  welcome image:    $targetWelcomeAssetPath"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"
