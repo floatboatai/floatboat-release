@@ -4,29 +4,29 @@ on:
   workflow_dispatch:
     inputs:
       repo_ref:
-        description: 'Git ref to build (tag, branch, or commit SHA)'
+        description: "Git ref to build (tag, branch, or commit SHA)"
         required: true
         type: string
       version:
-        description: 'Version string (e.g., 0.2.2-rc.1)'
+        description: "Version string (e.g., 0.2.2-rc.1)"
         required: true
         type: string
       platforms:
-        description: 'Platforms to build'
+        description: "Platforms to build"
         required: false
-        default: 'macos,windows'
+        default: "macos,windows"
         type: choice
         options:
-          - 'macos,windows'
-          - 'macos'
-          - 'windows'
+          - "macos,windows"
+          - "macos"
+          - "windows"
       is_rc:
-        description: 'Is this a Release Candidate?'
+        description: "Is this a Release Candidate?"
         required: false
         default: true
         type: boolean
       notify_only:
-        description: 'Only send the internal Feishu release note; skip build/upload/GitHub Release mutation'
+        description: "Only send the internal Feishu release note; skip build/upload/GitHub Release mutation"
         required: false
         default: false
         type: boolean
@@ -181,7 +181,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -208,7 +208,21 @@ jobs:
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Build and package (arm64 production)
-        run: pnpm run forge:make:arm64
+        run: |
+          set -e
+          for attempt in 1 2; do
+            if pnpm run forge:make:arm64; then
+              exit 0
+            fi
+            exit_code=$?
+            if [ "$attempt" -eq 2 ]; then
+              exit "$exit_code"
+            fi
+            echo "::warning::macOS arm64 packaging failed once; cleaning DMG mount state and retrying"
+            hdiutil detach /Volumes/Floatboat -force || true
+            rm -rf out/make out/Floatboat-darwin-arm64
+            sleep 10
+          done
         env:
           NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
@@ -232,6 +246,7 @@ jobs:
           path: |
             dist/macos-arm64/*
           retention-days: 3
+          if-no-files-found: error
 
   # ===========================================
   # macOS Build - x64 (Intel)
@@ -267,7 +282,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -294,7 +309,21 @@ jobs:
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Build and package (x64 production)
-        run: pnpm run forge:make:x64
+        run: |
+          set -e
+          for attempt in 1 2; do
+            if pnpm run forge:make:x64; then
+              exit 0
+            fi
+            exit_code=$?
+            if [ "$attempt" -eq 2 ]; then
+              exit "$exit_code"
+            fi
+            echo "::warning::macOS x64 packaging failed once; cleaning DMG mount state and retrying"
+            hdiutil detach /Volumes/Floatboat -force || true
+            rm -rf out/make out/Floatboat-darwin-x64
+            sleep 10
+          done
         env:
           NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
@@ -318,6 +347,7 @@ jobs:
           path: |
             dist/macos-x64/*
           retention-days: 3
+          if-no-files-found: error
 
   # ===========================================
   # Windows Build - x64
@@ -354,7 +384,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -422,7 +452,14 @@ jobs:
     if: |
       inputs.notify_only == false &&
       always() &&
-      (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+      (
+        !contains(inputs.platforms, 'macos') ||
+        (needs.build-macos-arm64.result == 'success' && needs.build-macos-x64.result == 'success')
+      ) &&
+      (
+        !contains(inputs.platforms, 'windows') ||
+        needs.build-windows.result == 'success'
+      )
 
     steps:
       - name: Checkout source repo (for scripts)
@@ -486,6 +523,44 @@ jobs:
           echo ""
           echo "📦 Final out/make contents:"
           ls -la out/make/
+
+      - name: Verify required artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="${{ inputs.version }}"
+          PLATFORMS="${{ inputs.platforms }}"
+          missing=0
+
+          require_glob() {
+            local pattern="$1"
+            local label="$2"
+            if compgen -G "$pattern" > /dev/null; then
+              echo "  ✅ ${label}"
+              compgen -G "$pattern" | sed 's/^/     /'
+            else
+              echo "::error::Missing ${label}: ${pattern}"
+              missing=1
+            fi
+          }
+
+          echo "🔎 Verifying required artifacts for ${PLATFORMS}"
+
+          if [[ "$PLATFORMS" == *macos* ]]; then
+            require_glob "out/make/*${VERSION}*arm64*.dmg" "macOS arm64 DMG"
+            require_glob "out/make/*darwin-arm64*${VERSION}*.zip" "macOS arm64 ZIP"
+            require_glob "out/make/*${VERSION}*x64*.dmg" "macOS x64 DMG"
+            require_glob "out/make/*darwin-x64*${VERSION}*.zip" "macOS x64 ZIP"
+          fi
+
+          if [[ "$PLATFORMS" == *windows* ]]; then
+            require_glob "out/make/*Setup*${VERSION}*.exe" "Windows x64 installer"
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Generate macOS Update Metadata
         if: needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success'
