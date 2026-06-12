@@ -1,6 +1,7 @@
 param(
   [string]$InstallerDir = "floatboat-installer\win",
   [string]$AssetsDir = ".floatboat-release\installer-assets\windows\bootstrap",
+  [int]$MaxCarouselFrames = 24,
   [int]$LaunchDelayMs = 1500
 )
 
@@ -11,13 +12,18 @@ $downloadScriptPath = Join-Path $InstallerDir "download-installer.ps1"
 $setupProgressScriptPath = "build\setup-progress-monitor.ps1"
 $welcomeAssetPath = Join-Path $AssetsDir "welcome-product.bmp"
 $targetWelcomeAssetPath = Join-Path $InstallerDir "bootstrap-welcome-product.bmp"
-$carouselAssets = @(
-  @{ Source = (Join-Path $AssetsDir "carousel-work.bmp"); Target = (Join-Path $InstallerDir "bootstrap-carousel-1.bmp") },
-  @{ Source = (Join-Path $AssetsDir "carousel-combo.bmp"); Target = (Join-Path $InstallerDir "bootstrap-carousel-2.bmp") },
-  @{ Source = (Join-Path $AssetsDir "carousel-tacit.bmp"); Target = (Join-Path $InstallerDir "bootstrap-carousel-3.bmp") }
+$carouselStaticAssets = @(
+  @{ Key = "work"; Candidates = @("carousel-work.png", "carousel-work.jpg", "carousel-work.jpeg", "carousel-work.bmp") },
+  @{ Key = "combo"; Candidates = @("carousel-combo.png", "carousel-combo.jpg", "carousel-combo.jpeg", "carousel-combo.bmp") },
+  @{ Key = "tacit"; Candidates = @("carousel-tacit.png", "carousel-tacit.jpg", "carousel-tacit.jpeg", "carousel-tacit.bmp") }
 )
+$carouselGifPath = Join-Path $AssetsDir "carousel.gif"
+$carouselFramesDir = Join-Path $AssetsDir "carousel-frames"
+$carouselFrameWidth = 500
+$carouselFrameHeight = 304
 $utf8Bom = New-Object System.Text.UTF8Encoding -ArgumentList $true
 $utf8NoBom = New-Object System.Text.UTF8Encoding -ArgumentList $false
+$drawingLoaded = $false
 
 function Read-TextFile([string]$Path) {
   return [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8)
@@ -33,6 +39,162 @@ function Write-Utf8NoBomFile([string]$Path, [string]$Content) {
 
 function Convert-Newlines([string]$Content, [string]$Newline) {
   return ($Content -replace "\r?\n", $Newline)
+}
+
+function Ensure-DrawingLoaded() {
+  if ($script:drawingLoaded) {
+    return
+  }
+
+  Add-Type -AssemblyName System.Drawing
+  $script:drawingLoaded = $true
+}
+
+function Get-BootstrapCarouselFrameName([int]$Index) {
+  return ("bootstrap-carousel-{0:D3}.bmp" -f $Index)
+}
+
+function Save-ImageAsBootstrapBmp(
+  [object]$SourceImage,
+  [string]$DestinationPath,
+  [string]$AssetLabel
+) {
+  if ($SourceImage.Width -ne $carouselFrameWidth -or $SourceImage.Height -ne $carouselFrameHeight) {
+    throw "$AssetLabel must be ${carouselFrameWidth}x${carouselFrameHeight}px, got $($SourceImage.Width)x$($SourceImage.Height)"
+  }
+
+  $bitmap = New-Object System.Drawing.Bitmap $carouselFrameWidth, $carouselFrameHeight, ([System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+  try {
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+      $graphics.Clear([System.Drawing.Color]::White)
+      $graphics.DrawImage($SourceImage, 0, 0, $carouselFrameWidth, $carouselFrameHeight)
+    } finally {
+      $graphics.Dispose()
+    }
+
+    if (Test-Path -LiteralPath $DestinationPath) {
+      Remove-Item -LiteralPath $DestinationPath -Force
+    }
+    $bitmap.Save($DestinationPath, [System.Drawing.Imaging.ImageFormat]::Bmp)
+  } finally {
+    $bitmap.Dispose()
+  }
+}
+
+function Convert-ImageToBootstrapBmp(
+  [string]$SourcePath,
+  [string]$DestinationPath,
+  [string]$AssetLabel
+) {
+  Ensure-DrawingLoaded
+
+  $sourceImage = [System.Drawing.Image]::FromFile($SourcePath)
+  try {
+    Save-ImageAsBootstrapBmp -SourceImage $sourceImage -DestinationPath $DestinationPath -AssetLabel "$AssetLabel ($SourcePath)"
+  } finally {
+    $sourceImage.Dispose()
+  }
+}
+
+function Resolve-StaticCarouselAsset([object]$Asset) {
+  foreach ($candidate in $Asset.Candidates) {
+    $candidatePath = Join-Path $AssetsDir $candidate
+    if (Test-Path -LiteralPath $candidatePath) {
+      return $candidatePath
+    }
+  }
+
+  throw "RC bootstrap carousel image not found for '$($Asset.Key)'. Expected one of: $($Asset.Candidates -join ', ')"
+}
+
+function Convert-GifToBootstrapFrames([string]$GifPath, [string]$TargetDir) {
+  Ensure-DrawingLoaded
+
+  $gif = [System.Drawing.Image]::FromFile($GifPath)
+  try {
+    if ($gif.Width -ne $carouselFrameWidth -or $gif.Height -ne $carouselFrameHeight) {
+      throw "carousel.gif must be ${carouselFrameWidth}x${carouselFrameHeight}px, got $($gif.Width)x$($gif.Height): $GifPath"
+    }
+
+    $dimension = New-Object System.Drawing.Imaging.FrameDimension $gif.FrameDimensionsList[0]
+    $frameCount = $gif.GetFrameCount($dimension)
+    if ($frameCount -lt 1) {
+      throw "carousel.gif contains no frames: $GifPath"
+    }
+    if ($frameCount -gt $MaxCarouselFrames) {
+      throw "carousel.gif has $frameCount frames; keep it at $MaxCarouselFrames frames or fewer for the small installer."
+    }
+
+    for ($index = 0; $index -lt $frameCount; $index += 1) {
+      $gif.SelectActiveFrame($dimension, $index) | Out-Null
+      $targetPath = Join-Path $TargetDir (Get-BootstrapCarouselFrameName ($index + 1))
+      Save-ImageAsBootstrapBmp -SourceImage $gif -DestinationPath $targetPath -AssetLabel "carousel.gif frame $($index + 1) ($GifPath)"
+    }
+
+    return [pscustomobject]@{
+      Mode = "gif"
+      FrameCount = $frameCount
+      IntervalPolls = 1
+    }
+  } finally {
+    $gif.Dispose()
+  }
+}
+
+function Convert-FrameDirectoryToBootstrapFrames([string]$FramesDir, [string]$TargetDir) {
+  $frameFiles = Get-ChildItem -LiteralPath $FramesDir -File |
+    Where-Object { $_.Extension -match '^\.(bmp|png|jpg|jpeg)$' } |
+    Sort-Object Name
+
+  if ($frameFiles.Count -lt 1) {
+    throw "carousel-frames exists but contains no .bmp/.png/.jpg/.jpeg files: $FramesDir"
+  }
+  if ($frameFiles.Count -gt $MaxCarouselFrames) {
+    throw "carousel-frames has $($frameFiles.Count) frames; keep it at $MaxCarouselFrames frames or fewer for the small installer."
+  }
+
+  for ($index = 0; $index -lt $frameFiles.Count; $index += 1) {
+    $targetPath = Join-Path $TargetDir (Get-BootstrapCarouselFrameName ($index + 1))
+    Convert-ImageToBootstrapBmp -SourcePath $frameFiles[$index].FullName -DestinationPath $targetPath -AssetLabel "carousel-frames/$($frameFiles[$index].Name)"
+  }
+
+  return [pscustomobject]@{
+    Mode = "frames"
+    FrameCount = $frameFiles.Count
+    IntervalPolls = 1
+  }
+}
+
+function Convert-StaticCarouselToBootstrapFrames([string]$TargetDir) {
+  for ($index = 0; $index -lt $carouselStaticAssets.Count; $index += 1) {
+    $sourcePath = Resolve-StaticCarouselAsset -Asset $carouselStaticAssets[$index]
+    $targetPath = Join-Path $TargetDir (Get-BootstrapCarouselFrameName ($index + 1))
+    Convert-ImageToBootstrapBmp -SourcePath $sourcePath -DestinationPath $targetPath -AssetLabel "carousel-$($carouselStaticAssets[$index].Key)"
+  }
+
+  return [pscustomobject]@{
+    Mode = "static"
+    FrameCount = $carouselStaticAssets.Count
+    IntervalPolls = 66
+  }
+}
+
+function Prepare-BootstrapCarouselAssets([string]$TargetDir) {
+  $staleTargets = Get-ChildItem -LiteralPath $TargetDir -File -Filter "bootstrap-carousel-*.bmp" -ErrorAction SilentlyContinue
+  foreach ($staleTarget in $staleTargets) {
+    Remove-Item -LiteralPath $staleTarget.FullName -Force
+  }
+
+  if (Test-Path -LiteralPath $carouselGifPath) {
+    return Convert-GifToBootstrapFrames -GifPath $carouselGifPath -TargetDir $TargetDir
+  }
+
+  if (Test-Path -LiteralPath $carouselFramesDir) {
+    return Convert-FrameDirectoryToBootstrapFrames -FramesDir $carouselFramesDir -TargetDir $TargetDir
+  }
+
+  return Convert-StaticCarouselToBootstrapFrames -TargetDir $TargetDir
 }
 
 function Patch-AtomicWriter(
@@ -76,16 +238,14 @@ if (-not (Test-Path -LiteralPath $welcomeAssetPath)) {
 }
 
 Copy-Item -LiteralPath $welcomeAssetPath -Destination $targetWelcomeAssetPath -Force
-foreach ($asset in $carouselAssets) {
-  if (-not (Test-Path -LiteralPath $asset.Source)) {
-    throw "RC bootstrap carousel image not found: $($asset.Source)"
-  }
-
-  Copy-Item -LiteralPath $asset.Source -Destination $asset.Target -Force
-}
+$carouselAssetPlan = Prepare-BootstrapCarouselAssets -TargetDir $InstallerDir
 
 $source = Read-TextFile -Path $nsiPath
 $newline = if ($source.Contains("`r`n")) { "`r`n" } else { "`n" }
+$carouselFileLines = ((1..([int]$carouselAssetPlan.FrameCount)) | ForEach-Object {
+  $frameName = Get-BootstrapCarouselFrameName $_
+  return ('  File /oname=$PLUGINSDIR\{0} "{0}"' -f $frameName)
+}) -join $newline
 
 if (-not $source.Contains('!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"')) {
   $source = $source.Replace(
@@ -122,7 +282,7 @@ if (-not $source.Contains("Var DownloadLastProgressValue")) {
 if (-not $source.Contains("Var BootstrapPageDialogHandle")) {
   $source = $source.Replace(
     "Var DownloadPollEmptyTicks",
-    "Var DownloadPollEmptyTicks${newline}Var BootstrapPageDialogHandle${newline}Var BootstrapImageHandle${newline}Var BootstrapTitleHandle${newline}Var BootstrapSubtitleHandle${newline}Var BootstrapStatusHandle${newline}Var BootstrapMetaHandle${newline}Var BootstrapPercentHandle${newline}Var BootstrapHintHandle${newline}Var ProductCarouselBitmap1${newline}Var ProductCarouselBitmap2${newline}Var ProductCarouselBitmap3${newline}Var ProductCarouselFrame${newline}Var ProductCarouselTick"
+    "Var DownloadPollEmptyTicks${newline}Var BootstrapPageDialogHandle${newline}Var BootstrapImageHandle${newline}Var BootstrapTitleHandle${newline}Var BootstrapSubtitleHandle${newline}Var BootstrapStatusHandle${newline}Var BootstrapMetaHandle${newline}Var BootstrapPercentHandle${newline}Var BootstrapHintHandle${newline}Var ProductCarouselBitmap${newline}Var ProductCarouselFrame${newline}Var ProductCarouselTick"
   )
 }
 
@@ -140,6 +300,8 @@ if (-not $source.Contains("Function BootstrapInstFilesShow")) {
 !define FLOATBOAT_LR_CREATEDIBSECTION 0x00002000
 !define FLOATBOAT_LR_BITMAP_FLAGS 0x00002010
 !define FLOATBOAT_STM_SETIMAGE 0x0172
+!define FLOATBOAT_CAROUSEL_FRAME_COUNT __CAROUSEL_FRAME_COUNT__
+!define FLOATBOAT_CAROUSEL_FRAME_INTERVAL_POLLS __CAROUSEL_FRAME_INTERVAL_POLLS__
 !define FLOATBOAT_WINDOW_WIDTH 700
 !define FLOATBOAT_WINDOW_HEIGHT 600
 !define FLOATBOAT_PAGE_WIDTH 684
@@ -224,9 +386,7 @@ FunctionEnd
 
 Function BootstrapInstFilesShow
   InitPluginsDir
-  File /oname=$PLUGINSDIR\bootstrap-carousel-1.bmp "bootstrap-carousel-1.bmp"
-  File /oname=$PLUGINSDIR\bootstrap-carousel-2.bmp "bootstrap-carousel-2.bmp"
-  File /oname=$PLUGINSDIR\bootstrap-carousel-3.bmp "bootstrap-carousel-3.bmp"
+__CAROUSEL_FILE_LINES__
 
   Call BootstrapWaitForInstFilesDialog
   ${If} $BootstrapPageDialogHandle == 0
@@ -272,20 +432,34 @@ Function BootstrapInstFilesShow
   System::Call 'USER32::CreateWindowExW(i 0, w "STATIC", w "请保持网络连接，下载异常会自动重试。", i ${FLOATBOAT_STATIC_CENTER_STYLE}, i 92, i 498, i 500, i 18, p $BootstrapPageDialogHandle, p 0, p 0, p 0) p.r0'
   StrCpy $BootstrapHintHandle $0
 
-  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-1.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_BITMAP_FLAGS}) p.r0'
-  StrCpy $ProductCarouselBitmap1 $0
-  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-2.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_BITMAP_FLAGS}) p.r0'
-  StrCpy $ProductCarouselBitmap2 $0
-  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-3.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_BITMAP_FLAGS}) p.r0'
-  StrCpy $ProductCarouselBitmap3 $0
-
   StrCpy $ProductCarouselFrame 1
   StrCpy $ProductCarouselTick 0
-  ${If} $ProductCarouselBitmap1 != 0
-    SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap1
-    System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
-    System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
+  Call BootstrapSetProductCarouselFrame
+FunctionEnd
+
+Function BootstrapSetProductCarouselFrame
+  ${If} $BootstrapImageHandle == ""
+    Return
   ${EndIf}
+  ${If} $BootstrapImageHandle == 0
+    Return
+  ${EndIf}
+
+  IntFmt $0 "%03d" $ProductCarouselFrame
+  System::Call 'USER32::LoadImageW(p 0, w "$PLUGINSDIR\bootstrap-carousel-$0.bmp", i ${FLOATBOAT_IMAGE_BITMAP}, i 0, i 0, i ${FLOATBOAT_LR_BITMAP_FLAGS}) p.r0'
+  ${If} $0 == 0
+    Return
+  ${EndIf}
+
+  ${If} $ProductCarouselBitmap != ""
+  ${AndIf} $ProductCarouselBitmap != 0
+    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap)'
+  ${EndIf}
+
+  StrCpy $ProductCarouselBitmap $0
+  SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap
+  System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
+  System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
 FunctionEnd
 
 Function BootstrapEnsureProgressHandle
@@ -323,6 +497,9 @@ Function BootstrapRenderCustomStatus
 FunctionEnd
 
 Function BootstrapUpdateProductCarousel
+  ${If} ${FLOATBOAT_CAROUSEL_FRAME_COUNT} <= 1
+    Return
+  ${EndIf}
   ${If} $BootstrapImageHandle == ""
     Return
   ${EndIf}
@@ -331,33 +508,16 @@ Function BootstrapUpdateProductCarousel
   ${EndIf}
 
   IntOp $ProductCarouselTick $ProductCarouselTick + 1
-  ${If} $ProductCarouselTick < 66
+  ${If} $ProductCarouselTick < ${FLOATBOAT_CAROUSEL_FRAME_INTERVAL_POLLS}
     Return
   ${EndIf}
 
   StrCpy $ProductCarouselTick 0
-  ${If} $ProductCarouselFrame == 1
-    StrCpy $ProductCarouselFrame 2
-    ${If} $ProductCarouselBitmap2 != 0
-      SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap2
-      System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
-      System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
-    ${EndIf}
-  ${ElseIf} $ProductCarouselFrame == 2
-    StrCpy $ProductCarouselFrame 3
-    ${If} $ProductCarouselBitmap3 != 0
-      SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap3
-      System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
-      System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
-    ${EndIf}
-  ${Else}
+  IntOp $ProductCarouselFrame $ProductCarouselFrame + 1
+  ${If} $ProductCarouselFrame > ${FLOATBOAT_CAROUSEL_FRAME_COUNT}
     StrCpy $ProductCarouselFrame 1
-    ${If} $ProductCarouselBitmap1 != 0
-      SendMessage $BootstrapImageHandle ${FLOATBOAT_STM_SETIMAGE} ${FLOATBOAT_IMAGE_BITMAP} $ProductCarouselBitmap1
-      System::Call 'USER32::InvalidateRect(p $BootstrapImageHandle, p 0, i 1)'
-      System::Call 'USER32::UpdateWindow(p $BootstrapImageHandle)'
-    ${EndIf}
   ${EndIf}
+  Call BootstrapSetProductCarouselFrame
 FunctionEnd
 
 Function BootstrapDestroyProductCarousel
@@ -403,25 +563,17 @@ Function BootstrapDestroyProductCarousel
     StrCpy $BootstrapHintHandle ""
   ${EndIf}
 
-  ${If} $ProductCarouselBitmap1 != ""
-  ${AndIf} $ProductCarouselBitmap1 != 0
-    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap1)'
-    StrCpy $ProductCarouselBitmap1 ""
-  ${EndIf}
-
-  ${If} $ProductCarouselBitmap2 != ""
-  ${AndIf} $ProductCarouselBitmap2 != 0
-    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap2)'
-    StrCpy $ProductCarouselBitmap2 ""
-  ${EndIf}
-
-  ${If} $ProductCarouselBitmap3 != ""
-  ${AndIf} $ProductCarouselBitmap3 != 0
-    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap3)'
-    StrCpy $ProductCarouselBitmap3 ""
+  ${If} $ProductCarouselBitmap != ""
+  ${AndIf} $ProductCarouselBitmap != 0
+    System::Call 'GDI32::DeleteObject(p $ProductCarouselBitmap)'
+    StrCpy $ProductCarouselBitmap ""
   ${EndIf}
 FunctionEnd
 '@
+
+  $functionBlock = $functionBlock.Replace('__CAROUSEL_FRAME_COUNT__', [string]$carouselAssetPlan.FrameCount)
+  $functionBlock = $functionBlock.Replace('__CAROUSEL_FRAME_INTERVAL_POLLS__', [string]$carouselAssetPlan.IntervalPolls)
+  $functionBlock = $functionBlock.Replace('__CAROUSEL_FILE_LINES__', $carouselFileLines)
 
   $source = $source.Replace(
     "Function BootstrapAbortCleanup",
@@ -548,7 +700,9 @@ $requiredSnippets = @(
   'Var DownloadStateStableTicks',
   'Var BootstrapSubtitleHandle',
   '!define FLOATBOAT_LR_BITMAP_FLAGS',
+  '!define FLOATBOAT_CAROUSEL_FRAME_COUNT',
   'Function BootstrapInstFilesShow',
+  'Function BootstrapSetProductCarouselFrame',
   'Function BootstrapResizeAndCleanWindow',
   'BootstrapHideParentControl',
   'Call BootstrapEnsureProgressHandle',
@@ -1120,7 +1274,7 @@ Write-Host "  installer script: $nsiPath"
 Write-Host "  downloader script: $downloadScriptPath"
 Write-Host "  setup progress script: $setupProgressScriptPath"
 Write-Host "  welcome image:    $targetWelcomeAssetPath"
-Write-Host "  carousel images:  bootstrap-carousel-1.bmp, bootstrap-carousel-2.bmp, bootstrap-carousel-3.bmp"
+Write-Host "  carousel media:   mode=$($carouselAssetPlan.Mode), frames=$($carouselAssetPlan.FrameCount), intervalPolls=$($carouselAssetPlan.IntervalPolls)"
 Write-Host "  custom page:      enlarged window with hidden default header/details"
 Write-Host "  downloader:       release.aoe.chat via curl first, then PowerShell system proxy, then BITS"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"
