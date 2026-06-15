@@ -443,11 +443,251 @@ jobs:
           if-no-files-found: error
 
   # ===========================================
+  # Test Launcher - macOS arm64
+  # ===========================================
+  build-test-launcher-macos-arm64:
+    name: Test Launcher macOS (arm64)
+    needs: prepare
+    runs-on: macos-latest
+    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ inputs.repo_ref }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+          submodules: recursive
+
+      - name: Inject version into package.json
+        run: |
+          VERSION="${{ inputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Gemini CLI
+        run: pnpm run build:gemini
+
+      - name: Check code signing availability
+        id: signing
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
+      - name: Import Code Signing Certificate
+        if: steps.signing.outputs.available == 'true'
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Package test launcher (macOS arm64)
+        run: pnpm run package:test-launcher:macos
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Collect test launcher artifact
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          SRC="tools/floatboat-test-launcher/floatboat-test-launcher-macos.zip"
+          [ -f "$SRC" ] || { echo "Launcher zip not found: $SRC"; exit 1; }
+          mkdir -p dist/launchers
+          cp "$SRC" "dist/launchers/floatboat-test-launcher-${VERSION}-macos-arm64.zip"
+          echo "✅ Test launcher (macOS arm64): floatboat-test-launcher-${VERSION}-macos-arm64.zip"
+
+      - name: Upload test launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-launcher-macos-arm64
+          path: dist/launchers/*.zip
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Test Launcher - macOS x64 (Intel runner)
+  # ===========================================
+  build-test-launcher-macos-x64:
+    name: Test Launcher macOS (x64)
+    needs: prepare
+    runs-on: macos-13
+    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ inputs.repo_ref }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+          submodules: recursive
+
+      - name: Inject version into package.json
+        run: |
+          VERSION="${{ inputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Gemini CLI
+        run: pnpm run build:gemini
+
+      - name: Check code signing availability
+        id: signing
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+
+      - name: Import Code Signing Certificate
+        if: steps.signing.outputs.available == 'true'
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Package test launcher (macOS x64)
+        run: pnpm run package:test-launcher:macos
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Collect test launcher artifact
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          SRC="tools/floatboat-test-launcher/floatboat-test-launcher-macos.zip"
+          [ -f "$SRC" ] || { echo "Launcher zip not found: $SRC"; exit 1; }
+          mkdir -p dist/launchers
+          cp "$SRC" "dist/launchers/floatboat-test-launcher-${VERSION}-macos-x64.zip"
+          echo "✅ Test launcher (macOS x64): floatboat-test-launcher-${VERSION}-macos-x64.zip"
+
+      - name: Upload test launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-launcher-macos-x64
+          path: dist/launchers/*.zip
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Test Launcher - Windows x64
+  # ===========================================
+  build-test-launcher-windows:
+    name: Test Launcher Windows (x64)
+    needs: prepare
+    runs-on: windows-latest
+    if: inputs.notify_only == false && contains(inputs.platforms, 'windows')
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ inputs.repo_ref }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+          submodules: recursive
+
+      - name: Inject version into package.json
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Gemini CLI
+        run: pnpm run build:gemini
+
+      - name: Package test launcher (Windows x64)
+        run: pnpm run package:test-launcher:win
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+
+      - name: Collect test launcher artifact
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          SRC="tools/floatboat-test-launcher/floatboat-test-launcher-win.zip"
+          [ -f "$SRC" ] || { echo "Launcher zip not found: $SRC"; exit 1; }
+          mkdir -p dist/launchers
+          cp "$SRC" "dist/launchers/floatboat-test-launcher-${VERSION}-win-x64.zip"
+          echo "✅ Test launcher (Windows x64): floatboat-test-launcher-${VERSION}-win-x64.zip"
+
+      - name: Upload test launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-launcher-windows
+          path: dist/launchers/*.zip
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
   # Collect & Publish Release
   # ===========================================
   upload:
     name: Upload All Artifacts
-    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows]
+    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
     runs-on: ubuntu-latest
     if: |
       inputs.notify_only == false &&
@@ -495,6 +735,32 @@ jobs:
         with:
           name: windows-x64-build
           path: artifacts/windows/
+
+      - name: Download test launcher (macOS arm64)
+        if: needs.build-test-launcher-macos-arm64.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: test-launcher-macos-arm64
+          path: dist/launchers/
+
+      - name: Download test launcher (macOS x64)
+        if: needs.build-test-launcher-macos-x64.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: test-launcher-macos-x64
+          path: dist/launchers/
+
+      - name: Download test launcher (Windows x64)
+        if: needs.build-test-launcher-windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: test-launcher-windows
+          path: dist/launchers/
+
+      - name: List test launcher artifacts
+        run: |
+          echo "🚀 Test launcher artifacts (kept out of out/make so update metadata ignores them):"
+          ls -la dist/launchers/ 2>/dev/null || echo "  (none)"
 
       - name: Collect all artifacts into out/make
         run: |
@@ -600,6 +866,7 @@ jobs:
             out/make/*.dmg
             out/make/*.zip
             out/make/*.exe
+            dist/launchers/*.zip
             dist/latest-mac.yml
             dist/latest.yml
         env:
@@ -730,7 +997,13 @@ jobs:
               f"Floatboat-darwin-x64-{version}.zip",
               f"Floatboat-Setup-{version}.exe",
           ]
+          launcher_names = [
+              f"floatboat-test-launcher-{version}-macos-arm64.zip",
+              f"floatboat-test-launcher-{version}-macos-x64.zip",
+              f"floatboat-test-launcher-{version}-win-x64.zip",
+          ]
           installer_links = "\n".join(f"- {name}: {release_base_url}/{name}" for name in installer_names)
+          launcher_links = "\n".join(f"- {name}: {release_base_url}/{name}" for name in launcher_names)
 
           header = f"""{emoji} AOE Desktop {release_type} v{version}
 
@@ -742,6 +1015,9 @@ jobs:
 
           安装包下载：
           {installer_links}
+
+          测试录制 launcher：
+          {launcher_links}
 
           🔒 Release note 仅内部发送到飞书机器人，不写入公开 GitHub Release 页面。
 
