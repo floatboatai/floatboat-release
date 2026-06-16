@@ -549,7 +549,7 @@ jobs:
   build-test-launcher-macos-x64:
     name: Build Test Launcher macOS (x64)
     needs: prepare
-    runs-on: macos-13
+    runs-on: macos-15-intel
     if: needs.prepare.outputs.package_set != 'app' && contains(needs.prepare.outputs.platforms, 'macos')
 
     steps:
