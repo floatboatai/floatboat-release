@@ -38,6 +38,16 @@ on:
         options:
           - "release"
           - "test"
+      package_set:
+        description: "Package set to build (auto: test=app, release=all)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - "auto"
+          - "app"
+          - "launcher"
+          - "all"
 
 permissions:
   contents: write
@@ -55,10 +65,26 @@ jobs:
       is_rc: ${{ inputs.is_rc }}
       platforms: ${{ inputs.platforms }}
       build_profile: ${{ inputs.build_profile }}
+      package_set: ${{ steps.package_set.outputs.package_set }}
       changelog_file: ${{ steps.changelog.outputs.changelog_file }}
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
 
     steps:
+      - name: Resolve package set
+        id: package_set
+        shell: bash
+        run: |
+          package_set="${{ inputs.package_set }}"
+          if [ "$package_set" = "auto" ]; then
+            if [ "${{ inputs.build_profile }}" = "test" ]; then
+              package_set="app"
+            else
+              package_set="all"
+            fi
+          fi
+          echo "package_set=$package_set" >> "$GITHUB_OUTPUT"
+          echo "📦 Package set: $package_set"
+
       - name: Checkout source repo
         uses: actions/checkout@v4
         with:
@@ -163,7 +189,7 @@ jobs:
     name: Build macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -282,7 +308,7 @@ jobs:
     name: Build macOS (x64)
     needs: prepare
     runs-on: macos-latest
-    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -401,7 +427,7 @@ jobs:
     name: Build Windows (x64)
     needs: prepare
     runs-on: windows-latest
-    if: inputs.notify_only == false && contains(inputs.platforms, 'windows')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'windows')
 
     steps:
       - name: Checkout source repo
@@ -512,7 +538,7 @@ jobs:
     name: Test Launcher macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: inputs.notify_only == false && inputs.build_profile != 'test' && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -617,7 +643,7 @@ jobs:
     name: Test Launcher macOS (x64)
     needs: prepare
     runs-on: macos-13
-    if: inputs.notify_only == false && inputs.build_profile != 'test' && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -722,7 +748,7 @@ jobs:
     name: Test Launcher Windows (x64)
     needs: prepare
     runs-on: windows-latest
-    if: inputs.notify_only == false && inputs.build_profile != 'test' && contains(inputs.platforms, 'windows')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'windows')
 
     steps:
       - name: Checkout source repo
@@ -810,12 +836,24 @@ jobs:
       inputs.notify_only == false &&
       always() &&
       (
+        needs.prepare.outputs.package_set == 'launcher' ||
         !contains(inputs.platforms, 'macos') ||
         (needs.build-macos-arm64.result == 'success' && needs.build-macos-x64.result == 'success')
       ) &&
       (
+        needs.prepare.outputs.package_set == 'launcher' ||
         !contains(inputs.platforms, 'windows') ||
         needs.build-windows.result == 'success'
+      ) &&
+      (
+        needs.prepare.outputs.package_set == 'app' ||
+        !contains(inputs.platforms, 'macos') ||
+        (needs.build-test-launcher-macos-arm64.result == 'success' && needs.build-test-launcher-macos-x64.result == 'success')
+      ) &&
+      (
+        needs.prepare.outputs.package_set == 'app' ||
+        !contains(inputs.platforms, 'windows') ||
+        needs.build-test-launcher-windows.result == 'success'
       )
 
     steps:
@@ -908,6 +946,7 @@ jobs:
           ls -la out/make/
 
       - name: Verify required artifacts
+        if: needs.prepare.outputs.package_set != 'launcher'
         shell: bash
         run: |
           set -euo pipefail
@@ -993,7 +1032,7 @@ jobs:
       # S3 Deploy (official releases only)
       # ===========================================
       - name: Configure AWS Credentials
-        if: inputs.is_rc == false && inputs.build_profile != 'test'
+        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1001,7 +1040,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Upload installers to S3
-        if: inputs.is_rc == false && inputs.build_profile != 'test'
+        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
         run: |
           echo "📤 Uploading installers to S3..."
 
@@ -1027,7 +1066,7 @@ jobs:
           aws s3 ls "s3://aoe-desktop-releases/latest" || true
 
       - name: Invalidate CloudFront cache
-        if: inputs.is_rc == false && inputs.build_profile != 'test'
+        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
         run: |
           INVALIDATION=$(aws cloudfront create-invalidation \
             --distribution-id EOFLQQ0A8KCX1 \
@@ -1061,12 +1100,13 @@ jobs:
           echo "=========================================="
           echo ""
           echo "📦 Build Results:"
+          echo "   Package set:  ${{ needs.prepare.outputs.package_set }}"
           echo "   macOS arm64:  ${{ needs.build-macos-arm64.result || 'skipped' }}"
           echo "   macOS x64:    ${{ needs.build-macos-x64.result || 'skipped' }}"
           echo "   Windows x64:  ${{ needs.build-windows.result || 'skipped' }}"
           echo ""
           echo "📤 Upload:       ${{ needs.upload.result || 'skipped' }}"
-          if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" != "test" ]; then
+          if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" != "test" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
           echo "☁️  S3 Deploy:    included in upload job"
           echo "🌐 CDN:          https://release.aoe.chat/"
           fi
@@ -1085,6 +1125,7 @@ jobs:
 
           version = "${{ inputs.version }}"
           build_profile = "${{ inputs.build_profile }}"
+          package_set = "${{ needs.prepare.outputs.package_set }}"
           is_rc = "${{ inputs.is_rc }}" == "true"
           prev_tag = "${{ needs.prepare.outputs.prev_tag }}"
 
@@ -1124,6 +1165,8 @@ jobs:
           launcher_links = "\n".join(f"- {name}: {release_base_url}/{name}" for name in launcher_names)
 
           header = f"""{emoji} AOE Desktop {release_type} v{version}
+
+          包类型：{package_set}
 
           构建结果：
             macOS arm64：{icon(macos_arm64)} {macos_arm64}
