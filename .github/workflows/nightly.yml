@@ -20,6 +20,14 @@ on:
           - 'macos,windows'
           - 'macos'
           - 'windows'
+      build_profile:
+        description: 'Build profile (test injects TEST_BUILD_ENV_FILE into .env)'
+        required: false
+        default: 'release'
+        type: choice
+        options:
+          - 'release'
+          - 'test'
 
 permissions:
   contents: write
@@ -33,6 +41,7 @@ jobs:
       version: ${{ steps.version.outputs.nightly_version }}
       ref: ${{ steps.ref.outputs.ref }}
       platforms: ${{ steps.config.outputs.platforms }}
+      build_profile: ${{ steps.version.outputs.build_profile }}
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
       changelog_file: ${{ steps.changelog.outputs.changelog_file }}
 
@@ -59,9 +68,18 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           DATE=$(date -u +%Y%m%d)
-          NIGHTLY="${VERSION}-n.${DATE}"
+          BUILD_PROFILE="release"
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            BUILD_PROFILE="${{ github.event.inputs.build_profile || 'release' }}"
+          fi
+          if [ "$BUILD_PROFILE" = "test" ]; then
+            NIGHTLY="${VERSION}-test.${DATE}"
+          else
+            NIGHTLY="${VERSION}-n.${DATE}"
+          fi
           echo "nightly_version=$NIGHTLY" >> $GITHUB_OUTPUT
-          echo "📦 Nightly version: $NIGHTLY"
+          echo "build_profile=$BUILD_PROFILE" >> $GITHUB_OUTPUT
+          echo "📦 Nightly version: $NIGHTLY ($BUILD_PROFILE)"
 
       - name: Read config
         id: config
@@ -146,6 +164,24 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
 
+      - name: Inject test build .env
+        if: needs.prepare.outputs.build_profile == 'test'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+            exit 1
+          fi
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$TEST_BUILD_ENV_FILE"
+          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected test build .env (${entry_count} entries)."
+
       - name: Inject version
         run: |
           node -e "
@@ -220,6 +256,24 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
+
+      - name: Inject test build .env
+        if: needs.prepare.outputs.build_profile == 'test'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+            exit 1
+          fi
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$TEST_BUILD_ENV_FILE"
+          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected test build .env (${entry_count} entries)."
 
       - name: Inject version
         run: |
@@ -296,6 +350,24 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
 
+      - name: Inject test build .env
+        if: needs.prepare.outputs.build_profile == 'test'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+            exit 1
+          fi
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$TEST_BUILD_ENV_FILE"
+          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected test build .env (${entry_count} entries)."
+
       - name: Inject version
         shell: bash
         run: |
@@ -366,6 +438,24 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
+
+      - name: Inject test build .env
+        if: needs.prepare.outputs.build_profile == 'test'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+            exit 1
+          fi
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$TEST_BUILD_ENV_FILE"
+          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected test build .env (${entry_count} entries)."
 
       - name: Inject version
         run: |
@@ -450,6 +540,24 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
 
+      - name: Inject test build .env
+        if: needs.prepare.outputs.build_profile == 'test'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+            exit 1
+          fi
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$TEST_BUILD_ENV_FILE"
+          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected test build .env (${entry_count} entries)."
+
       - name: Inject version
         run: |
           node -e "
@@ -532,6 +640,24 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
+
+      - name: Inject test build .env
+        if: needs.prepare.outputs.build_profile == 'test'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+            exit 1
+          fi
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$TEST_BUILD_ENV_FILE"
+          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected test build .env (${entry_count} entries)."
 
       - name: Inject version
         shell: bash
@@ -637,7 +763,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: nightly-${{ needs.prepare.outputs.version }}
-          name: "Nightly ${{ needs.prepare.outputs.version }}"
+          name: ${{ needs.prepare.outputs.build_profile == 'test' && format('Test Nightly {0}', needs.prepare.outputs.version) || format('Nightly {0}', needs.prepare.outputs.version) }}
           body_path: /tmp/release_notes.md
           draft: false
           prerelease: true
