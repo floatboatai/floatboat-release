@@ -1076,6 +1076,93 @@ jobs:
           echo "$INVALIDATION" | jq '{Id: .Invalidation.Id, Status: .Invalidation.Status, CreateTime: .Invalidation.CreateTime}'
           echo "✅ CloudFront invalidation created"
 
+      - name: Sync website installer URLs
+        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
+        env:
+          INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
+          INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
+          INSTALLER_DOWNLOAD_BASE_URL: ${{ vars.INSTALLER_DOWNLOAD_BASE_URL }}
+          INSTALLER_URLS_API_PATH: /api/ops/installer-urls
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${INSTALLER_URLS_API_TOKEN:-}" ]; then
+            echo "::error::INSTALLER_URLS_API_TOKEN secret is required to sync website installer URLs"
+            exit 1
+          fi
+          if [ -z "${INSTALLER_URLS_API_BASE_URL:-}" ]; then
+            echo "::error::INSTALLER_URLS_API_BASE_URL variable is required to sync website installer URLs"
+            exit 1
+          fi
+          if [ -z "${INSTALLER_DOWNLOAD_BASE_URL:-}" ]; then
+            echo "::error::INSTALLER_DOWNLOAD_BASE_URL variable is required to sync website installer URLs"
+            exit 1
+          fi
+
+          INSTALLER_URLS_API_BASE_URL="${INSTALLER_URLS_API_BASE_URL%/}"
+          INSTALLER_DOWNLOAD_BASE_URL="${INSTALLER_DOWNLOAD_BASE_URL%/}"
+          INSTALLER_URLS_API_URL="${INSTALLER_URLS_API_BASE_URL}${INSTALLER_URLS_API_PATH}"
+
+          require_artifact() {
+            local pattern="$1"
+            local label="$2"
+            local artifact
+            artifact=$(find out/make -type f -name "$pattern" | sort | head -1)
+            if [ -z "$artifact" ]; then
+              echo "::error::Missing ${label}: ${pattern}"
+              exit 1
+            fi
+            printf '%s' "$artifact"
+          }
+
+          WINDOWS_EXE=$(require_artifact "*Setup*${VERSION}*.exe" "Windows installer")
+          MAC_ARM_DMG=$(require_artifact "*${VERSION}*arm64*.dmg" "macOS arm64 DMG")
+          MAC_X64_DMG=$(require_artifact "*${VERSION}*x64*.dmg" "macOS x64 DMG")
+
+          WINDOWS_URL="${INSTALLER_DOWNLOAD_BASE_URL}/$(basename "$WINDOWS_EXE")"
+          MAC_ARM_URL="${INSTALLER_DOWNLOAD_BASE_URL}/$(basename "$MAC_ARM_DMG")"
+          MAC_X64_URL="${INSTALLER_DOWNLOAD_BASE_URL}/$(basename "$MAC_X64_DMG")"
+
+          INSTALLER_URLS_JSON=$(jq -n \
+            --arg windows "$WINDOWS_URL" \
+            --arg mac_arm "$MAC_ARM_URL" \
+            --arg mac_x64 "$MAC_X64_URL" \
+            '{
+              DOWNLOAD_WINDOWS_BASE_INSTALLER_URL: $windows,
+              DOWNLOAD_MAC_ARM_INSTALLER_URL: $mac_arm,
+              DOWNLOAD_MAC_X86_INSTALLER_URL: $mac_x64
+            }')
+
+          echo "🌐 Syncing official installer URLs for v${VERSION}"
+          echo "  Windows: $(basename "$WINDOWS_EXE")"
+          echo "  macOS arm64: $(basename "$MAC_ARM_DMG")"
+          echo "  macOS x64: $(basename "$MAC_X64_DMG")"
+
+          curl -sS -X PATCH "$INSTALLER_URLS_API_URL" \
+            -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "$INSTALLER_URLS_JSON" \
+            -o /tmp/installer-urls-update.json
+
+          jq -e '.code == 0' /tmp/installer-urls-update.json
+
+          curl -sS "$INSTALLER_URLS_API_URL" \
+            -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+            -o /tmp/installer-urls-current.json
+
+          jq -e \
+            --arg windows "$WINDOWS_URL" \
+            --arg mac_arm "$MAC_ARM_URL" \
+            --arg mac_x64 "$MAC_X64_URL" \
+            '.code == 0
+              and .data.DOWNLOAD_WINDOWS_BASE_INSTALLER_URL == $windows
+              and .data.DOWNLOAD_MAC_ARM_INSTALLER_URL == $mac_arm
+              and .data.DOWNLOAD_MAC_X86_INSTALLER_URL == $mac_x64' \
+            /tmp/installer-urls-current.json
+
+          echo "✅ Website installer URLs synced and verified"
+
   # ===========================================
   # Release Summary & Feishu Notification
   # ===========================================
@@ -1108,7 +1195,8 @@ jobs:
           echo "📤 Upload:       ${{ needs.upload.result || 'skipped' }}"
           if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" != "test" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
           echo "☁️  S3 Deploy:    included in upload job"
-          echo "🌐 CDN:          https://release.aoe.chat/"
+          echo "🌐 CDN:          configured by INSTALLER_DOWNLOAD_BASE_URL"
+          echo "🔗 Website URLs: synced via installer URL management API"
           fi
           echo ""
           echo "🔒 Release notes are sent internally to Feishu only."
