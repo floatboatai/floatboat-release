@@ -512,7 +512,7 @@ jobs:
     name: Test Launcher macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && inputs.build_profile != 'test' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -617,7 +617,7 @@ jobs:
     name: Test Launcher macOS (x64)
     needs: prepare
     runs-on: macos-13
-    if: inputs.notify_only == false && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && inputs.build_profile != 'test' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -722,7 +722,7 @@ jobs:
     name: Test Launcher Windows (x64)
     needs: prepare
     runs-on: windows-latest
-    if: inputs.notify_only == false && contains(inputs.platforms, 'windows')
+    if: inputs.notify_only == false && inputs.build_profile != 'test' && contains(inputs.platforms, 'windows')
 
     steps:
       - name: Checkout source repo

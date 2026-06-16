@@ -428,7 +428,7 @@ jobs:
     name: Build Test Launcher macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: contains(needs.prepare.outputs.platforms, 'macos')
+    if: needs.prepare.outputs.build_profile != 'test' && contains(needs.prepare.outputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -529,7 +529,7 @@ jobs:
     name: Build Test Launcher macOS (x64)
     needs: prepare
     runs-on: macos-13
-    if: contains(needs.prepare.outputs.platforms, 'macos')
+    if: needs.prepare.outputs.build_profile != 'test' && contains(needs.prepare.outputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -630,7 +630,7 @@ jobs:
     name: Build Test Launcher Windows (x64)
     needs: prepare
     runs-on: windows-latest
-    if: contains(needs.prepare.outputs.platforms, 'windows')
+    if: needs.prepare.outputs.build_profile != 'test' && contains(needs.prepare.outputs.platforms, 'windows')
 
     steps:
       - name: Checkout source repo

@@ -23,4 +23,5 @@ gh workflow run release.yml -R floatboatai/floatboat-release \
 
 Use `build_profile=release` for normal RC or official release builds. Test
 release builds are always marked as GitHub pre-releases and do not upload
-installers to the production S3/CDN bucket.
+installers to the production S3/CDN bucket. Test builds only build the app
+packages selected by `platforms`; test launcher packages are skipped.
