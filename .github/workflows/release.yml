@@ -802,10 +802,28 @@ jobs:
       - name: Build Gemini CLI
         run: pnpm run build:gemini
 
-      - name: Package test launcher (Windows x64)
+      - name: Verify Racent signtool present
+        shell: pwsh
+        run: |
+          $tool = "build/signing/signtool-amd64.exe"
+          if (-not (Test-Path $tool)) {
+            Write-Error "$tool not found in source repo. Commit Racent signtool to aoe-desktop at $tool."
+            exit 1
+          }
+          $size = (Get-Item $tool).Length
+          if ($size -lt 100000) {
+            Write-Error "$tool looks too small ($size bytes). Likely a Git LFS pointer or corrupted file."
+            exit 1
+          }
+          Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
+
+      - name: Package and sign test launcher (Windows x64)
         run: pnpm run package:test-launcher:win
         env:
           NODE_OPTIONS: --max-old-space-size=8192
+          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
 
       - name: Collect test launcher artifact
         shell: bash
