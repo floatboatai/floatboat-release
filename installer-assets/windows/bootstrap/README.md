@@ -18,6 +18,34 @@ These assets are used by the RC Windows bootstrap installer. The installer page 
 - Runtime output names: `bootstrap-carousel-001.bmp`, `bootstrap-carousel-002.bmp`, ...
 - Maximum frames: `24`
 
+## Optional Remote Carousel ZIP
+
+RC bootstrap installers can also fetch extra carousel frames at runtime from:
+
+`https://release.aoe.chat/rc/Floatboat-Installer-RC-carousel.zip`
+
+This is intentionally optional. The installer always shows the bundled frames first, and if the remote ZIP cannot be downloaded, opened, or converted, installation continues with the bundled frames.
+
+ZIP requirements for the current product image package:
+
+- Accepted image extensions: `.png`, `.jpg`, `.jpeg`, `.bmp`
+- Root `1.*`: welcome side image, `164 x 314 px`, exported at runtime as `bootstrap-welcome-product.bmp`
+- Root `2.*`: first product carousel frame, `500 x 304 px`
+- `zh/`: Chinese product carousel frames, `500 x 304 px`
+- `en/`: English product carousel frames, `500 x 304 px`
+- Maximum carousel frames: `24`
+- Maximum ZIP size: `50 MB`
+
+Runtime language selection:
+
+- Chinese Windows installer locale (`zh-CN`) uses frames from `zh/`.
+- Any non-Chinese locale uses frames from `en/`.
+- The carousel sequence is root `2.*` first, then the selected language directory sorted by numeric filename first and filename second.
+
+Replacing the ZIP at the same CDN URL updates future installer runs without rebuilding the small installer. For local testing, set `FLOATBOAT_BOOTSTRAP_CAROUSEL_ZIP_URL` before launching the installer to override the default URL.
+
+Legacy flat numeric carousel ZIPs are still accepted as a fallback when no localized `zh/` or `en/` frames are present.
+
 The build script chooses the first available carousel source in this order:
 
 1. `carousel.gif`

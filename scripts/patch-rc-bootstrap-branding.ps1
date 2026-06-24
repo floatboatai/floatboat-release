@@ -2,6 +2,7 @@ param(
   [string]$InstallerDir = "floatboat-installer\win",
   [string]$AssetsDir = ".floatboat-release\installer-assets\windows\bootstrap",
   [int]$MaxCarouselFrames = 24,
+  [string]$RemoteCarouselZipUrl = "https://release.aoe.chat/rc/Floatboat-Installer-RC-carousel.zip",
   [int]$LaunchDelayMs = 1500
 )
 
@@ -9,6 +10,8 @@ $ErrorActionPreference = "Stop"
 
 $nsiPath = Join-Path $InstallerDir "bootstrap-installer.nsi"
 $downloadScriptPath = Join-Path $InstallerDir "download-installer.ps1"
+$launchHiddenScriptPath = Join-Path $InstallerDir "launch-hidden.vbs"
+$bootstrapCarouselScriptPath = Join-Path $InstallerDir "bootstrap-carousel.ps1"
 $setupProgressScriptPath = "build\setup-progress-monitor.ps1"
 $welcomeAssetPath = Join-Path $AssetsDir "welcome-product.bmp"
 $targetWelcomeAssetPath = Join-Path $InstallerDir "bootstrap-welcome-product.bmp"
@@ -39,6 +42,12 @@ function Write-Utf8NoBomFile([string]$Path, [string]$Content) {
 
 function Convert-Newlines([string]$Content, [string]$Newline) {
   return ($Content -replace "\r?\n", $Newline)
+}
+
+function Escape-NsisQuotedValue([string]$Value) {
+  $result = ([string]$Value).Replace('$', '$$')
+  $result = $result.Replace('"', '$\"')
+  return $result
 }
 
 function Ensure-DrawingLoaded() {
@@ -197,6 +206,427 @@ function Prepare-BootstrapCarouselAssets([string]$TargetDir) {
   return Convert-StaticCarouselToBootstrapFrames -TargetDir $TargetDir
 }
 
+function Write-BootstrapCarouselDownloaderScript([string]$Path) {
+  $scriptSource = @'
+# ABOUTME: Downloads optional runtime carousel frames for the Windows bootstrap installer.
+param(
+  [Parameter(Mandatory = $true)]
+  [string]$ZipUrl,
+  [Parameter(Mandatory = $true)]
+  [string]$OutputDir,
+  [Parameter(Mandatory = $true)]
+  [string]$FrameCountFile,
+  [int]$EmbeddedFrameCount = 0,
+  [int]$MaxFrames = __MAX_CAROUSEL_FRAMES__,
+  [int]$FrameWidth = 500,
+  [int]$FrameHeight = 304,
+  [int]$WelcomeWidth = 164,
+  [int]$WelcomeHeight = 314,
+  [int]$MaxZipBytes = 52428800,
+  [string]$Locale = 'en-US'
+)
+
+$ErrorActionPreference = 'Stop'
+$DebugDir = Join-Path $env:LOCALAPPDATA 'Floatboat'
+$DebugLog = Join-Path $DebugDir 'bootstrap-carousel-debug.log'
+$AsciiEncoding = [System.Text.Encoding]::ASCII
+
+function Write-DebugLog([string]$Message) {
+  try {
+    if (-not (Test-Path -LiteralPath $DebugDir)) {
+      [System.IO.Directory]::CreateDirectory($DebugDir) | Out-Null
+    }
+
+    $timestamp = [DateTime]::UtcNow.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+    [System.IO.File]::AppendAllText($DebugLog, "$timestamp $Message`r`n", [System.Text.Encoding]::UTF8)
+  } catch {
+  }
+}
+
+function Write-AtomicText([string]$Path, [string]$Content) {
+  $parentDirectory = Split-Path -Parent $Path
+  if ($parentDirectory -and -not (Test-Path -LiteralPath $parentDirectory)) {
+    [System.IO.Directory]::CreateDirectory($parentDirectory) | Out-Null
+  }
+
+  $tmpPath = '{0}.{1}.{2}.tmp' -f $Path, $PID, ([System.Guid]::NewGuid().ToString('N'))
+  [System.IO.File]::WriteAllText($tmpPath, $Content, $AsciiEncoding)
+
+  try {
+    [System.IO.File]::Copy($tmpPath, $Path, $true)
+  } finally {
+    Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Use-SystemProxy([System.Net.HttpWebRequest]$Request) {
+  try {
+    $proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+    if ($null -ne $proxy) {
+      $proxy.Credentials = [System.Net.CredentialCache]::DefaultCredentials
+      $Request.Proxy = $proxy
+    }
+  } catch {
+    Write-DebugLog ('system proxy setup failed: {0}' -f (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+  }
+}
+
+function Get-FrameName([int]$Index) {
+  return ('bootstrap-carousel-{0:D3}.bmp' -f $Index)
+}
+
+function Get-SelectedCarouselLocaleDirectory([string]$Value) {
+  $normalized = ([string]$Value).Trim().ToLowerInvariant()
+  if ($normalized.StartsWith('zh')) {
+    return 'zh'
+  }
+
+  return 'en'
+}
+
+function Save-ImageAsSizedBmp(
+  [object]$SourceImage,
+  [string]$DestinationPath,
+  [string]$AssetLabel,
+  [int]$Width,
+  [int]$Height
+) {
+  if ($SourceImage.Width -ne $Width -or $SourceImage.Height -ne $Height) {
+    throw "$AssetLabel must be ${Width}x${Height}px, got $($SourceImage.Width)x$($SourceImage.Height)"
+  }
+
+  $bitmap = New-Object System.Drawing.Bitmap $Width, $Height, ([System.Drawing.Imaging.PixelFormat]::Format24bppRgb)
+  $tmpPath = '{0}.{1}.{2}.tmp' -f $DestinationPath, $PID, ([System.Guid]::NewGuid().ToString('N'))
+
+  try {
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    try {
+      $graphics.Clear([System.Drawing.Color]::White)
+      $graphics.DrawImage($SourceImage, 0, 0, $Width, $Height)
+    } finally {
+      $graphics.Dispose()
+    }
+
+    $bitmap.Save($tmpPath, [System.Drawing.Imaging.ImageFormat]::Bmp)
+
+    $lastError = $null
+    for ($attempt = 0; $attempt -lt 12; $attempt += 1) {
+      try {
+        [System.IO.File]::Copy($tmpPath, $DestinationPath, $true)
+        return
+      } catch [System.IO.IOException] {
+        $lastError = $_
+        Start-Sleep -Milliseconds 25
+      } catch [System.UnauthorizedAccessException] {
+        $lastError = $_
+        Start-Sleep -Milliseconds 25
+      }
+    }
+
+    if ($null -ne $lastError) {
+      throw $lastError.Exception
+    }
+  } finally {
+    Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+    $bitmap.Dispose()
+  }
+}
+
+function Save-ImageAsFrame(
+  [object]$SourceImage,
+  [string]$DestinationPath,
+  [string]$AssetLabel
+) {
+  Save-ImageAsSizedBmp -SourceImage $SourceImage -DestinationPath $DestinationPath -AssetLabel $AssetLabel -Width $FrameWidth -Height $FrameHeight
+}
+
+function Save-ZipEntryAsSizedBmp(
+  [object]$Entry,
+  [string]$DestinationPath,
+  [string]$AssetLabel,
+  [int]$Width,
+  [int]$Height
+) {
+  $stream = $Entry.Open()
+  try {
+    $image = [System.Drawing.Image]::FromStream($stream, $false, $true)
+    try {
+      Save-ImageAsSizedBmp -SourceImage $image -DestinationPath $DestinationPath -AssetLabel $AssetLabel -Width $Width -Height $Height
+    } finally {
+      $image.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
+function Save-ZipEntryAsFrame(
+  [object]$Entry,
+  [string]$DestinationPath,
+  [string]$AssetLabel
+) {
+  Save-ZipEntryAsSizedBmp -Entry $Entry -DestinationPath $DestinationPath -AssetLabel $AssetLabel -Width $FrameWidth -Height $FrameHeight
+}
+
+function Download-Zip([string]$Url, [string]$Path) {
+  [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+
+  $request = [System.Net.HttpWebRequest]::Create($Url)
+  $request.Method = 'GET'
+  $request.Timeout = 15000
+  $request.ReadWriteTimeout = 15000
+  $request.AllowAutoRedirect = $true
+  $request.UserAgent = 'Floatboat Bootstrap Carousel'
+  Use-SystemProxy -Request $request
+
+  $response = $request.GetResponse()
+  try {
+    if ($response.ContentLength -gt $MaxZipBytes) {
+      throw "carousel zip is too large: $($response.ContentLength) bytes"
+    }
+
+    $inputStream = $response.GetResponseStream()
+    $outputStream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    $buffer = New-Object byte[] 65536
+    $totalBytes = 0
+
+    try {
+      while ($true) {
+        $read = $inputStream.Read($buffer, 0, $buffer.Length)
+        if ($read -le 0) {
+          break
+        }
+
+        $totalBytes += $read
+        if ($totalBytes -gt $MaxZipBytes) {
+          throw "carousel zip exceeded $MaxZipBytes bytes"
+        }
+
+        $outputStream.Write($buffer, 0, $read)
+      }
+    } finally {
+      if ($outputStream) {
+        $outputStream.Close()
+      }
+      if ($inputStream) {
+        $inputStream.Close()
+      }
+    }
+  } finally {
+    $response.Close()
+  }
+}
+
+try {
+  if ([string]::IsNullOrWhiteSpace($ZipUrl)) {
+    exit 0
+  }
+
+  if (-not (Test-Path -LiteralPath $OutputDir)) {
+    [System.IO.Directory]::CreateDirectory($OutputDir) | Out-Null
+  }
+
+  Write-DebugLog ('remote carousel start url={0}' -f $ZipUrl)
+  Add-Type -AssemblyName System.Drawing
+  Add-Type -AssemblyName System.IO.Compression
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+  $zipPath = Join-Path ([System.IO.Path]::GetTempPath()) ('floatboat-carousel-{0}.zip' -f ([System.Guid]::NewGuid().ToString('N')))
+
+  try {
+    Download-Zip -Url $ZipUrl -Path $zipPath
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+
+    try {
+      $selectedLocaleDirectory = Get-SelectedCarouselLocaleDirectory -Value $Locale
+      Write-DebugLog ('remote carousel locale={0} selected_dir={1}' -f $Locale, $selectedLocaleDirectory)
+
+      $rootEntries = @()
+      $localizedEntries = @()
+      foreach ($entry in $archive.Entries) {
+        if ([string]::IsNullOrWhiteSpace($entry.Name)) {
+          continue
+        }
+
+        $normalizedName = ([string]$entry.FullName).Replace('\', '/').Trim('/')
+        if ([string]::IsNullOrWhiteSpace($normalizedName)) {
+          continue
+        }
+
+        $segments = @($normalizedName -split '/')
+        if ($segments.Count -lt 1) {
+          continue
+        }
+        if (([string]$segments[0]).ToLowerInvariant() -eq '__macosx') {
+          continue
+        }
+        if ($entry.Name -eq '.DS_Store' -or $entry.Name.StartsWith('._')) {
+          continue
+        }
+        if ($segments.Count -gt 1) {
+          $firstSegment = ([string]$segments[0]).ToLowerInvariant()
+          $secondSegment = ([string]$segments[1]).ToLowerInvariant()
+          if ($firstSegment -notin @('zh', 'en') -and ($segments.Count -eq 2 -or $secondSegment -in @('zh', 'en'))) {
+            $segments = @($segments | Select-Object -Skip 1)
+          }
+        }
+
+        $extension = [System.IO.Path]::GetExtension($entry.Name).ToLowerInvariant()
+        if ($extension -notin @('.bmp', '.png', '.jpg', '.jpeg')) {
+          continue
+        }
+
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($entry.Name)
+        $numericIndex = $null
+        $numericSort = [int]::MaxValue
+        if ($baseName -match '^\d+$') {
+          $numericIndex = [int]$baseName
+          $numericSort = $numericIndex
+        }
+
+        $item = [pscustomobject]@{
+          Index = $numericIndex
+          SortIndex = $numericSort
+          Entry = $entry
+          Name = $entry.FullName
+          FileName = $entry.Name
+          TopDirectory = if ($segments.Count -gt 1) { ([string]$segments[0]).ToLowerInvariant() } else { '' }
+        }
+
+        if ($segments.Count -eq 1) {
+          if ($null -ne $numericIndex -and $numericIndex -ge 1 -and $numericIndex -le $MaxFrames) {
+            $rootEntries += $item
+          }
+          continue
+        }
+
+        if ($item.TopDirectory -eq $selectedLocaleDirectory) {
+          $localizedEntries += $item
+        }
+      }
+
+      $rootByIndex = @{}
+      foreach ($item in ($rootEntries | Sort-Object Index, Name)) {
+        if (-not $rootByIndex.ContainsKey($item.Index)) {
+          $rootByIndex[$item.Index] = $item
+        }
+      }
+
+      $processed = @{}
+      $remoteCarouselFrameCount = 0
+      $usesProductZipLayout = $localizedEntries.Count -gt 0
+
+      if ($rootByIndex.ContainsKey(1)) {
+        $welcomeItem = $rootByIndex[1]
+        try {
+          $welcomePath = Join-Path $OutputDir 'bootstrap-welcome-product.bmp'
+          Save-ZipEntryAsSizedBmp -Entry $welcomeItem.Entry -DestinationPath $welcomePath -AssetLabel $welcomeItem.Name -Width $WelcomeWidth -Height $WelcomeHeight
+          $usesProductZipLayout = $true
+          Write-DebugLog ('remote welcome image ready source={0}' -f $welcomeItem.Name)
+        } catch {
+          Write-DebugLog ('remote welcome image skipped source={0} error={1}' -f $welcomeItem.Name, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+        }
+      }
+
+      if ($usesProductZipLayout) {
+        $nextFrameIndex = 1
+
+        if ($rootByIndex.ContainsKey(2)) {
+          $firstCarouselItem = $rootByIndex[2]
+          try {
+            $destinationPath = Join-Path $OutputDir (Get-FrameName -Index $nextFrameIndex)
+            Save-ZipEntryAsFrame -Entry $firstCarouselItem.Entry -DestinationPath $destinationPath -AssetLabel $firstCarouselItem.Name
+            $processed[$nextFrameIndex] = $true
+            $remoteCarouselFrameCount = [Math]::Max($remoteCarouselFrameCount, $nextFrameIndex)
+            Write-DebugLog ('remote carousel frame ready index={0} source={1}' -f $nextFrameIndex, $firstCarouselItem.Name)
+            $nextFrameIndex += 1
+          } catch {
+            Write-DebugLog ('remote carousel frame skipped source={0} error={1}' -f $firstCarouselItem.Name, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+          }
+        } else {
+          Write-DebugLog 'remote carousel product zip has no root 2.* first product frame'
+        }
+
+        foreach ($item in ($localizedEntries | Sort-Object SortIndex, FileName, Name)) {
+          if ($nextFrameIndex -gt $MaxFrames) {
+            break
+          }
+
+          try {
+            $destinationPath = Join-Path $OutputDir (Get-FrameName -Index $nextFrameIndex)
+            Save-ZipEntryAsFrame -Entry $item.Entry -DestinationPath $destinationPath -AssetLabel $item.Name
+            $processed[$nextFrameIndex] = $true
+            $remoteCarouselFrameCount = [Math]::Max($remoteCarouselFrameCount, $nextFrameIndex)
+            Write-DebugLog ('remote carousel frame ready index={0} locale={1} source={2}' -f $nextFrameIndex, $selectedLocaleDirectory, $item.Name)
+            $nextFrameIndex += 1
+          } catch {
+            Write-DebugLog ('remote carousel frame skipped source={0} error={1}' -f $item.Name, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+          }
+        }
+      } else {
+        foreach ($item in ($rootEntries | Sort-Object Index, Name)) {
+          if ($processed.ContainsKey($item.Index)) {
+            continue
+          }
+
+          try {
+            $destinationPath = Join-Path $OutputDir (Get-FrameName -Index $item.Index)
+            Save-ZipEntryAsFrame -Entry $item.Entry -DestinationPath $destinationPath -AssetLabel $item.Name
+            $processed[$item.Index] = $true
+            $remoteCarouselFrameCount = [Math]::Max($remoteCarouselFrameCount, $item.Index)
+            Write-DebugLog ('remote carousel legacy frame ready index={0} source={1}' -f $item.Index, $item.Name)
+          } catch {
+            Write-DebugLog ('remote carousel legacy frame skipped source={0} error={1}' -f $item.Name, (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+          }
+        }
+      }
+
+      if ($processed.Count -gt 0) {
+        if ($usesProductZipLayout) {
+          if ($remoteCarouselFrameCount -gt 0) {
+            Write-AtomicText -Path $FrameCountFile -Content ([string]$remoteCarouselFrameCount)
+            Write-DebugLog ('remote carousel enabled product zip frames={0}' -f $remoteCarouselFrameCount)
+          } else {
+            Write-DebugLog 'remote carousel product zip had no usable carousel frames'
+          }
+        } else {
+          $frameCount = [Math]::Min([Math]::Max(0, $EmbeddedFrameCount), $MaxFrames)
+          for ($index = $frameCount + 1; $index -le $MaxFrames; $index += 1) {
+            $framePath = Join-Path $OutputDir (Get-FrameName -Index $index)
+            if (-not (Test-Path -LiteralPath $framePath)) {
+              break
+            }
+
+            $frameCount = $index
+          }
+
+          if ($frameCount -gt $EmbeddedFrameCount) {
+            Write-AtomicText -Path $FrameCountFile -Content ([string]$frameCount)
+            Write-DebugLog ('remote carousel enabled legacy frames={0}' -f $frameCount)
+          } else {
+            Write-DebugLog ('remote carousel legacy frames converted without count increase processed={0}' -f $processed.Count)
+          }
+        }
+      } else {
+        Write-DebugLog 'remote carousel zip contained no usable image frames'
+      }
+    } finally {
+      $archive.Dispose()
+    }
+  } finally {
+    Remove-Item -LiteralPath $zipPath -Force -ErrorAction SilentlyContinue
+  }
+} catch {
+  Write-DebugLog ('remote carousel failed: {0}' -f (($_.Exception.Message -replace '\r', ' ' -replace '\n', ' ').Trim()))
+}
+
+exit 0
+'@
+
+  $scriptSource = $scriptSource.Replace('__MAX_CAROUSEL_FRAMES__', [string]$MaxCarouselFrames)
+  Write-Utf8BomFile -Path $Path -Content $scriptSource
+}
+
 function Patch-AtomicWriter(
   [string]$ScriptPath,
   [string]$OldBlock,
@@ -233,12 +663,17 @@ if (-not (Test-Path -LiteralPath $nsiPath)) {
   throw "NSIS bootstrap script not found: $nsiPath"
 }
 
+if (-not (Test-Path -LiteralPath $launchHiddenScriptPath)) {
+  throw "RC bootstrap launcher script not found: $launchHiddenScriptPath"
+}
+
 if (-not (Test-Path -LiteralPath $welcomeAssetPath)) {
   throw "RC bootstrap welcome image not found: $welcomeAssetPath"
 }
 
 Copy-Item -LiteralPath $welcomeAssetPath -Destination $targetWelcomeAssetPath -Force
 $carouselAssetPlan = Prepare-BootstrapCarouselAssets -TargetDir $InstallerDir
+Write-BootstrapCarouselDownloaderScript -Path $bootstrapCarouselScriptPath
 
 $source = Read-TextFile -Path $nsiPath
 $newline = if ($source.Contains("`r`n")) { "`r`n" } else { "`n" }
@@ -252,6 +687,29 @@ if (-not $source.Contains('!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welco
     '!define MUI_UNICON "..\..\resources\icon.ico"',
     "!define MUI_UNICON `"..\..\resources\icon.ico`"${newline}!define MUI_WELCOMEFINISHPAGE_BITMAP `"bootstrap-welcome-product.bmp`""
   )
+}
+
+$escapedRemoteCarouselZipUrl = Escape-NsisQuotedValue $RemoteCarouselZipUrl
+$remoteCarouselDefineBlock = Convert-Newlines -Newline $newline -Content @"
+!ifndef FLOATBOAT_REMOTE_CAROUSEL_ZIP_URL
+!define FLOATBOAT_REMOTE_CAROUSEL_ZIP_URL "$escapedRemoteCarouselZipUrl"
+!endif
+"@
+$remoteCarouselDefinePattern = '(?ms)!ifndef FLOATBOAT_REMOTE_CAROUSEL_ZIP_URL\r?\n!define FLOATBOAT_REMOTE_CAROUSEL_ZIP_URL ".*?"\r?\n!endif'
+if ([regex]::IsMatch($source, $remoteCarouselDefinePattern)) {
+  $source = [regex]::Replace(
+    $source,
+    $remoteCarouselDefinePattern,
+    [System.Text.RegularExpressions.MatchEvaluator] { param($match) $remoteCarouselDefineBlock },
+    1
+  )
+} elseif ($source.Contains('!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"')) {
+  $source = $source.Replace(
+    '!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"',
+    "!define MUI_WELCOMEFINISHPAGE_BITMAP `"bootstrap-welcome-product.bmp`"${newline}$remoteCarouselDefineBlock"
+  )
+} else {
+  throw "Unable to patch remote carousel URL define in $nsiPath"
 }
 
 if ($source.Contains('BrandingText "Floatboat Web Installer"')) {
@@ -282,7 +740,14 @@ if (-not $source.Contains("Var DownloadLastProgressValue")) {
 if (-not $source.Contains("Var BootstrapPageDialogHandle")) {
   $source = $source.Replace(
     "Var DownloadPollEmptyTicks",
-    "Var DownloadPollEmptyTicks${newline}Var BootstrapPageDialogHandle${newline}Var BootstrapImageHandle${newline}Var BootstrapTitleHandle${newline}Var BootstrapSubtitleHandle${newline}Var BootstrapStatusHandle${newline}Var BootstrapMetaHandle${newline}Var BootstrapPercentHandle${newline}Var BootstrapHintHandle${newline}Var ProductCarouselBitmap${newline}Var ProductCarouselFrame${newline}Var ProductCarouselTick"
+    "Var DownloadPollEmptyTicks${newline}Var BootstrapPageDialogHandle${newline}Var BootstrapImageHandle${newline}Var BootstrapTitleHandle${newline}Var BootstrapSubtitleHandle${newline}Var BootstrapStatusHandle${newline}Var BootstrapMetaHandle${newline}Var BootstrapPercentHandle${newline}Var BootstrapHintHandle${newline}Var BootstrapCarouselFrameCountFile${newline}Var BootstrapRemoteCarouselUrl${newline}Var ProductCarouselBitmap${newline}Var ProductCarouselFrame${newline}Var ProductCarouselTick${newline}Var ProductCarouselFrameCount"
+  )
+}
+
+if (-not $source.Contains("Var BootstrapRemoteCarouselUrl")) {
+  $source = $source.Replace(
+    "Var ProductCarouselTick",
+    "Var ProductCarouselTick${newline}Var ProductCarouselFrameCount${newline}Var BootstrapCarouselFrameCountFile${newline}Var BootstrapRemoteCarouselUrl"
   )
 }
 
@@ -434,6 +899,7 @@ __CAROUSEL_FILE_LINES__
 
   StrCpy $ProductCarouselFrame 1
   StrCpy $ProductCarouselTick 0
+  StrCpy $ProductCarouselFrameCount ${FLOATBOAT_CAROUSEL_FRAME_COUNT}
   Call BootstrapSetProductCarouselFrame
 FunctionEnd
 
@@ -496,8 +962,34 @@ Function BootstrapRenderCustomStatus
   ${EndIf}
 FunctionEnd
 
+Function BootstrapRefreshProductCarouselFrameCount
+  ${If} $BootstrapCarouselFrameCountFile == ""
+    Return
+  ${EndIf}
+  ${IfNot} ${FileExists} "$BootstrapCarouselFrameCountFile"
+    Return
+  ${EndIf}
+
+  !insertmacro ReadValueFile "$BootstrapCarouselFrameCountFile" $0
+  ${If} $0 == ""
+    Return
+  ${EndIf}
+  Delete "$BootstrapCarouselFrameCountFile"
+
+  ${If} $0 > 0
+    StrCpy $ProductCarouselFrameCount $0
+    StrCpy $ProductCarouselFrame 1
+    StrCpy $ProductCarouselTick 0
+    Call BootstrapSetProductCarouselFrame
+  ${EndIf}
+FunctionEnd
+
 Function BootstrapUpdateProductCarousel
-  ${If} ${FLOATBOAT_CAROUSEL_FRAME_COUNT} <= 1
+  Call BootstrapRefreshProductCarouselFrameCount
+  ${If} $ProductCarouselFrameCount == ""
+    StrCpy $ProductCarouselFrameCount ${FLOATBOAT_CAROUSEL_FRAME_COUNT}
+  ${EndIf}
+  ${If} $ProductCarouselFrameCount <= 1
     Return
   ${EndIf}
   ${If} $BootstrapImageHandle == ""
@@ -514,7 +1006,7 @@ Function BootstrapUpdateProductCarousel
 
   StrCpy $ProductCarouselTick 0
   IntOp $ProductCarouselFrame $ProductCarouselFrame + 1
-  ${If} $ProductCarouselFrame > ${FLOATBOAT_CAROUSEL_FRAME_COUNT}
+  ${If} $ProductCarouselFrame > $ProductCarouselFrameCount
     StrCpy $ProductCarouselFrame 1
   ${EndIf}
   Call BootstrapSetProductCarouselFrame
@@ -581,6 +1073,40 @@ FunctionEnd
   )
 }
 
+$oldCarouselFrameCountRefreshBlock = Convert-Newlines -Newline $newline -Content @'
+  ${If} $0 > $ProductCarouselFrameCount
+    StrCpy $ProductCarouselFrameCount $0
+  ${EndIf}
+'@
+
+$newCarouselFrameCountRefreshBlock = Convert-Newlines -Newline $newline -Content @'
+  Delete "$BootstrapCarouselFrameCountFile"
+
+  ${If} $0 > 0
+    StrCpy $ProductCarouselFrameCount $0
+    StrCpy $ProductCarouselFrame 1
+    StrCpy $ProductCarouselTick 0
+    Call BootstrapSetProductCarouselFrame
+  ${EndIf}
+'@
+
+if ($source.Contains($oldCarouselFrameCountRefreshBlock)) {
+  $source = $source.Replace($oldCarouselFrameCountRefreshBlock, $newCarouselFrameCountRefreshBlock)
+}
+
+$oldCarouselFrameCountRefreshResetBlock = Convert-Newlines -Newline $newline -Content @'
+  ${If} $0 > 0
+    StrCpy $ProductCarouselFrameCount $0
+    ${If} $ProductCarouselFrame > $ProductCarouselFrameCount
+      StrCpy $ProductCarouselFrame 1
+    ${EndIf}
+  ${EndIf}
+'@
+
+if ($source.Contains($oldCarouselFrameCountRefreshResetBlock)) {
+  $source = $source.Replace($oldCarouselFrameCountRefreshResetBlock, $newCarouselFrameCountRefreshBlock)
+}
+
 if (-not $source.Contains("Call BootstrapDestroyProductCarousel${newline}${newline}  `${If} `$DownloadPidFile")) {
   $source = $source.Replace(
     "Function BootstrapAbortCleanup${newline}  `${If} `$DownloadPidFile",
@@ -617,6 +1143,91 @@ if (-not $source.Contains("StrCpy `$DownloadStateStableTicks 0")) {
   if (-not $source.Contains("StrCpy `$DownloadStateStableTicks 0")) {
     throw "Unable to patch download stale-state counters in $nsiPath"
   }
+}
+
+if (-not $source.Contains("StrCpy `$BootstrapCarouselFrameCountFile")) {
+  $source = $source.Replace(
+    "  StrCpy `$DownloadPidFile `"`$PLUGINSDIR\download.pid`"",
+    "  StrCpy `$DownloadPidFile `"`$PLUGINSDIR\download.pid`"${newline}  StrCpy `$BootstrapCarouselFrameCountFile `"`$PLUGINSDIR\bootstrap-carousel-count.value`"${newline}  Delete `"`$BootstrapCarouselFrameCountFile`""
+  )
+}
+
+if (-not $source.Contains("ReadEnvStr `$BootstrapRemoteCarouselUrl")) {
+  $oldAttributionEndpointBlock = Convert-Newlines -Newline $newline -Content @'
+  ReadEnvStr $AttributionEventEndpoint "FLOATBOAT_ATTRIBUTION_EVENT_ENDPOINT"
+  ${If} $AttributionEventEndpoint == ""
+    StrCpy $AttributionEventEndpoint "${ATTRIBUTION_EVENT_ENDPOINT}"
+  ${EndIf}
+'@
+
+  $newAttributionEndpointBlock = Convert-Newlines -Newline $newline -Content @'
+  ReadEnvStr $AttributionEventEndpoint "FLOATBOAT_ATTRIBUTION_EVENT_ENDPOINT"
+  ${If} $AttributionEventEndpoint == ""
+    StrCpy $AttributionEventEndpoint "${ATTRIBUTION_EVENT_ENDPOINT}"
+  ${EndIf}
+
+  ReadEnvStr $BootstrapRemoteCarouselUrl "FLOATBOAT_BOOTSTRAP_CAROUSEL_ZIP_URL"
+  ${If} $BootstrapRemoteCarouselUrl == ""
+    StrCpy $BootstrapRemoteCarouselUrl "${FLOATBOAT_REMOTE_CAROUSEL_ZIP_URL}"
+  ${EndIf}
+'@
+
+  if (-not $source.Contains($oldAttributionEndpointBlock)) {
+    throw "Unable to patch remote carousel URL setup in $nsiPath"
+  }
+
+  $source = $source.Replace($oldAttributionEndpointBlock, $newAttributionEndpointBlock)
+}
+
+if (-not $source.Contains('File /oname=$PLUGINSDIR\bootstrap-carousel.ps1 "bootstrap-carousel.ps1"')) {
+  $oldBootstrapFileBlock = Convert-Newlines -Newline $newline -Content @'
+  File /oname=$PLUGINSDIR\send-installer-event.ps1 "send-installer-event.ps1"
+  File /oname=$PLUGINSDIR\download-installer.ps1 "download-installer.ps1"
+  File /oname=$PLUGINSDIR\launch-hidden.vbs "launch-hidden.vbs"
+'@
+
+  $newBootstrapFileBlock = Convert-Newlines -Newline $newline -Content @'
+  File /oname=$PLUGINSDIR\send-installer-event.ps1 "send-installer-event.ps1"
+  File /oname=$PLUGINSDIR\download-installer.ps1 "download-installer.ps1"
+  File /oname=$PLUGINSDIR\bootstrap-carousel.ps1 "bootstrap-carousel.ps1"
+  File /oname=$PLUGINSDIR\launch-hidden.vbs "launch-hidden.vbs"
+'@
+
+  if (-not $source.Contains($oldBootstrapFileBlock)) {
+    throw "Unable to patch remote carousel script inclusion in $nsiPath"
+  }
+
+  $source = $source.Replace($oldBootstrapFileBlock, $newBootstrapFileBlock)
+}
+
+if (-not $source.Contains('"$PLUGINSDIR\launch-hidden.vbs" "carousel"')) {
+  $oldInstallClickBlock = Convert-Newlines -Newline $newline -Content @'
+  !insertmacro SendEvent "install_click"
+
+  DetailPrint "$(TXT_DOWNLOADING)"
+'@
+
+  $newInstallClickBlock = Convert-Newlines -Newline $newline -Content @'
+  !insertmacro SendEvent "install_click"
+
+  StrCpy $PowerShellPath "$SYSDIR\WindowsPowerShell\v1.0\powershell.exe"
+  ${IfNot} ${FileExists} "$PowerShellPath"
+    StrCpy $PowerShellPath "powershell.exe"
+  ${EndIf}
+
+  ${If} $BootstrapRemoteCarouselUrl != ""
+    ExecWait '"$SYSDIR\wscript.exe" "$PLUGINSDIR\launch-hidden.vbs" "carousel" "$PowerShellPath" "$PLUGINSDIR\bootstrap-carousel.ps1" "$BootstrapRemoteCarouselUrl" "$PLUGINSDIR" "$BootstrapCarouselFrameCountFile" "${FLOATBOAT_CAROUSEL_FRAME_COUNT}" "$DownloadLocale"' $0
+    !insertmacro LogDebug "remote_carousel_launch code=$0 url=$BootstrapRemoteCarouselUrl"
+  ${EndIf}
+
+  DetailPrint "$(TXT_DOWNLOADING)"
+'@
+
+  if (-not $source.Contains($oldInstallClickBlock)) {
+    throw "Unable to patch remote carousel launch in $nsiPath"
+  }
+
+  $source = $source.Replace($oldInstallClickBlock, $newInstallClickBlock)
 }
 
 if (-not $source.Contains("DownloadStateStableTicks > 3000")) {
@@ -693,18 +1304,25 @@ if ($source.Contains($oldFailureMessage)) {
 
 $requiredSnippets = @(
   '!define MUI_WELCOMEFINISHPAGE_BITMAP "bootstrap-welcome-product.bmp"',
+  '!define FLOATBOAT_REMOTE_CAROUSEL_ZIP_URL',
   'BrandingText " "',
   '!define MUI_PAGE_CUSTOMFUNCTION_SHOW BootstrapInstFilesShow',
   'LangString TXT_READY_TO_LAUNCH',
   'Var BootstrapPageDialogHandle',
+  'Var BootstrapRemoteCarouselUrl',
+  'Var ProductCarouselFrameCount',
   'Var DownloadStateStableTicks',
   'Var BootstrapSubtitleHandle',
   '!define FLOATBOAT_LR_BITMAP_FLAGS',
   '!define FLOATBOAT_CAROUSEL_FRAME_COUNT',
   'Function BootstrapInstFilesShow',
   'Function BootstrapSetProductCarouselFrame',
+  'Function BootstrapRefreshProductCarouselFrameCount',
   'Function BootstrapResizeAndCleanWindow',
   'BootstrapHideParentControl',
+  'ReadEnvStr $BootstrapRemoteCarouselUrl "FLOATBOAT_BOOTSTRAP_CAROUSEL_ZIP_URL"',
+  'File /oname=$PLUGINSDIR\bootstrap-carousel.ps1 "bootstrap-carousel.ps1"',
+  '"$PLUGINSDIR\launch-hidden.vbs" "carousel"',
   'Call BootstrapEnsureProgressHandle',
   'Call BootstrapRenderCustomStatus',
   'Call BootstrapUpdateProductCarousel',
@@ -721,6 +1339,117 @@ foreach ($snippet in $requiredSnippets) {
 }
 
 Write-Utf8BomFile -Path $nsiPath -Content $source
+
+$launchHiddenSource = Read-TextFile -Path $launchHiddenScriptPath
+if (-not $launchHiddenSource.Contains('mode = "carousel"')) {
+  $launchHiddenNewline = if ($launchHiddenSource.Contains("`r`n")) { "`r`n" } else { "`n" }
+  $oldLaunchHiddenBlock = Convert-Newlines -Newline $launchHiddenNewline -Content @'
+If WScript.Arguments.Count < 11 Then
+  WScript.Quit 1
+End If
+
+Dim shell
+Dim exePath
+Dim scriptPath
+Dim url
+Dim outFile
+Dim progressFile
+Dim progressTextFile
+Dim statusFile
+Dim metaFile
+Dim stateFile
+Dim pidFile
+Dim locale
+Dim cmd
+
+Set shell = CreateObject("WScript.Shell")
+'@
+
+  $newLaunchHiddenBlock = Convert-Newlines -Newline $launchHiddenNewline -Content @'
+If WScript.Arguments.Count < 11 Then
+  If WScript.Arguments.Count < 1 Then
+    WScript.Quit 1
+  End If
+  If WScript.Arguments(0) <> "carousel" Then
+    WScript.Quit 1
+  End If
+  If WScript.Arguments.Count < 8 Then
+    WScript.Quit 1
+  End If
+End If
+
+Dim shell
+Dim exePath
+Dim scriptPath
+Dim url
+Dim outFile
+Dim progressFile
+Dim progressTextFile
+Dim statusFile
+Dim metaFile
+Dim stateFile
+Dim pidFile
+Dim locale
+Dim mode
+Dim carouselZipUrl
+Dim carouselOutputDir
+Dim carouselFrameCountFile
+Dim embeddedCarouselFrameCount
+Dim cmd
+
+Set shell = CreateObject("WScript.Shell")
+
+mode = ""
+If WScript.Arguments.Count > 0 Then
+  mode = WScript.Arguments(0)
+End If
+
+If mode = "carousel" Then
+  exePath = WScript.Arguments(1)
+  scriptPath = WScript.Arguments(2)
+  carouselZipUrl = WScript.Arguments(3)
+  carouselOutputDir = WScript.Arguments(4)
+  carouselFrameCountFile = WScript.Arguments(5)
+  embeddedCarouselFrameCount = WScript.Arguments(6)
+  locale = WScript.Arguments(7)
+
+  cmd = """" & exePath & """ -NoProfile -ExecutionPolicy Bypass -File """ & scriptPath & """" & _
+        " -ZipUrl """ & carouselZipUrl & """" & _
+        " -OutputDir """ & carouselOutputDir & """" & _
+        " -FrameCountFile """ & carouselFrameCountFile & """" & _
+        " -EmbeddedFrameCount """ & embeddedCarouselFrameCount & """" & _
+        " -Locale """ & locale & """"
+
+  On Error Resume Next
+  shell.Run cmd, 0, False
+  If Err.Number <> 0 Then
+    WScript.Quit Err.Number
+  End If
+
+  WScript.Quit 0
+End If
+'@
+
+  if (-not $launchHiddenSource.Contains($oldLaunchHiddenBlock)) {
+    throw "Unable to patch remote carousel launcher in $launchHiddenScriptPath"
+  }
+
+  $launchHiddenSource = $launchHiddenSource.Replace($oldLaunchHiddenBlock, $newLaunchHiddenBlock)
+  Write-Utf8NoBomFile -Path $launchHiddenScriptPath -Content $launchHiddenSource
+}
+
+$launchHiddenSource = Read-TextFile -Path $launchHiddenScriptPath
+$launchHiddenRequiredSnippets = @(
+  'mode = "carousel"',
+  '-ZipUrl',
+  '-EmbeddedFrameCount'
+)
+
+foreach ($snippet in $launchHiddenRequiredSnippets) {
+  if (-not $launchHiddenSource.Contains($snippet)) {
+    throw "RC bootstrap launcher patch is incomplete; missing snippet: $snippet"
+  }
+}
 
 $oldDownloadWriteAtomic = @'
 function Write-Atomic([string]$Path, [string]$Content, [System.Text.Encoding]$Encoding) {
@@ -1275,6 +2004,7 @@ Write-Host "  downloader script: $downloadScriptPath"
 Write-Host "  setup progress script: $setupProgressScriptPath"
 Write-Host "  welcome image:    $targetWelcomeAssetPath"
 Write-Host "  carousel media:   mode=$($carouselAssetPlan.Mode), frames=$($carouselAssetPlan.FrameCount), intervalPolls=$($carouselAssetPlan.IntervalPolls)"
+Write-Host "  remote carousel:  $RemoteCarouselZipUrl"
 Write-Host "  custom page:      enlarged window with hidden default header/details"
 Write-Host "  downloader:       release.aoe.chat via curl first, then PowerShell system proxy, then BITS"
 Write-Host "  launch delay:     ${LaunchDelayMs}ms"

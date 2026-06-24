@@ -483,6 +483,7 @@ jobs:
           .\.floatboat-release\scripts\patch-rc-bootstrap-branding.ps1 `
             -InstallerDir "floatboat-installer\win" `
             -AssetsDir ".floatboat-release\installer-assets\windows\bootstrap" `
+            -RemoteCarouselZipUrl "https://release.aoe.chat/rc/Floatboat-Installer-RC-carousel.zip" `
             -LaunchDelayMs 1500
 
       - name: Build RC bootstrap installer
