@@ -256,7 +256,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
@@ -375,7 +375,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
@@ -487,6 +487,7 @@ jobs:
         run: pnpm run build:gemini
 
       - name: Verify Racent signtool present
+        if: inputs.is_rc == false && inputs.build_profile == 'release'
         shell: pwsh
         run: |
           $tool = "build/signing/signtool-amd64.exe"
@@ -501,13 +502,13 @@ jobs:
           }
           Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
 
-      - name: Build, package and sign (production)
+      - name: Build and package (Windows x64)
         run: pnpm run forge:make
         env:
           BUILD_OBFUSCATE: "true"
-          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
-          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
-          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
 
       - name: Collect production Windows artifact
         shell: bash
@@ -605,7 +606,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
@@ -710,7 +711,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
@@ -808,6 +809,7 @@ jobs:
         run: pnpm run build:gemini
 
       - name: Verify Racent signtool present
+        if: inputs.is_rc == false && inputs.build_profile == 'release'
         shell: pwsh
         run: |
           $tool = "build/signing/signtool-amd64.exe"
@@ -822,13 +824,13 @@ jobs:
           }
           Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
 
-      - name: Package and sign test launcher (Windows x64)
+      - name: Package test launcher (Windows x64)
         run: pnpm run package:test-launcher:win
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
-          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
-          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
 
       - name: Collect test launcher artifact
         shell: bash
