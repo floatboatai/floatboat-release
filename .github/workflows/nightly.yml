@@ -236,9 +236,16 @@ jobs:
       - name: Build Gemini CLI
         run: pnpm run build:gemini
 
-      - name: Disable code signing for nightly
+      - name: Check code signing
         id: signing
-        run: echo "available=false" >> $GITHUB_OUTPUT
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Certificate
         if: steps.signing.outputs.available == 'true'
@@ -322,9 +329,16 @@ jobs:
       - name: Build Gemini CLI
         run: pnpm run build:gemini
 
-      - name: Disable code signing for nightly
+      - name: Check code signing
         id: signing
-        run: echo "available=false" >> $GITHUB_OUTPUT
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Certificate
         if: steps.signing.outputs.available == 'true'
@@ -497,9 +511,16 @@ jobs:
       - name: Build Gemini CLI
         run: pnpm run build:gemini
 
-      - name: Disable code signing for nightly
+      - name: Check code signing
         id: signing
-        run: echo "available=false" >> $GITHUB_OUTPUT
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Certificate
         if: steps.signing.outputs.available == 'true'
@@ -591,9 +612,16 @@ jobs:
       - name: Build Gemini CLI
         run: pnpm run build:gemini
 
-      - name: Disable code signing for nightly
+      - name: Check code signing
         id: signing
-        run: echo "available=false" >> $GITHUB_OUTPUT
+        run: |
+          if [ -n "$APPLE_CERTIFICATE" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Certificate
         if: steps.signing.outputs.available == 'true'

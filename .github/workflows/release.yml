@@ -256,7 +256,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
@@ -375,7 +375,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
@@ -606,7 +606,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
@@ -711,7 +711,7 @@ jobs:
             echo "available=false" >> $GITHUB_OUTPUT
           fi
         env:
-          APPLE_CERTIFICATE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
 
       - name: Import Code Signing Certificate
         if: steps.signing.outputs.available == 'true'
