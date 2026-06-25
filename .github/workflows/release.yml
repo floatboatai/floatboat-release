@@ -48,6 +48,11 @@ on:
           - "app"
           - "launcher"
           - "all"
+      promote_merged_bugs:
+        description: "Promote merged dev bug PRs to acceptance after app packaging succeeds"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -482,6 +487,7 @@ jobs:
         run: pnpm run build:gemini
 
       - name: Verify Racent signtool present
+        if: inputs.is_rc == false && inputs.build_profile == 'release'
         shell: pwsh
         run: |
           $tool = "build/signing/signtool-amd64.exe"
@@ -496,13 +502,13 @@ jobs:
           }
           Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
 
-      - name: Build, package and sign (production)
+      - name: Build and package (Windows x64)
         run: pnpm run forge:make
         env:
           BUILD_OBFUSCATE: "true"
-          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
-          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
-          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
 
       - name: Collect production Windows artifact
         shell: bash
@@ -803,6 +809,7 @@ jobs:
         run: pnpm run build:gemini
 
       - name: Verify Racent signtool present
+        if: inputs.is_rc == false && inputs.build_profile == 'release'
         shell: pwsh
         run: |
           $tool = "build/signing/signtool-amd64.exe"
@@ -817,13 +824,13 @@ jobs:
           }
           Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
 
-      - name: Package and sign test launcher (Windows x64)
+      - name: Package test launcher (Windows x64)
         run: pnpm run package:test-launcher:win
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
-          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
-          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
 
       - name: Collect test launcher artifact
         shell: bash
@@ -1045,6 +1052,68 @@ jobs:
             dist/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup pnpm for bug handoff
+        if: |
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js for bug handoff
+        if: |
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install bug handoff tooling
+        if: |
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        run: |
+          npm install -g @larksuite/cli@1.0.57
+          pnpm install --frozen-lockfile
+
+      - name: Configure Lark CLI for bug handoff
+        if: |
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID || secrets.FEISHU_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET || secrets.FEISHU_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LARK_APP_ID:-}" ] || [ -z "${LARK_APP_SECRET:-}" ]; then
+            echo "::error::LARK_APP_ID/LARK_APP_SECRET or FEISHU_APP_ID/FEISHU_APP_SECRET secrets are required for bug handoff"
+            exit 1
+          fi
+          printf '%s' "$LARK_APP_SECRET" | lark-cli config init --app-id "$LARK_APP_ID" --app-secret-stdin --brand feishu
+          lark-cli config default-as bot
+
+      - name: Promote merged bug PRs to acceptance
+        if: |
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+          FLOATBOAT_BUG_BASE_TOKEN: ${{ secrets.FLOATBOAT_BUG_BASE_TOKEN || vars.FLOATBOAT_BUG_BASE_TOKEN }}
+          FLOATBOAT_BUG_TABLE_ID: ${{ secrets.FLOATBOAT_BUG_TABLE_ID || vars.FLOATBOAT_BUG_TABLE_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          pnpm fb promote-merged-bugs \
+            --build-ref HEAD \
+            --build-version "${{ inputs.version }}" \
+            --build-label "floatboat-release release ${{ inputs.version }}" \
+            --base-branch dev \
+            --run-url "$RUN_URL" \
+            --github-token "$GITHUB_TOKEN"
 
       # ===========================================
       # S3 Deploy (official releases only)

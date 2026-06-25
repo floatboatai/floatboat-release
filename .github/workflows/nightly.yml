@@ -38,6 +38,11 @@ on:
           - 'app'
           - 'launcher'
           - 'all'
+      promote_merged_bugs:
+        description: 'Promote merged dev bug PRs to acceptance after app packaging succeeds'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -53,6 +58,7 @@ jobs:
       platforms: ${{ steps.config.outputs.platforms }}
       build_profile: ${{ steps.version.outputs.build_profile }}
       package_set: ${{ steps.version.outputs.package_set }}
+      promote_merged_bugs: ${{ steps.version.outputs.promote_merged_bugs }}
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
       changelog_file: ${{ steps.changelog.outputs.changelog_file }}
 
@@ -84,6 +90,9 @@ jobs:
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             BUILD_PROFILE="${{ github.event.inputs.build_profile || 'release' }}"
             PACKAGE_SET="${{ github.event.inputs.package_set || 'auto' }}"
+            PROMOTE_MERGED_BUGS="${{ github.event.inputs.promote_merged_bugs || 'true' }}"
+          else
+            PROMOTE_MERGED_BUGS="true"
           fi
           if [ "$PACKAGE_SET" = "auto" ]; then
             if [ "$BUILD_PROFILE" = "test" ]; then
@@ -100,7 +109,8 @@ jobs:
           echo "nightly_version=$NIGHTLY" >> $GITHUB_OUTPUT
           echo "build_profile=$BUILD_PROFILE" >> $GITHUB_OUTPUT
           echo "package_set=$PACKAGE_SET" >> $GITHUB_OUTPUT
-          echo "📦 Nightly version: $NIGHTLY ($BUILD_PROFILE, $PACKAGE_SET)"
+          echo "promote_merged_bugs=$PROMOTE_MERGED_BUGS" >> $GITHUB_OUTPUT
+          echo "📦 Nightly version: $NIGHTLY ($BUILD_PROFILE, $PACKAGE_SET, promote=$PROMOTE_MERGED_BUGS)"
 
       - name: Read config
         id: config
@@ -704,28 +714,10 @@ jobs:
       - name: Build Gemini CLI
         run: pnpm run build:gemini
 
-      - name: Verify Racent signtool present
-        shell: pwsh
-        run: |
-          $tool = "build/signing/signtool-amd64.exe"
-          if (-not (Test-Path $tool)) {
-            Write-Error "$tool not found in source repo. Commit Racent signtool to aoe-desktop at $tool."
-            exit 1
-          }
-          $size = (Get-Item $tool).Length
-          if ($size -lt 100000) {
-            Write-Error "$tool looks too small ($size bytes). Likely a Git LFS pointer or corrupted file."
-            exit 1
-          }
-          Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
-
-      - name: Package and sign test launcher (Windows x64)
+      - name: Package test launcher (Windows x64)
         run: pnpm run package:test-launcher:win
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
-          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
-          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
 
       - name: Collect test launcher artifact
         shell: bash
@@ -828,6 +820,68 @@ jobs:
             dist/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup pnpm for bug handoff
+        if: |
+          needs.prepare.outputs.promote_merged_bugs == 'true' &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js for bug handoff
+        if: |
+          needs.prepare.outputs.promote_merged_bugs == 'true' &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install bug handoff tooling
+        if: |
+          needs.prepare.outputs.promote_merged_bugs == 'true' &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        run: |
+          npm install -g @larksuite/cli@1.0.57
+          pnpm install --frozen-lockfile
+
+      - name: Configure Lark CLI for bug handoff
+        if: |
+          needs.prepare.outputs.promote_merged_bugs == 'true' &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID || secrets.FEISHU_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET || secrets.FEISHU_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LARK_APP_ID:-}" ] || [ -z "${LARK_APP_SECRET:-}" ]; then
+            echo "::error::LARK_APP_ID/LARK_APP_SECRET or FEISHU_APP_ID/FEISHU_APP_SECRET secrets are required for bug handoff"
+            exit 1
+          fi
+          printf '%s' "$LARK_APP_SECRET" | lark-cli config init --app-id "$LARK_APP_ID" --app-secret-stdin --brand feishu
+          lark-cli config default-as bot
+
+      - name: Promote merged bug PRs to acceptance
+        if: |
+          needs.prepare.outputs.promote_merged_bugs == 'true' &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+          FLOATBOAT_BUG_BASE_TOKEN: ${{ secrets.FLOATBOAT_BUG_BASE_TOKEN || vars.FLOATBOAT_BUG_BASE_TOKEN }}
+          FLOATBOAT_BUG_TABLE_ID: ${{ secrets.FLOATBOAT_BUG_TABLE_ID || vars.FLOATBOAT_BUG_TABLE_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          pnpm fb promote-merged-bugs \
+            --build-ref HEAD \
+            --build-version "${{ needs.prepare.outputs.version }}" \
+            --build-label "floatboat-release nightly ${{ needs.prepare.outputs.version }}" \
+            --base-branch dev \
+            --run-url "$RUN_URL" \
+            --github-token "$GITHUB_TOKEN"
 
   notify:
     name: Nightly Summary
