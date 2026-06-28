@@ -623,6 +623,8 @@ jobs:
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          SKIP_TEST_LAUNCHER_NOTARIZE: "true"
+          SKIP_NOTARIZE: "true"
 
       - name: Collect test launcher artifact
         shell: bash
@@ -728,6 +730,8 @@ jobs:
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          SKIP_TEST_LAUNCHER_NOTARIZE: "true"
+          SKIP_NOTARIZE: "true"
 
       - name: Collect test launcher artifact
         shell: bash
