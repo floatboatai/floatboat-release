@@ -83,7 +83,7 @@ jobs:
       - name: Determine nightly version
         id: version
         run: |
-          VERSION=$(node -p "require('./package.json').version")
+          set -euo pipefail
           DATE=$(date -u +%Y%m%d)
           BUILD_PROFILE="release"
           PACKAGE_SET="auto"
@@ -101,6 +101,22 @@ jobs:
               PACKAGE_SET="all"
             fi
           fi
+
+          LATEST_RELEASE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+          if [ -z "$LATEST_RELEASE_TAG" ]; then
+            echo "::warning::No official release tag found in source repo; falling back to package.json + 1"
+            RELEASE_VERSION=$(node -p "require('./package.json').version")
+          else
+            RELEASE_VERSION="${LATEST_RELEASE_TAG#v}"
+            echo "🔖 Latest official release tag: ${LATEST_RELEASE_TAG}"
+          fi
+
+          VERSION=$(node -e "
+            const m = process.argv[1].match(/^(\d+)\.(\d+)\.(\d+)/);
+            if (!m) throw new Error('Unsupported version format: ' + process.argv[1]);
+            process.stdout.write(\`\${m[1]}.\${m[2]}.\${Number(m[3]) + 1}\`);
+          " "$RELEASE_VERSION")
+
           if [ "$BUILD_PROFILE" = "test" ]; then
             NIGHTLY="${VERSION}-test.${DATE}"
           else
@@ -110,7 +126,7 @@ jobs:
           echo "build_profile=$BUILD_PROFILE" >> $GITHUB_OUTPUT
           echo "package_set=$PACKAGE_SET" >> $GITHUB_OUTPUT
           echo "promote_merged_bugs=$PROMOTE_MERGED_BUGS" >> $GITHUB_OUTPUT
-          echo "📦 Nightly version: $NIGHTLY ($BUILD_PROFILE, $PACKAGE_SET, promote=$PROMOTE_MERGED_BUGS)"
+          echo "📦 Nightly version: $NIGHTLY (from release v${RELEASE_VERSION} + 1, $BUILD_PROFILE, $PACKAGE_SET, promote=$PROMOTE_MERGED_BUGS)"
 
       - name: Read config
         id: config
