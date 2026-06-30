@@ -586,7 +586,6 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check code signing availability
-        if: inputs.is_rc == false && inputs.build_profile == 'release'
         id: signing
         run: |
           set -euo pipefail
@@ -624,11 +623,9 @@ jobs:
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
-          REQUIRE_TEST_LAUNCHER_NOTARIZE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && 'true' || 'false' }}
-          SKIP_TEST_LAUNCHER_NOTARIZE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && 'false' || 'true' }}
+          REQUIRE_TEST_LAUNCHER_NOTARIZE: "true"
 
       - name: Verify notarized test launcher (macOS arm64)
-        if: inputs.is_rc == false && inputs.build_profile == 'release'
         shell: bash
         run: |
           set -euo pipefail
@@ -722,7 +719,6 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Check code signing availability
-        if: inputs.is_rc == false && inputs.build_profile == 'release'
         id: signing
         run: |
           set -euo pipefail
@@ -760,11 +756,9 @@ jobs:
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
-          REQUIRE_TEST_LAUNCHER_NOTARIZE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && 'true' || 'false' }}
-          SKIP_TEST_LAUNCHER_NOTARIZE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && 'false' || 'true' }}
+          REQUIRE_TEST_LAUNCHER_NOTARIZE: "true"
 
       - name: Verify notarized test launcher (macOS x64)
-        if: inputs.is_rc == false && inputs.build_profile == 'release'
         shell: bash
         run: |
           set -euo pipefail
