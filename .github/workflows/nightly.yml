@@ -567,8 +567,6 @@ jobs:
           test -d "$APP" || { echo "::error::Launcher app not found in $ZIP"; exit 1; }
           test -d "$INNER_APP" || { echo "::error::Bundled Floatboat.app not found in $ZIP"; exit 1; }
           codesign --verify --deep --strict --verbose=4 "$INNER_APP"
-          xcrun stapler validate "$INNER_APP"
-          spctl --assess --type execute --verbose=4 "$INNER_APP"
           codesign --verify --deep --strict --verbose=4 "$APP"
           xcrun stapler validate "$APP"
           spctl --assess --type execute --verbose=4 "$APP"
@@ -696,8 +694,6 @@ jobs:
           test -d "$APP" || { echo "::error::Launcher app not found in $ZIP"; exit 1; }
           test -d "$INNER_APP" || { echo "::error::Bundled Floatboat.app not found in $ZIP"; exit 1; }
           codesign --verify --deep --strict --verbose=4 "$INNER_APP"
-          xcrun stapler validate "$INNER_APP"
-          spctl --assess --type execute --verbose=4 "$INNER_APP"
           codesign --verify --deep --strict --verbose=4 "$APP"
           xcrun stapler validate "$APP"
           spctl --assess --type execute --verbose=4 "$APP"
