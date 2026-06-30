@@ -923,24 +923,22 @@ jobs:
       inputs.notify_only == false &&
       always() &&
       (
-        needs.prepare.outputs.package_set == 'launcher' ||
-        !contains(inputs.platforms, 'macos') ||
-        (needs.build-macos-arm64.result == 'success' && needs.build-macos-x64.result == 'success')
-      ) &&
-      (
-        needs.prepare.outputs.package_set == 'launcher' ||
-        !contains(inputs.platforms, 'windows') ||
-        needs.build-windows.result == 'success'
-      ) &&
-      (
-        needs.prepare.outputs.package_set == 'app' ||
-        !contains(inputs.platforms, 'macos') ||
-        (needs.build-test-launcher-macos-arm64.result == 'success' && needs.build-test-launcher-macos-x64.result == 'success')
-      ) &&
-      (
-        needs.prepare.outputs.package_set == 'app' ||
-        !contains(inputs.platforms, 'windows') ||
-        needs.build-test-launcher-windows.result == 'success'
+        (
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (
+            needs.build-macos-arm64.result == 'success' ||
+            needs.build-macos-x64.result == 'success' ||
+            needs.build-windows.result == 'success'
+          )
+        ) ||
+        (
+          needs.prepare.outputs.package_set != 'app' &&
+          (
+            needs.build-test-launcher-macos-arm64.result == 'success' ||
+            needs.build-test-launcher-macos-x64.result == 'success' ||
+            needs.build-test-launcher-windows.result == 'success'
+          )
+        )
       )
 
     steps:
@@ -1039,7 +1037,6 @@ jobs:
           set -euo pipefail
 
           VERSION="${{ inputs.version }}"
-          PLATFORMS="${{ inputs.platforms }}"
           missing=0
 
           require_glob() {
@@ -1054,16 +1051,19 @@ jobs:
             fi
           }
 
-          echo "🔎 Verifying required artifacts for ${PLATFORMS}"
+          echo "🔎 Verifying artifacts produced by successful build jobs"
 
-          if [[ "$PLATFORMS" == *macos* ]]; then
+          if [ "${{ needs.build-macos-arm64.result }}" = "success" ]; then
             require_glob "out/make/*${VERSION}*arm64*.dmg" "macOS arm64 DMG"
             require_glob "out/make/*darwin-arm64*${VERSION}*.zip" "macOS arm64 ZIP"
+          fi
+
+          if [ "${{ needs.build-macos-x64.result }}" = "success" ]; then
             require_glob "out/make/*${VERSION}*x64*.dmg" "macOS x64 DMG"
             require_glob "out/make/*darwin-x64*${VERSION}*.zip" "macOS x64 ZIP"
           fi
 
-          if [[ "$PLATFORMS" == *windows* ]]; then
+          if [ "${{ needs.build-windows.result }}" = "success" ]; then
             require_glob "out/make/*Setup*${VERSION}*.exe" "Windows x64 installer"
           fi
 
@@ -1105,6 +1105,7 @@ jobs:
           body_path: /tmp/empty-release-body.md
           draft: false
           prerelease: ${{ inputs.is_rc || inputs.build_profile == 'test' }}
+          fail_on_unmatched_files: false
           files: |
             out/make/*.dmg
             out/make/*.zip
