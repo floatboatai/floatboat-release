@@ -822,24 +822,22 @@ jobs:
     if: |
       always() &&
       (
-        needs.prepare.outputs.package_set == 'launcher' ||
-        !contains(needs.prepare.outputs.platforms, 'macos') ||
-        (needs.build-macos-arm64.result == 'success' && needs.build-macos-x64.result == 'success')
-      ) &&
-      (
-        needs.prepare.outputs.package_set == 'launcher' ||
-        !contains(needs.prepare.outputs.platforms, 'windows') ||
-        needs.build-windows.result == 'success'
-      ) &&
-      (
-        needs.prepare.outputs.package_set == 'app' ||
-        !contains(needs.prepare.outputs.platforms, 'macos') ||
-        (needs.build-test-launcher-macos-arm64.result == 'success' && needs.build-test-launcher-macos-x64.result == 'success')
-      ) &&
-      (
-        needs.prepare.outputs.package_set == 'app' ||
-        !contains(needs.prepare.outputs.platforms, 'windows') ||
-        needs.build-test-launcher-windows.result == 'success'
+        (
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (
+            needs.build-macos-arm64.result == 'success' ||
+            needs.build-macos-x64.result == 'success' ||
+            needs.build-windows.result == 'success'
+          )
+        ) ||
+        (
+          needs.prepare.outputs.package_set != 'app' &&
+          (
+            needs.build-test-launcher-macos-arm64.result == 'success' ||
+            needs.build-test-launcher-macos-x64.result == 'success' ||
+            needs.build-test-launcher-windows.result == 'success'
+          )
+        )
       )
 
     steps:
@@ -895,6 +893,7 @@ jobs:
           body_path: /tmp/release_notes.md
           draft: false
           prerelease: true
+          fail_on_unmatched_files: false
           files: |
             out/make/*.dmg
             out/make/*.zip
