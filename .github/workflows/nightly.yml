@@ -211,6 +211,16 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
 
+      - name: Print source checkout diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Source ref: ${{ needs.prepare.outputs.ref }}"
+          echo "Source HEAD: $(git rev-parse HEAD)"
+          git log -1 --oneline --decorate
+          echo "Submodules:"
+          git submodule status --recursive || true
+
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
         shell: bash
@@ -303,6 +313,16 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
+
+      - name: Print source checkout diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Source ref: ${{ needs.prepare.outputs.ref }}"
+          echo "Source HEAD: $(git rev-parse HEAD)"
+          git log -1 --oneline --decorate
+          echo "Submodules:"
+          git submodule status --recursive || true
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
@@ -486,6 +506,16 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
 
+      - name: Print source checkout diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Source ref: ${{ needs.prepare.outputs.ref }}"
+          echo "Source HEAD: $(git rev-parse HEAD)"
+          git log -1 --oneline --decorate
+          echo "Submodules:"
+          git submodule status --recursive || true
+
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
         shell: bash
@@ -617,6 +647,16 @@ jobs:
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
           submodules: recursive
+
+      - name: Print source checkout diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Source ref: ${{ needs.prepare.outputs.ref }}"
+          echo "Source HEAD: $(git rev-parse HEAD)"
+          git log -1 --oneline --decorate
+          echo "Submodules:"
+          git submodule status --recursive || true
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
