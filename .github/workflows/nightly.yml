@@ -249,9 +249,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Gemini CLI
-        run: pnpm run build:gemini
-
       - name: Check code signing
         id: signing
         run: |
@@ -341,9 +338,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Build Gemini CLI
-        run: pnpm run build:gemini
 
       - name: Check code signing
         id: signing
@@ -436,9 +430,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Gemini CLI
-        run: pnpm run build:gemini
-
       - name: Build and package (production)
         run: pnpm run forge:make
         env:
@@ -523,9 +514,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Build Gemini CLI
-        run: pnpm run build:gemini
 
       - name: Check code signing
         id: signing
@@ -656,9 +644,6 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build Gemini CLI
-        run: pnpm run build:gemini
-
       - name: Check code signing
         id: signing
         run: |
@@ -788,9 +773,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Build Gemini CLI
-        run: pnpm run build:gemini
 
       - name: Package test launcher (Windows x64)
         run: pnpm run package:test-launcher:win
