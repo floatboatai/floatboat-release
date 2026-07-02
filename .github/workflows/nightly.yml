@@ -95,11 +95,8 @@ jobs:
             PROMOTE_MERGED_BUGS="true"
           fi
           if [ "$PACKAGE_SET" = "auto" ]; then
-            if [ "$BUILD_PROFILE" = "test" ]; then
-              PACKAGE_SET="app"
-            else
-              PACKAGE_SET="all"
-            fi
+            # Nightly 无论 release 还是 test profile 都需要 launcher 包，auto 一律解析为 all
+            PACKAGE_SET="all"
           fi
 
           LATEST_RELEASE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
@@ -209,7 +206,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
@@ -299,7 +295,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
@@ -389,7 +384,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
@@ -475,7 +469,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
@@ -602,7 +595,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
@@ -729,7 +721,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: needs.prepare.outputs.build_profile == 'test'
