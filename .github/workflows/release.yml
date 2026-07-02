@@ -97,7 +97,6 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
           fetch-depth: 0
-          submodules: recursive
 
       - name: Inject version into package.json
         run: |
@@ -203,7 +202,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: inputs.build_profile == 'test'
@@ -319,7 +317,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: inputs.build_profile == 'test'
@@ -435,7 +432,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: inputs.build_profile == 'test'
@@ -544,7 +540,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: inputs.build_profile == 'test'
@@ -675,7 +670,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: inputs.build_profile == 'test'
@@ -806,7 +800,6 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
-          submodules: recursive
 
       - name: Inject test build .env
         if: inputs.build_profile == 'test'
