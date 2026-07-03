@@ -31,15 +31,16 @@ on:
         default: false
         type: boolean
       build_profile:
-        description: "Build profile (test injects TEST_BUILD_ENV_FILE into .env)"
+        description: "Build profile (test injects TEST_BUILD_ENV_FILE; internal-test injects LAN test .env)"
         required: false
         default: "release"
         type: choice
         options:
           - "release"
           - "test"
+          - "internal-test"
       package_set:
-        description: "Package set to build (auto: test=app, release=all)"
+        description: "Package set to build (auto: non-release=app, release=all)"
         required: false
         default: "auto"
         type: choice
@@ -81,7 +82,7 @@ jobs:
         run: |
           package_set="${{ inputs.package_set }}"
           if [ "$package_set" = "auto" ]; then
-            if [ "${{ inputs.build_profile }}" = "test" ]; then
+            if [ "${{ inputs.build_profile }}" != "release" ]; then
               package_set="app"
             else
               package_set="all"
@@ -203,23 +204,40 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Inject test build .env
-        if: inputs.build_profile == 'test'
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
         shell: bash
         env:
           TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
         run: |
           set -euo pipefail
-          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
-            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
-            exit 1
-          fi
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::add-mask::$line"
-          done <<< "$TEST_BUILD_ENV_FILE"
-          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
-          echo "✅ Injected test build .env (${entry_count} entries)."
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
       - name: Inject version into package.json
         run: |
@@ -318,23 +336,40 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Inject test build .env
-        if: inputs.build_profile == 'test'
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
         shell: bash
         env:
           TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
         run: |
           set -euo pipefail
-          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
-            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
-            exit 1
-          fi
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::add-mask::$line"
-          done <<< "$TEST_BUILD_ENV_FILE"
-          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
-          echo "✅ Injected test build .env (${entry_count} entries)."
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
       - name: Inject version into package.json
         run: |
@@ -433,23 +468,40 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Inject test build .env
-        if: inputs.build_profile == 'test'
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
         shell: bash
         env:
           TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
         run: |
           set -euo pipefail
-          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
-            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
-            exit 1
-          fi
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::add-mask::$line"
-          done <<< "$TEST_BUILD_ENV_FILE"
-          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
-          echo "✅ Injected test build .env (${entry_count} entries)."
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
       - name: Inject version into package.json
         shell: bash
@@ -541,23 +593,40 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Inject test build .env
-        if: inputs.build_profile == 'test'
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
         shell: bash
         env:
           TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
         run: |
           set -euo pipefail
-          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
-            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
-            exit 1
-          fi
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::add-mask::$line"
-          done <<< "$TEST_BUILD_ENV_FILE"
-          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
-          echo "✅ Injected test build .env (${entry_count} entries)."
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
       - name: Inject version into package.json
         run: |
@@ -671,23 +740,40 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Inject test build .env
-        if: inputs.build_profile == 'test'
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
         shell: bash
         env:
           TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
         run: |
           set -euo pipefail
-          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
-            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
-            exit 1
-          fi
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::add-mask::$line"
-          done <<< "$TEST_BUILD_ENV_FILE"
-          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
-          echo "✅ Injected test build .env (${entry_count} entries)."
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
       - name: Inject version into package.json
         run: |
@@ -801,23 +887,40 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
-      - name: Inject test build .env
-        if: inputs.build_profile == 'test'
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
         shell: bash
         env:
           TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
         run: |
           set -euo pipefail
-          if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
-            echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
-            exit 1
-          fi
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
           while IFS= read -r line; do
             [ -n "$line" ] && echo "::add-mask::$line"
-          done <<< "$TEST_BUILD_ENV_FILE"
-          printf '%s\n' "$TEST_BUILD_ENV_FILE" > .env
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
-          echo "✅ Injected test build .env (${entry_count} entries)."
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
       - name: Inject version into package.json
         shell: bash
@@ -1072,10 +1175,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ inputs.version }}
-          name: ${{ inputs.build_profile == 'test' && format('Test v{0}', inputs.version) || inputs.is_rc == true && format('RC v{0}', inputs.version) || format('Release v{0}', inputs.version) }}
+          name: ${{ inputs.build_profile == 'internal-test' && format('Internal Test v{0}', inputs.version) || inputs.build_profile == 'test' && format('Test v{0}', inputs.version) || inputs.is_rc == true && format('RC v{0}', inputs.version) || format('Release v{0}', inputs.version) }}
           body_path: /tmp/empty-release-body.md
           draft: false
-          prerelease: ${{ inputs.is_rc || inputs.build_profile == 'test' }}
+          prerelease: ${{ inputs.is_rc || inputs.build_profile != 'release' }}
           fail_on_unmatched_files: false
           files: |
             out/make/*.dmg
@@ -1153,7 +1256,7 @@ jobs:
       # S3 Deploy (official releases only)
       # ===========================================
       - name: Configure AWS Credentials
-        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1161,7 +1264,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Upload installers to S3
-        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
         run: |
           echo "📤 Uploading installers to S3..."
 
@@ -1187,7 +1290,7 @@ jobs:
           aws s3 ls "s3://aoe-desktop-releases/latest" || true
 
       - name: Invalidate CloudFront cache
-        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
         run: |
           INVALIDATION=$(aws cloudfront create-invalidation \
             --distribution-id EOFLQQ0A8KCX1 \
@@ -1198,7 +1301,7 @@ jobs:
           echo "✅ CloudFront invalidation created"
 
       - name: Sync website installer URLs
-        if: inputs.is_rc == false && inputs.build_profile != 'test' && needs.prepare.outputs.package_set != 'launcher'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
         env:
           INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
           INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
@@ -1314,7 +1417,7 @@ jobs:
           echo "   Windows x64:  ${{ needs.build-windows.result || 'skipped' }}"
           echo ""
           echo "📤 Upload:       ${{ needs.upload.result || 'skipped' }}"
-          if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" != "test" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
+          if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" = "release" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
           echo "☁️  S3 Deploy:    included in upload job"
           echo "🌐 CDN:          configured by INSTALLER_DOWNLOAD_BASE_URL"
           echo "🔗 Website URLs: synced via installer URL management API"
@@ -1353,8 +1456,8 @@ jobs:
           def icon(s):
               return {"success": "✅", "failure": "❌", "cancelled": "⏹️", "skipped": "⏭️"}.get(s, "❓")
 
-          emoji = "🧪" if build_profile == "test" else ("🚧" if is_rc else "🎉")
-          release_type = "测试版本" if build_profile == "test" else ("RC 预发布" if is_rc else "正式发布")
+          emoji = "🏠" if build_profile == "internal-test" else ("🧪" if build_profile == "test" else ("🚧" if is_rc else "🎉"))
+          release_type = "内网测试版本" if build_profile == "internal-test" else ("测试版本" if build_profile == "test" else ("RC 预发布" if is_rc else "正式发布"))
           range_hint = f"  (since {prev_tag})" if prev_tag else ""
           release_tag = f"v{version}"
           release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
