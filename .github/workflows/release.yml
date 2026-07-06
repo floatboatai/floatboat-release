@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       repo_ref:
-        description: "Git ref to build (tag, branch, or commit SHA)"
+        description: "Git ref to build (release tag, nightly tag, branch, or commit SHA)"
         required: true
         type: string
       version:
@@ -72,6 +72,8 @@ jobs:
       platforms: ${{ inputs.platforms }}
       build_profile: ${{ inputs.build_profile }}
       package_set: ${{ steps.package_set.outputs.package_set }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      source_release_tag: ${{ steps.source.outputs.release_tag }}
       changelog_file: ${{ steps.changelog.outputs.changelog_file }}
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
 
@@ -98,6 +100,64 @@ jobs:
           ref: ${{ inputs.repo_ref }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
           fetch-depth: 0
+
+      - name: Resolve source release tag
+        id: source
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_IS_RC: ${{ inputs.is_rc }}
+          INPUT_REPO_REF: ${{ inputs.repo_ref }}
+        run: |
+          set -euo pipefail
+          SOURCE_SHA=$(git rev-parse HEAD)
+          RELEASE_TAG="v${INPUT_VERSION}"
+
+          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "🔒 Source commit: ${SOURCE_SHA}"
+
+          if [ "$INPUT_IS_RC" != "false" ]; then
+            echo "🔖 RC build keeps source ref ${INPUT_REPO_REF}; no official source tag is created."
+            exit 0
+          fi
+
+          remote_ref=$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}" || true)
+          if [ -n "$remote_ref" ]; then
+            remote_sha=$(printf '%s\n' "$remote_ref" | awk -v tag="refs/tags/${RELEASE_TAG}^{}" '$2 == tag { print $1; found=1 } END { if (!found) exit 1 }' || true)
+            if [ -z "$remote_sha" ]; then
+              remote_sha=$(printf '%s\n' "$remote_ref" | awk -v tag="refs/tags/${RELEASE_TAG}" '$2 == tag { print $1; exit }')
+            fi
+
+            if [ "$remote_sha" != "$SOURCE_SHA" ]; then
+              echo "::error::Source release tag ${RELEASE_TAG} already points to ${remote_sha}, expected ${SOURCE_SHA}"
+              exit 1
+            fi
+
+            if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+              local_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")
+              if [ "$local_sha" != "$SOURCE_SHA" ]; then
+                echo "::error::Local source release tag ${RELEASE_TAG} points to ${local_sha}, expected ${SOURCE_SHA}"
+                exit 1
+              fi
+            else
+              git fetch --no-tags origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            fi
+
+            echo "✅ Source release tag ${RELEASE_TAG} already points to ${SOURCE_SHA}; using it."
+            exit 0
+          fi
+
+          if [[ "$INPUT_REPO_REF" != nightly-* ]]; then
+            echo "::error::Official releases from an untagged source must use a nightly-* repo_ref or pre-create ${RELEASE_TAG} in the source repo."
+            exit 1
+          fi
+
+          git config user.name "floatboat-release[bot]"
+          git config user.email "floatboat-release[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "$SOURCE_SHA" -m "Release ${RELEASE_TAG} from ${INPUT_REPO_REF}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+          echo "✅ Created source release tag ${RELEASE_TAG} from ${INPUT_REPO_REF} -> ${SOURCE_SHA}"
 
       - name: Inject version into package.json
         run: |
@@ -201,7 +261,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.SOURCE_REPO }}
-          ref: ${{ inputs.repo_ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
       - name: Inject build profile .env
@@ -333,7 +393,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.SOURCE_REPO }}
-          ref: ${{ inputs.repo_ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
       - name: Inject build profile .env
@@ -465,7 +525,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.SOURCE_REPO }}
-          ref: ${{ inputs.repo_ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
       - name: Inject build profile .env
@@ -590,7 +650,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.SOURCE_REPO }}
-          ref: ${{ inputs.repo_ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
       - name: Inject build profile .env
@@ -737,7 +797,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.SOURCE_REPO }}
-          ref: ${{ inputs.repo_ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
       - name: Inject build profile .env
@@ -884,7 +944,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.SOURCE_REPO }}
-          ref: ${{ inputs.repo_ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
       - name: Inject build profile .env
@@ -1020,7 +1080,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ vars.SOURCE_REPO }}
-          ref: ${{ inputs.repo_ref }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
 
       - name: Download changelog
