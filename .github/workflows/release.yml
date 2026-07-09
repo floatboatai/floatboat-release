@@ -1250,32 +1250,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup pnpm for bug handoff
-        if: |
-          inputs.promote_merged_bugs == true &&
-          needs.prepare.outputs.package_set != 'launcher' &&
-          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
-        uses: pnpm/action-setup@v4
-
-      - name: Setup Node.js for bug handoff
-        if: |
-          inputs.promote_merged_bugs == true &&
-          needs.prepare.outputs.package_set != 'launcher' &&
-          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install bug handoff tooling
-        if: |
-          inputs.promote_merged_bugs == true &&
-          needs.prepare.outputs.package_set != 'launcher' &&
-          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
-        run: |
-          npm install -g @larksuite/cli@1.0.57
-          pnpm install --frozen-lockfile
-
-      - name: Configure Lark CLI for bug handoff
+      - name: Check bug handoff configuration
+        id: bug_handoff
         if: |
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
@@ -1286,14 +1262,61 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${LARK_APP_ID:-}" ] || [ -z "${LARK_APP_SECRET:-}" ]; then
-            echo "::error::LARK_APP_ID/LARK_APP_SECRET or FEISHU_APP_ID/FEISHU_APP_SECRET secrets are required for bug handoff"
-            exit 1
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Skipping bug handoff because LARK_APP_ID/LARK_APP_SECRET or FEISHU_APP_ID/FEISHU_APP_SECRET secrets are not configured."
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm for bug handoff
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js for bug handoff
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install bug handoff tooling
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        run: |
+          npm install -g @larksuite/cli@1.0.57
+          pnpm install --frozen-lockfile
+
+      - name: Configure Lark CLI for bug handoff
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID || secrets.FEISHU_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET || secrets.FEISHU_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LARK_APP_ID:-}" ] || [ -z "${LARK_APP_SECRET:-}" ]; then
+            echo "::warning::Skipping Lark CLI configuration because bug handoff secrets are unavailable."
+            exit 0
           fi
           printf '%s' "$LARK_APP_SECRET" | lark-cli config init --app-id "$LARK_APP_ID" --app-secret-stdin --brand feishu
           lark-cli config default-as bot
 
       - name: Promote merged bug PRs to acceptance
         if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
