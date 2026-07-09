@@ -1077,6 +1077,17 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
+          CLEAN_GITHUB_TOKEN=$(python3 - <<'PY'
+          import os
+          token = os.environ.get("GITHUB_TOKEN", "").strip().lstrip("\ufeff").strip()
+          print(token, end="")
+          PY
+          )
+          if [ -z "$CLEAN_GITHUB_TOKEN" ]; then
+            echo "::error::SOURCE_REPO_PAT is empty after sanitization."
+            exit 1
+          fi
+          echo "::add-mask::$CLEAN_GITHUB_TOKEN"
           set +e
           pnpm fb promote-merged-bugs \
             --build-ref HEAD \
@@ -1084,7 +1095,7 @@ jobs:
             --build-label "floatboat-release nightly ${{ needs.prepare.outputs.version }}" \
             --base-branch dev \
             --run-url "$RUN_URL" \
-            --github-token "$GITHUB_TOKEN" 2>&1 | tee /tmp/bug-handoff.log
+            --github-token "$CLEAN_GITHUB_TOKEN" 2>&1 | tee /tmp/bug-handoff.log
           status=${PIPESTATUS[0]}
           set -e
           {
