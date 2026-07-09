@@ -829,6 +829,7 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
+          fetch-depth: 0
 
       - name: Download release notes
         uses: actions/download-artifact@v4
