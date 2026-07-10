@@ -92,6 +92,8 @@ jobs:
 
       - name: Determine nightly version
         id: version
+        env:
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           set -euo pipefail
           DATE=$(date -u +%Y%m%d)
@@ -124,10 +126,16 @@ jobs:
             process.stdout.write(\`\${m[1]}.\${m[2]}.\${Number(m[3]) + 1}\`);
           " "$RELEASE_VERSION")
 
+          if [ -z "$SOURCE_SHA" ]; then
+            echo "::error::SOURCE_SHA is required to generate a unique nightly tag"
+            exit 1
+          fi
+          SOURCE_SHORT_SHA="${SOURCE_SHA: -6}"
+
           if [ "$BUILD_PROFILE" = "test" ]; then
-            NIGHTLY="${VERSION}-test.${DATE}"
+            NIGHTLY="${VERSION}-test.${DATE}-${SOURCE_SHORT_SHA}"
           else
-            NIGHTLY="${VERSION}-n.${DATE}"
+            NIGHTLY="${VERSION}-n.${DATE}-${SOURCE_SHORT_SHA}"
           fi
           SOURCE_TAG="nightly-${NIGHTLY}"
           echo "nightly_version=$NIGHTLY" >> $GITHUB_OUTPUT
