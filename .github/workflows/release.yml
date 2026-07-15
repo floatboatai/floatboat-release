@@ -706,7 +706,10 @@ jobs:
           run-id: ${{ inputs.windows_runtime_toolchain_run_id }}
 
       - name: Verify Racent signtool present
-        if: inputs.is_rc == false && inputs.build_profile == 'release'
+        # Release-profile RCs must use the same Windows publisher identity as the
+        # packaged runtime tools; otherwise the strict packaged smoke and the
+        # production runtime integrity gate both reject the unsigned binaries.
+        if: inputs.build_profile == 'release'
         shell: pwsh
         run: |
           $tool = "build/signing/signtool-amd64.exe"
@@ -726,9 +729,9 @@ jobs:
         env:
           BUILD_OBFUSCATE: "true"
           FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}/runtime-toolchain-windows-ffmpeg
-          SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
-          SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
-          SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
 
       - name: Verify UV is not bundled
         shell: bash
