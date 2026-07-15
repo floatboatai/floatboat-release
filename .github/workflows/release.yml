@@ -257,7 +257,7 @@ jobs:
   build-macos-arm64:
     name: Build macOS (arm64)
     needs: prepare
-    runs-on: macos-latest
+    runs-on: macos-15
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
 
     steps:
@@ -384,6 +384,12 @@ jobs:
             exit 1
           fi
           echo "✅ UV is not bundled in the macOS arm64 package"
+
+      - name: Smoke test packaged runtime toolchain (arm64)
+        run: pnpm run runtime-toolchain:smoke -- --require-signatures
+        env:
+          ARCH: arm64
+          TARGET_ARCH: arm64
 
       - name: Collect arm64 production artifacts
         shell: bash
@@ -535,6 +541,12 @@ jobs:
             exit 1
           fi
           echo "✅ UV is not bundled in the macOS x64 package"
+
+      - name: Smoke test packaged runtime toolchain (x64)
+        run: pnpm run runtime-toolchain:smoke -- --require-signatures
+        env:
+          ARCH: x64
+          TARGET_ARCH: x64
 
       - name: Collect x64 production artifacts
         shell: bash
