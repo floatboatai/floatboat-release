@@ -348,8 +348,9 @@ jobs:
           for attempt in 1 2; do
             if pnpm run forge:make:arm64; then
               exit 0
+            else
+              exit_code=$?
             fi
-            exit_code=$?
             if [ "$attempt" -eq 2 ]; then
               exit "$exit_code"
             fi
@@ -370,7 +371,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          UV_MATCHES=$(find out -type f \( -iname "uv" -o -iname "uv.exe" \) -print)
+          test -d out || { echo "::error::Packaging output directory out is missing"; exit 1; }
+          UV_MATCHES=$(find out \( \
+            -path "*/Contents/Resources/uv" -o \
+            -path "*/Contents/Resources/uv.exe" -o \
+            -path "*/resources/uv" -o \
+            -path "*/resources/uv.exe" \
+          \) -print)
           if [ -n "$UV_MATCHES" ]; then
             echo "::error::UV must not be included in the packaged application"
             printf '%s\n' "$UV_MATCHES"
@@ -492,8 +499,9 @@ jobs:
           for attempt in 1 2; do
             if pnpm run forge:make:x64; then
               exit 0
+            else
+              exit_code=$?
             fi
-            exit_code=$?
             if [ "$attempt" -eq 2 ]; then
               exit "$exit_code"
             fi
@@ -514,7 +522,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          UV_MATCHES=$(find out -type f \( -iname "uv" -o -iname "uv.exe" \) -print)
+          test -d out || { echo "::error::Packaging output directory out is missing"; exit 1; }
+          UV_MATCHES=$(find out \( \
+            -path "*/Contents/Resources/uv" -o \
+            -path "*/Contents/Resources/uv.exe" -o \
+            -path "*/resources/uv" -o \
+            -path "*/resources/uv.exe" \
+          \) -print)
           if [ -n "$UV_MATCHES" ]; then
             echo "::error::UV must not be included in the packaged application"
             printf '%s\n' "$UV_MATCHES"
@@ -640,6 +654,16 @@ jobs:
               [run.head_repository?.full_name === sourceRepo, `head_repository=${run.head_repository?.full_name}`],
               [run.path === expectedWorkflow, `workflow=${run.path}`],
               [allowedEvents.has(run.event), `event=${run.event}`],
+              [
+                run.event !== 'pull_request' ||
+                  run.pull_requests?.some(
+                    (pullRequest) =>
+                      pullRequest.number === 1878 &&
+                      pullRequest.base?.ref === 'dev' &&
+                      pullRequest.head?.ref === 'feat/bundled-agent-toolchain',
+                  ),
+                `pull_requests=${JSON.stringify(run.pull_requests)}`,
+              ],
               [run.status === 'completed' && run.conclusion === 'success', `status=${run.status}/${run.conclusion}`],
               [run.head_sha === sourceSha, `head_sha=${run.head_sha}, expected=${sourceSha}`],
             ];
@@ -698,7 +722,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          UV_MATCHES=$(find out -type f \( -iname "uv" -o -iname "uv.exe" \) -print)
+          test -d out || { echo "::error::Packaging output directory out is missing"; exit 1; }
+          UV_MATCHES=$(find out \( \
+            -path "*/Contents/Resources/uv" -o \
+            -path "*/Contents/Resources/uv.exe" -o \
+            -path "*/resources/uv" -o \
+            -path "*/resources/uv.exe" \
+          \) -print)
           if [ -n "$UV_MATCHES" ]; then
             echo "::error::UV must not be included in the packaged application"
             printf '%s\n' "$UV_MATCHES"
@@ -1151,24 +1181,23 @@ jobs:
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
     runs-on: ubuntu-latest
     if: |
-      inputs.notify_only == false &&
       always() &&
+      inputs.notify_only == false &&
+      needs.prepare.result == 'success' &&
       (
+        needs.prepare.outputs.package_set == 'launcher' ||
         (
-          needs.prepare.outputs.package_set != 'launcher' &&
-          (
-            needs.build-macos-arm64.result == 'success' ||
-            needs.build-macos-x64.result == 'success' ||
-            needs.build-windows.result == 'success'
-          )
-        ) ||
+          (contains(inputs.platforms, 'macos') == false ||
+            (needs.build-macos-arm64.result == 'success' && needs.build-macos-x64.result == 'success')) &&
+          (contains(inputs.platforms, 'windows') == false || needs.build-windows.result == 'success')
+        )
+      ) &&
+      (
+        needs.prepare.outputs.package_set == 'app' ||
         (
-          needs.prepare.outputs.package_set != 'app' &&
-          (
-            needs.build-test-launcher-macos-arm64.result == 'success' ||
-            needs.build-test-launcher-macos-x64.result == 'success' ||
-            needs.build-test-launcher-windows.result == 'success'
-          )
+          (contains(inputs.platforms, 'macos') == false ||
+            (needs.build-test-launcher-macos-arm64.result == 'success' && needs.build-test-launcher-macos-x64.result == 'success')) &&
+          (contains(inputs.platforms, 'windows') == false || needs.build-test-launcher-windows.result == 'success')
         )
       )
 
