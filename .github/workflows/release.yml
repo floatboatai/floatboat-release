@@ -7,6 +7,10 @@ on:
         description: "Git ref to build (release tag, nightly tag, branch, or commit SHA)"
         required: true
         type: string
+      windows_runtime_toolchain_run_id:
+        description: "AOE Desktop producer run containing the sealed Windows runtime toolchain inputs"
+        required: true
+        type: string
       version:
         description: "Version string (e.g., 0.2.2-rc.1)"
         required: true
@@ -362,6 +366,18 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
 
+      - name: Verify UV is not bundled
+        shell: bash
+        run: |
+          set -euo pipefail
+          UV_MATCHES=$(find out -type f \( -iname "uv" -o -iname "uv.exe" \) -print)
+          if [ -n "$UV_MATCHES" ]; then
+            echo "::error::UV must not be included in the packaged application"
+            printf '%s\n' "$UV_MATCHES"
+            exit 1
+          fi
+          echo "✅ UV is not bundled in the macOS arm64 package"
+
       - name: Collect arm64 production artifacts
         shell: bash
         run: |
@@ -494,6 +510,18 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
 
+      - name: Verify UV is not bundled
+        shell: bash
+        run: |
+          set -euo pipefail
+          UV_MATCHES=$(find out -type f \( -iname "uv" -o -iname "uv.exe" \) -print)
+          if [ -n "$UV_MATCHES" ]; then
+            echo "::error::UV must not be included in the packaged application"
+            printf '%s\n' "$UV_MATCHES"
+            exit 1
+          fi
+          echo "✅ UV is not bundled in the macOS x64 package"
+
       - name: Collect x64 production artifacts
         shell: bash
         run: |
@@ -585,6 +613,62 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Verify Windows runtime toolchain producer run
+        uses: actions/github-script@v7
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          PRODUCER_RUN_ID: ${{ inputs.windows_runtime_toolchain_run_id }}
+        with:
+          github-token: ${{ secrets.SOURCE_REPO_PAT }}
+          script: |
+            const sourceRepo = process.env.SOURCE_REPO;
+            const sourceSha = process.env.SOURCE_SHA;
+            const runId = Number(process.env.PRODUCER_RUN_ID);
+            const parts = sourceRepo.split('/');
+            if (parts.length !== 2 || !Number.isSafeInteger(runId) || runId <= 0) {
+              core.setFailed(`Invalid producer input: repository=${sourceRepo}, run_id=${process.env.PRODUCER_RUN_ID}`);
+              return;
+            }
+
+            const [owner, repo] = parts;
+            const { data: run } = await github.rest.actions.getWorkflowRun({ owner, repo, run_id: runId });
+            const expectedWorkflow = '.github/workflows/build-windows-runtime-toolchain-inputs.yml';
+            const allowedEvents = new Set(['workflow_dispatch', 'pull_request']);
+            const checks = [
+              [run.repository?.full_name === sourceRepo, `repository=${run.repository?.full_name}`],
+              [run.head_repository?.full_name === sourceRepo, `head_repository=${run.head_repository?.full_name}`],
+              [run.path === expectedWorkflow, `workflow=${run.path}`],
+              [allowedEvents.has(run.event), `event=${run.event}`],
+              [run.status === 'completed' && run.conclusion === 'success', `status=${run.status}/${run.conclusion}`],
+              [run.head_sha === sourceSha, `head_sha=${run.head_sha}, expected=${sourceSha}`],
+            ];
+            for (const [ok, detail] of checks) {
+              if (!ok) {
+                core.setFailed(`Untrusted runtime toolchain producer run ${runId}: ${detail}`);
+                return;
+              }
+            }
+            core.info(`Trusted runtime toolchain producer run ${runId}: ${run.path}@${sourceSha}`);
+
+      - name: Resolve sealed Windows FFmpeg artifact
+        id: windows-ffmpeg
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT_NAME=$(node -e "const lock=require('./resources/runtime-toolchain-lock.json'); const build=lock.tools.ffmpeg.builds.find((entry)=>entry.platform==='win32'&&entry.arch==='x64'); if(!build?.ciArtifact?.name) process.exit(2); process.stdout.write(build.ciArtifact.name)")
+          echo "artifact_name=$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
+          echo "✅ Windows FFmpeg artifact: $ARTIFACT_NAME"
+
+      - name: Download sealed Windows FFmpeg artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.windows-ffmpeg.outputs.artifact_name }}
+          path: ${{ runner.temp }}/runtime-toolchain-windows-ffmpeg
+          github-token: ${{ secrets.SOURCE_REPO_PAT }}
+          repository: ${{ vars.SOURCE_REPO }}
+          run-id: ${{ inputs.windows_runtime_toolchain_run_id }}
+
       - name: Verify Racent signtool present
         if: inputs.is_rc == false && inputs.build_profile == 'release'
         shell: pwsh
@@ -605,9 +689,22 @@ jobs:
         run: pnpm run forge:make
         env:
           BUILD_OBFUSCATE: "true"
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}/runtime-toolchain-windows-ffmpeg
           SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
           SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
           SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
+
+      - name: Verify UV is not bundled
+        shell: bash
+        run: |
+          set -euo pipefail
+          UV_MATCHES=$(find out -type f \( -iname "uv" -o -iname "uv.exe" \) -print)
+          if [ -n "$UV_MATCHES" ]; then
+            echo "::error::UV must not be included in the packaged application"
+            printf '%s\n' "$UV_MATCHES"
+            exit 1
+          fi
+          echo "✅ UV is not bundled in the Windows x64 package"
 
       - name: Collect production Windows artifact
         shell: bash
