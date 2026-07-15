@@ -748,6 +748,12 @@ jobs:
           fi
           echo "✅ UV is not bundled in the Windows x64 package"
 
+      - name: Smoke test packaged runtime toolchain (Windows x64)
+        run: pnpm run runtime-toolchain:smoke -- --require-signatures
+        env:
+          ARCH: x64
+          TARGET_ARCH: x64
+
       - name: Collect production Windows artifact
         shell: bash
         run: |
