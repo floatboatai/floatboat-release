@@ -585,6 +585,27 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Setup FFmpeg build toolchain
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            diffutils
+            make
+            tar
+            xz
+          pacboy: toolchain:p
+          path-type: inherit
+
+      - name: Build bundled FFmpeg (Windows x64)
+        shell: msys2 {0}
+        run: node scripts/build-windows-ffmpeg.mjs
+        env:
+          TARGET_PLATFORM: win32
+          TARGET_ARCH: x64
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
+
       - name: Verify Racent signing configuration
         if: inputs.build_profile == 'release'
         shell: pwsh
@@ -615,6 +636,7 @@ jobs:
         run: pnpm run forge:make
         env:
           BUILD_OBFUSCATE: "true"
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
           SIGNTOOL_ACCESS_KEY: ${{ inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
           SIGNTOOL_ACCESS_SECRET: ${{ inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
           SIGNTOOL_CERT_CODE: ${{ inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
