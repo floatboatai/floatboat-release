@@ -585,10 +585,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify Racent signtool present
-        if: inputs.is_rc == false && inputs.build_profile == 'release'
+      - name: Verify Racent signing configuration
+        if: inputs.build_profile == 'release'
         shell: pwsh
+        env:
+          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
         run: |
+          foreach ($name in @("SIGNTOOL_ACCESS_KEY", "SIGNTOOL_ACCESS_SECRET", "SIGNTOOL_CERT_CODE")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              Write-Error "$name is required for release-profile Windows signing."
+              exit 1
+            }
+          }
           $tool = "build/signing/signtool-amd64.exe"
           if (-not (Test-Path $tool)) {
             Write-Error "$tool not found in source repo. Commit Racent signtool to aoe-desktop at $tool."
@@ -605,9 +615,9 @@ jobs:
         run: pnpm run forge:make
         env:
           BUILD_OBFUSCATE: "true"
-          SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
-          SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
-          SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
 
       - name: Collect production Windows artifact
         shell: bash
@@ -1004,10 +1014,20 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Verify Racent signtool present
-        if: inputs.is_rc == false && inputs.build_profile == 'release'
+      - name: Verify Racent signing configuration
+        if: inputs.build_profile == 'release'
         shell: pwsh
+        env:
+          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
         run: |
+          foreach ($name in @("SIGNTOOL_ACCESS_KEY", "SIGNTOOL_ACCESS_SECRET", "SIGNTOOL_CERT_CODE")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              Write-Error "$name is required for release-profile Windows signing."
+              exit 1
+            }
+          }
           $tool = "build/signing/signtool-amd64.exe"
           if (-not (Test-Path $tool)) {
             Write-Error "$tool not found in source repo. Commit Racent signtool to aoe-desktop at $tool."
@@ -1024,9 +1044,9 @@ jobs:
         run: pnpm run package:test-launcher:win
         env:
           NODE_OPTIONS: --max-old-space-size=8192
-          SIGNTOOL_ACCESS_KEY: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
-          SIGNTOOL_ACCESS_SECRET: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
-          SIGNTOOL_CERT_CODE: ${{ inputs.is_rc == false && inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
 
       - name: Collect test launcher artifact
         shell: bash
