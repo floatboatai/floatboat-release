@@ -16,13 +16,14 @@ on:
         required: true
         type: string
       platforms:
-        description: "Platforms to build"
+        description: "Platforms to build (macos-x64 builds Intel only)"
         required: false
         default: "macos,windows"
         type: choice
         options:
           - "macos,windows"
           - "macos"
+          - "macos-x64"
           - "windows"
       is_rc:
         description: "Is this a Release Candidate?"
@@ -258,7 +259,7 @@ jobs:
     name: Build macOS (arm64)
     needs: prepare
     runs-on: macos-15
-    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos') && inputs.platforms != 'macos-x64'
 
     steps:
       - name: Checkout source repo
@@ -791,7 +792,7 @@ jobs:
     name: Test Launcher macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos') && inputs.platforms != 'macos-x64'
 
     steps:
       - name: Checkout source repo
@@ -1209,7 +1210,8 @@ jobs:
         needs.prepare.outputs.package_set == 'launcher' ||
         (
           (contains(inputs.platforms, 'macos') == false ||
-            (needs.build-macos-arm64.result == 'success' && needs.build-macos-x64.result == 'success')) &&
+            (needs.build-macos-x64.result == 'success' &&
+              (inputs.platforms == 'macos-x64' || needs.build-macos-arm64.result == 'success'))) &&
           (contains(inputs.platforms, 'windows') == false || needs.build-windows.result == 'success')
         )
       ) &&
@@ -1217,7 +1219,8 @@ jobs:
         needs.prepare.outputs.package_set == 'app' ||
         (
           (contains(inputs.platforms, 'macos') == false ||
-            (needs.build-test-launcher-macos-arm64.result == 'success' && needs.build-test-launcher-macos-x64.result == 'success')) &&
+            (needs.build-test-launcher-macos-x64.result == 'success' &&
+              (inputs.platforms == 'macos-x64' || needs.build-test-launcher-macos-arm64.result == 'success'))) &&
           (contains(inputs.platforms, 'windows') == false || needs.build-test-launcher-windows.result == 'success')
         )
       )
