@@ -61,6 +61,8 @@ jobs:
       build_profile: ${{ steps.version.outputs.build_profile }}
       package_set: ${{ steps.version.outputs.package_set }}
       promote_merged_bugs: ${{ steps.version.outputs.promote_merged_bugs }}
+      floatboat_version: ${{ steps.desktop_versions.outputs.floatboat_version }}
+      deepseek_version: ${{ steps.desktop_versions.outputs.deepseek_version }}
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
       changelog_file: ${{ steps.changelog.outputs.changelog_file }}
 
@@ -132,11 +134,9 @@ jobs:
           fi
           SOURCE_SHORT_SHA="${SOURCE_SHA: -6}"
 
-          if [ "$BUILD_PROFILE" = "test" ]; then
-            NIGHTLY="${VERSION}-test.${DATE}-${SOURCE_SHORT_SHA}"
-          else
-            NIGHTLY="${VERSION}-n.${DATE}-${SOURCE_SHORT_SHA}"
-          fi
+          # Desktop 发行版本只使用统一 nightly qualifier；测试环境由 build_profile 决定，
+          # 不再把 test 写进应用版本，避免绕过集中式发行变体解析。
+          NIGHTLY="${VERSION}-n.${DATE}-${SOURCE_SHORT_SHA}"
           SOURCE_TAG="nightly-${NIGHTLY}"
           echo "nightly_version=$NIGHTLY" >> $GITHUB_OUTPUT
           echo "source_tag=$SOURCE_TAG" >> $GITHUB_OUTPUT
@@ -145,6 +145,34 @@ jobs:
           echo "promote_merged_bugs=$PROMOTE_MERGED_BUGS" >> $GITHUB_OUTPUT
           echo "📦 Nightly version: $NIGHTLY (from release v${RELEASE_VERSION} + 1, $BUILD_PROFILE, $PACKAGE_SET, promote=$PROMOTE_MERGED_BUGS)"
           echo "🏷️ Source nightly tag: $SOURCE_TAG"
+
+      - name: Resolve Desktop variant versions
+        id: desktop_versions
+        env:
+          INPUT_VERSION: ${{ steps.version.outputs.nightly_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const {
+            deriveDesktopVariantVersion,
+            parseDesktopReleaseVersion,
+          } = require('./scripts/packaging/releaseVariant.cjs');
+
+          const inputVersion = String(process.env.INPUT_VERSION || '').trim();
+          const parsedVersion = parseDesktopReleaseVersion(inputVersion);
+          if (parsedVersion.variant !== 'floatboat') {
+            throw new Error(`Nightly version 必须使用 Floatboat 基础版本，收到：${inputVersion}`);
+          }
+
+          const floatboatVersion = deriveDesktopVariantVersion(inputVersion, 'floatboat');
+          const deepseekVersion = deriveDesktopVariantVersion(inputVersion, 'deepseek-agent');
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `floatboat_version=${floatboatVersion}\ndeepseek_version=${deepseekVersion}\n`,
+          );
+          console.log(`Floatboat nightly version: ${floatboatVersion}`);
+          console.log(`DeepSeek nightly version: ${deepseekVersion}`);
+          NODE
 
       - name: Read config
         id: config
@@ -215,10 +243,22 @@ jobs:
           retention-days: 7
 
   build-macos-arm64:
-    name: Build macOS (arm64)
+    name: Build ${{ matrix.display_name }} macOS (arm64)
     needs: prepare
     runs-on: macos-latest
     if: needs.prepare.outputs.package_set != 'launcher' && contains(needs.prepare.outputs.platforms, 'macos')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: floatboat
+            display_name: Floatboat
+            artifact_base: Floatboat
+            app_name: Floatboat
+          - variant: deepseek-agent
+            display_name: Floatboat DeepSeek Agent
+            artifact_base: Floatboat-DeepSeek-Agent
+            app_name: Floatboat DeepSeek Agent
 
     steps:
       - name: Checkout source repo
@@ -246,14 +286,17 @@ jobs:
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected test build .env (${entry_count} entries)."
 
-      - name: Inject version
+      - name: Inject variant version
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
         run: |
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = '${{ needs.prepare.outputs.version }}';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ ${{ matrix.display_name }} package.json version set to $VERSION"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -268,14 +311,35 @@ jobs:
 
       - name: Check code signing
         id: signing
-        run: |
-          if [ -n "$APPLE_CERTIFICATE" ]; then
-            echo "available=true" >> $GITHUB_OUTPUT
-          else
-            echo "available=false" >> $GITHUB_OUTPUT
-          fi
+        shell: bash
         env:
+          BUILD_PROFILE: ${{ needs.prepare.outputs.build_profile }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD_PROFILE" = "release" ]; then
+            echo "::error::Release-profile macOS packaging requires: ${missing[*]}"
+            exit 1
+          fi
+          echo "::warning::macOS signing disabled for $BUILD_PROFILE profile; missing: ${missing[*]}"
 
       - name: Import Certificate
         if: steps.signing.outputs.available == 'true'
@@ -284,8 +348,26 @@ jobs:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
-      - name: Build arm64
-        run: pnpm run forge:make:arm64
+      - name: Build ${{ matrix.display_name }} arm64
+        run: |
+          set -euo pipefail
+          rm -rf out
+          for attempt in 1 2; do
+            set +e
+            pnpm run forge:make:arm64
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              exit "$exit_code"
+            fi
+            echo "::warning::${{ matrix.display_name }} macOS arm64 packaging failed once; cleaning DMG mount state and retrying"
+            hdiutil detach "/Volumes/${{ matrix.app_name }}" -force || true
+            rm -rf out
+            sleep 10
+          done
         env:
           NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
@@ -294,20 +376,64 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
 
+      - name: Verify signed and notarized app (arm64)
+        if: steps.signing.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="out/${{ matrix.app_name }}-darwin-arm64/${{ matrix.app_name }}.app"
+          [ -d "$APP_PATH" ] || { echo "::error::Packaged app not found: $APP_PATH"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+
+      - name: Collect arm64 artifacts
+        shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/macos-arm64
+          for extension in dmg zip; do
+            expected_name="${ARTIFACT_BASE}-${VERSION}-arm64.${extension}"
+            count=$(find out/make -type f -name "$expected_name" | wc -l | tr -d ' ')
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected exactly one $expected_name, found $count"
+              find out/make -type f -print || true
+              exit 1
+            fi
+            source_file=$(find out/make -type f -name "$expected_name" -print -quit)
+            cp "$source_file" dist/macos-arm64/
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-macos-arm64
+          name: nightly-desktop-macos-arm64-${{ matrix.variant }}
           path: |
-            out/make/**/*.dmg
-            out/make/**/*.zip
+            dist/macos-arm64/*.dmg
+            dist/macos-arm64/*.zip
           retention-days: 7
+          if-no-files-found: error
 
   build-macos-x64:
-    name: Build macOS (x64)
+    name: Build ${{ matrix.display_name }} macOS (x64)
     needs: prepare
     runs-on: macos-latest
     if: needs.prepare.outputs.package_set != 'launcher' && contains(needs.prepare.outputs.platforms, 'macos')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: floatboat
+            display_name: Floatboat
+            artifact_base: Floatboat
+            app_name: Floatboat
+          - variant: deepseek-agent
+            display_name: Floatboat DeepSeek Agent
+            artifact_base: Floatboat-DeepSeek-Agent
+            app_name: Floatboat DeepSeek Agent
 
     steps:
       - name: Checkout source repo
@@ -335,14 +461,17 @@ jobs:
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected test build .env (${entry_count} entries)."
 
-      - name: Inject version
+      - name: Inject variant version
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
         run: |
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = '${{ needs.prepare.outputs.version }}';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ ${{ matrix.display_name }} package.json version set to $VERSION"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -357,14 +486,35 @@ jobs:
 
       - name: Check code signing
         id: signing
-        run: |
-          if [ -n "$APPLE_CERTIFICATE" ]; then
-            echo "available=true" >> $GITHUB_OUTPUT
-          else
-            echo "available=false" >> $GITHUB_OUTPUT
-          fi
+        shell: bash
         env:
+          BUILD_PROFILE: ${{ needs.prepare.outputs.build_profile }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD_PROFILE" = "release" ]; then
+            echo "::error::Release-profile macOS packaging requires: ${missing[*]}"
+            exit 1
+          fi
+          echo "::warning::macOS signing disabled for $BUILD_PROFILE profile; missing: ${missing[*]}"
 
       - name: Import Certificate
         if: steps.signing.outputs.available == 'true'
@@ -373,8 +523,26 @@ jobs:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
-      - name: Build x64
-        run: pnpm run forge:make:x64
+      - name: Build ${{ matrix.display_name }} x64
+        run: |
+          set -euo pipefail
+          rm -rf out
+          for attempt in 1 2; do
+            set +e
+            pnpm run forge:make:x64
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -eq 2 ]; then
+              exit "$exit_code"
+            fi
+            echo "::warning::${{ matrix.display_name }} macOS x64 packaging failed once; cleaning DMG mount state and retrying"
+            hdiutil detach "/Volumes/${{ matrix.app_name }}" -force || true
+            rm -rf out
+            sleep 10
+          done
         env:
           NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
@@ -383,20 +551,62 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
 
+      - name: Verify signed and notarized app (x64)
+        if: steps.signing.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="out/${{ matrix.app_name }}-darwin-x64/${{ matrix.app_name }}.app"
+          [ -d "$APP_PATH" ] || { echo "::error::Packaged app not found: $APP_PATH"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+
+      - name: Collect x64 artifacts
+        shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/macos-x64
+          for extension in dmg zip; do
+            expected_name="${ARTIFACT_BASE}-${VERSION}-x64.${extension}"
+            count=$(find out/make -type f -name "$expected_name" | wc -l | tr -d ' ')
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected exactly one $expected_name, found $count"
+              find out/make -type f -print || true
+              exit 1
+            fi
+            source_file=$(find out/make -type f -name "$expected_name" -print -quit)
+            cp "$source_file" dist/macos-x64/
+          done
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-macos-x64
+          name: nightly-desktop-macos-x64-${{ matrix.variant }}
           path: |
-            out/make/**/*.dmg
-            out/make/**/*.zip
+            dist/macos-x64/*.dmg
+            dist/macos-x64/*.zip
           retention-days: 7
+          if-no-files-found: error
 
   build-windows:
-    name: Build Windows (x64)
+    name: Build ${{ matrix.display_name }} Windows (x64)
     needs: prepare
     runs-on: windows-latest
     if: needs.prepare.outputs.package_set != 'launcher' && contains(needs.prepare.outputs.platforms, 'windows')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: floatboat
+            display_name: Floatboat
+            artifact_base: Floatboat
+          - variant: deepseek-agent
+            display_name: Floatboat DeepSeek Agent
+            artifact_base: Floatboat-DeepSeek-Agent
 
     steps:
       - name: Checkout source repo
@@ -424,15 +634,18 @@ jobs:
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected test build .env (${entry_count} entries)."
 
-      - name: Inject version
+      - name: Inject variant version
         shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
         run: |
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.version = '${{ needs.prepare.outputs.version }}';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
-          "
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ ${{ matrix.display_name }} package.json version set to $VERSION"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -492,7 +705,7 @@ jobs:
           }
           Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
 
-      - name: Build and package (production)
+      - name: Build and package ${{ matrix.display_name }}
         run: pnpm run forge:make
         env:
           BUILD_OBFUSCATE: "true"
@@ -503,26 +716,46 @@ jobs:
 
       - name: Collect production Windows artifact
         shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
         run: |
+          set -euo pipefail
           mkdir -p dist/windows
-          find out/make -name "*.exe" | while read f; do
-            dir=$(dirname "$f")
-            base=$(basename "$f")
-            newname=$(echo "$base" | tr ' ' '-')
-            if [ "$base" != "$newname" ]; then
-              mv "$f" "$dir/$newname"
-              echo "Renamed: $base -> $newname"
-            fi
-          done
-          PROD_EXE=$(find out/make -type f -name "*.exe" | head -1)
-          [ -n "$PROD_EXE" ] || { echo "Production EXE not found"; exit 1; }
+          expected_name="${ARTIFACT_BASE}-Setup-${VERSION}-x64.exe"
+          count=$(find out/make -type f -name "$expected_name" | wc -l | tr -d ' ')
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one $expected_name, found $count"
+            find out/make -type f -print || true
+            exit 1
+          fi
+          PROD_EXE=$(find out/make -type f -name "$expected_name" -print -quit)
           cp "$PROD_EXE" "dist/windows/"
-          echo "✅ Production Windows artifact: $(basename "$PROD_EXE")"
+          echo "✅ ${{ matrix.display_name }} Windows artifact: $(basename "$PROD_EXE")"
+
+      - name: Verify Windows Authenticode signature
+        if: needs.prepare.outputs.build_profile == 'release'
+        shell: pwsh
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
+        run: |
+          $installer = "dist/windows/$env:ARTIFACT_BASE-Setup-$env:VERSION-x64.exe"
+          if (-not (Test-Path $installer)) {
+            Write-Error "Installer not found: $installer"
+            exit 1
+          }
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne "Valid") {
+            Write-Error "Authenticode verification failed for $installer (status=$($signature.Status), message=$($signature.StatusMessage))"
+            exit 1
+          }
+          Write-Host "Authenticode signature valid: $installer"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: nightly-windows-x64
+          name: nightly-desktop-windows-x64-${{ matrix.variant }}
           path: |
             dist/windows/*.exe
           retention-days: 7
@@ -893,20 +1126,20 @@ jobs:
       always() &&
       (
         (
-          needs.prepare.outputs.package_set != 'launcher' &&
-          (
-            needs.build-macos-arm64.result == 'success' ||
-            needs.build-macos-x64.result == 'success' ||
-            needs.build-windows.result == 'success'
-          )
+          needs.prepare.outputs.package_set == 'launcher' &&
+          (!contains(needs.prepare.outputs.platforms, 'macos') || (
+            needs.build-test-launcher-macos-arm64.result == 'success' &&
+            needs.build-test-launcher-macos-x64.result == 'success'
+          )) &&
+          (!contains(needs.prepare.outputs.platforms, 'windows') || needs.build-test-launcher-windows.result == 'success')
         ) ||
         (
-          needs.prepare.outputs.package_set != 'app' &&
-          (
-            needs.build-test-launcher-macos-arm64.result == 'success' ||
-            needs.build-test-launcher-macos-x64.result == 'success' ||
-            needs.build-test-launcher-windows.result == 'success'
-          )
+          needs.prepare.outputs.package_set != 'launcher' &&
+          contains(needs.prepare.outputs.platforms, 'macos') &&
+          contains(needs.prepare.outputs.platforms, 'windows') &&
+          needs.build-macos-arm64.result == 'success' &&
+          needs.build-macos-x64.result == 'success' &&
+          needs.build-windows.result == 'success'
         )
       )
 
@@ -933,6 +1166,7 @@ jobs:
 
       - name: Collect artifacts
         run: |
+          set -euo pipefail
           mkdir -p out/make dist dist/launchers
           # 把 test-launcher zip 单独分流到 dist/launchers，避免被 generate-latest-yml 误当成 app 自动更新包
           find artifacts/ -type d -name 'nightly-test-launcher-*' -exec sh -c 'cp "$1"/*.zip dist/launchers/ 2>/dev/null || true' _ {} \;
@@ -943,18 +1177,78 @@ jobs:
           echo "🚀 Nightly test launcher artifacts:"
           ls -la dist/launchers/ 2>/dev/null || echo "  (none)"
 
-      - name: Generate macOS Update Metadata
-        if: needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success'
+      - name: Verify complete Desktop artifact set
+        if: needs.prepare.outputs.package_set != 'launcher'
+        shell: bash
+        env:
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
+          set -euo pipefail
+
+          require_file() {
+            local file_path="$1"
+            local label="$2"
+            if [ ! -f "$file_path" ]; then
+              echo "::error::Missing ${label}: ${file_path}"
+              exit 1
+            fi
+            echo "  ✅ ${label}: $(basename "$file_path")"
+          }
+
+          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
+          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
+          require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "Floatboat Windows x64 installer"
+          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
+          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
+          require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
+          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.zip" "Floatboat macOS arm64 updater ZIP"
+          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.zip" "Floatboat macOS x64 updater ZIP"
+          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
+          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
+
+          main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
+          updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
+          if [ "$main_installer_count" -ne 6 ] || [ "$updater_zip_count" -ne 4 ]; then
+            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected 6), mac_zip=$updater_zip_count (expected 4)"
+            exit 1
+          fi
+
+          {
+            echo "### Desktop nightly artifacts"
+            echo ""
+            echo "Source commit: \`${SOURCE_SHA}\`"
+            echo ""
+            echo "| Variant | Platform | Arch | App version | Main installer |"
+            echo "| --- | --- | --- | --- | --- |"
+            echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
+            echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
+            echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
+            echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
+            echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
+            echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate macOS Update Metadata
+        if: needs.prepare.outputs.package_set != 'launcher'
+        env:
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+        run: |
+          set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
-          ./scripts/generate-latest-yml.sh --platform mac
+          ./scripts/generate-latest-yml.sh --platform mac --release-version "$FLOATBOAT_VERSION"
+          echo "ℹ️ DeepSeek Agent nightly metadata intentionally skipped; manual-download artifacts only."
 
       - name: Generate Windows Update Metadata
-        if: needs.build-windows.result == 'success'
+        if: needs.prepare.outputs.package_set != 'launcher'
+        env:
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
         run: |
+          set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
-          EXE_FILE=$(find out/make -name "*.exe" | head -1)
-          [ -n "$EXE_FILE" ] && ./scripts/generate-latest-yml.sh --platform win "$EXE_FILE"
+          ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+          echo "ℹ️ DeepSeek Agent nightly metadata intentionally skipped; manual-download artifacts only."
 
       - name: Create source repo nightly tag
         shell: bash
@@ -1227,6 +1521,9 @@ jobs:
           import urllib.request
 
           version = "${{ needs.prepare.outputs.version }}"
+          floatboat_version = "${{ needs.prepare.outputs.floatboat_version }}"
+          deepseek_version = "${{ needs.prepare.outputs.deepseek_version }}"
+          package_set = "${{ needs.prepare.outputs.package_set }}"
           prev_tag = "${{ needs.prepare.outputs.prev_tag }}"
           macos_arm64 = "${{ needs.build-macos-arm64.result }}" or "skipped"
           macos_x64 = "${{ needs.build-macos-x64.result }}" or "skipped"
@@ -1245,23 +1542,47 @@ jobs:
 
           release_tag = f"nightly-{version}"
           release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
-          installer_names = [
-              f"Floatboat-{version}-arm64.dmg",
-              f"Floatboat-{version}-x64.dmg",
-              f"Floatboat-darwin-arm64-{version}.zip",
-              f"Floatboat-darwin-x64-{version}.zip",
-              f"Floatboat-Setup-{version}.exe",
+          main_installer_names = [
+              f"Floatboat-{floatboat_version}-arm64.dmg",
+              f"Floatboat-{floatboat_version}-x64.dmg",
+              f"Floatboat-Setup-{floatboat_version}-x64.exe",
+              f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
+              f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg",
+              f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
+          ]
+          updater_zip_names = [
+              f"Floatboat-{floatboat_version}-arm64.zip",
+              f"Floatboat-{floatboat_version}-x64.zip",
+              f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip",
+              f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip",
           ]
           launcher_names = [
               f"floatboat-test-launcher-{version}-macos-arm64.zip",
               f"floatboat-test-launcher-{version}-macos-x64.zip",
               f"floatboat-test-launcher-{version}-win-x64.zip",
           ]
-          installer_links = "\n".join(f"- {name}: {release_base_url}/{name}" for name in installer_names)
-          launcher_links = "\n".join(f"- {name}: {release_base_url}/{name}" for name in launcher_names)
+          main_installer_links = (
+              "\n".join(f"- {name}: {release_base_url}/{name}" for name in main_installer_names)
+              if package_set != "launcher"
+              else "_本次未构建 Desktop 应用安装包。_"
+          )
+          updater_zip_links = (
+              "\n".join(f"- {name}: {release_base_url}/{name}" for name in updater_zip_names)
+              if package_set != "launcher"
+              else "_本次未构建。_"
+          )
+          launcher_links = (
+              "\n".join(f"- {name}: {release_base_url}/{name}" for name in launcher_names)
+              if package_set != "app"
+              else "_本次未构建。_"
+          )
           range_hint = f"  (since {prev_tag})" if prev_tag else ""
 
           header = f"""🌙 Floatboat Nightly v{version}
+
+          包类型：{package_set}
+          Floatboat 版本：{floatboat_version}
+          DeepSeek Agent 版本：{deepseek_version}
 
           构建结果：
             macOS arm64：{icon(macos_arm64)} {macos_arm64}
@@ -1269,11 +1590,16 @@ jobs:
             Windows x64：{icon(windows)} {windows}
             上传：       {icon(upload)} {upload}
 
-          安装包下载：
-          {installer_links}
+          主安装包下载（完整 Nightly 共 6 个）：
+          {main_installer_links}
+
+          macOS updater ZIP：
+          {updater_zip_links}
 
           测试录制 launcher：
           {launcher_links}
+
+          DeepSeek Agent Nightly 只提供手动下载，不写入自动更新 feed。
 
           🔒 Nightly release note 仅内部发送到飞书机器人，不写入公开 GitHub Release 页面。
 
