@@ -1152,6 +1152,33 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           fetch-depth: 0
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install and verify metadata dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile --ignore-scripts --prefer-offline; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to install release metadata dependencies after 3 attempts"
+              exit 1
+            fi
+            delay=$((attempt * 15))
+            echo "::warning::Metadata dependency install attempt ${attempt} failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          node -e "require('js-yaml'); require('./scripts/packaging/updateMetadata.cjs')"
+
       - name: Download release notes
         uses: actions/download-artifact@v4
         with:
