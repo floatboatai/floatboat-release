@@ -191,7 +191,7 @@ function createFixture() {
   };
 }
 
-function runPublish(fixture) {
+function runPublish(fixture, desktopVariant = 'all') {
   return spawnSync('bash', [scriptPath], {
     cwd: fixture.workspace,
     encoding: 'utf8',
@@ -199,6 +199,7 @@ function runPublish(fixture) {
       ...process.env,
       PATH: `${fixture.binDirectory}:${process.env.PATH}`,
       GITHUB_WORKSPACE: fixture.workspace,
+      DESKTOP_VARIANT: desktopVariant,
       FLOATBOAT_VERSION: fixture.floatboatVersion,
       DEEPSEEK_VERSION: fixture.deepseekVersion,
       MOCK_S3_ROOT: fixture.s3Root,
@@ -254,6 +255,39 @@ test('依次发布十个制品和四份元数据，并完成 CDN 回读', (conte
   assert.match(calls.join('\n'), /aws cloudfront wait invalidation-completed/);
 });
 
+test('DeepSeek-only 只发布独立前缀下的五个制品和两份元数据', (context) => {
+  const fixture = createFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  fs.rmSync(path.join(fixture.workspace, 'out', 'make', `Floatboat-${fixture.floatboatVersion}-arm64.dmg`));
+  fs.rmSync(path.join(fixture.workspace, 'out', 'make', `Floatboat-${fixture.floatboatVersion}-x64.dmg`));
+  fs.rmSync(path.join(fixture.workspace, 'out', 'make', `Floatboat-Setup-${fixture.floatboatVersion}-x64.exe`));
+  fs.rmSync(path.join(fixture.workspace, 'out', 'make', `Floatboat-${fixture.floatboatVersion}-arm64.zip`));
+  fs.rmSync(path.join(fixture.workspace, 'out', 'make', `Floatboat-${fixture.floatboatVersion}-x64.zip`));
+  fs.rmSync(path.join(fixture.metadataDirectory, 'latest-mac.yml'));
+  fs.rmSync(path.join(fixture.metadataDirectory, 'latest.yml'));
+
+  const result = runPublish(fixture, 'deepseek-agent');
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /Floatboat feed was untouched/);
+  const releaseRoot = path.join(fixture.s3Root, 'aoe-desktop-releases');
+  assert.deepEqual(fs.readdirSync(releaseRoot), ['deepseek-agent']);
+
+  const calls = fs.readFileSync(fixture.callLog, 'utf8').trim().split('\n');
+  const s3CopyCalls = calls.filter((call) => call.startsWith('aws s3 cp '));
+  assert.equal(s3CopyCalls.length, 7);
+  assert.ok(
+    s3CopyCalls.every((call) => call.includes('s3://aoe-desktop-releases/deepseek-agent/')),
+    'DeepSeek-only 不得写入 S3 根前缀',
+  );
+  assert.ok(
+    calls.some((call) => call.includes('cloudfront create-invalidation') && call.includes('/deepseek-agent/*')),
+    'DeepSeek-only 只能失效独立 CDN 前缀',
+  );
+  assert.equal(calls.some((call) => /s3:\/\/aoe-desktop-releases\/(latest|Floatboat-)/.test(call)), false);
+});
+
 test('缺少任一 DeepSeek 正式制品时在 S3 mutation 前失败', (context) => {
   const fixture = createFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
@@ -266,7 +300,7 @@ test('缺少任一 DeepSeek 正式制品时在 S3 mutation 前失败', (context)
     ),
   );
 
-  const result = runPublish(fixture);
+  const result = runPublish(fixture, 'deepseek-agent');
 
   assert.notEqual(result.status, 0);
   assert.match(result.stdout, /Required updater release file is missing/);

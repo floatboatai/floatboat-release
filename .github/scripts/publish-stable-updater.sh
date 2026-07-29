@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ABOUTME: 按“制品先行、元数据后发”顺序发布双变体 stable updater，并回读 S3 与 CDN。
+# ABOUTME: 按选定发行范围以“制品先行、元数据后发”顺序发布 stable updater，并回读 S3 与 CDN。
 
 set -euo pipefail
 
@@ -19,8 +19,20 @@ require_file() {
   fi
 }
 
-require_env FLOATBOAT_VERSION
-require_env DEEPSEEK_VERSION
+DESKTOP_VARIANT="${DESKTOP_VARIANT:-all}"
+case "$DESKTOP_VARIANT" in
+  all)
+    require_env FLOATBOAT_VERSION
+    require_env DEEPSEEK_VERSION
+    ;;
+  deepseek-agent)
+    require_env DEEPSEEK_VERSION
+    ;;
+  *)
+    echo "::error::Unsupported DESKTOP_VARIANT: ${DESKTOP_VARIANT}"
+    exit 1
+    ;;
+esac
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 WORKSPACE_ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
@@ -31,42 +43,65 @@ RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://release.aoe.chat}"
 CLOUDFRONT_DISTRIBUTION_ID="${CLOUDFRONT_DISTRIBUTION_ID:-EOFLQQ0A8KCX1}"
 METADATA_VERIFIER="${METADATA_VERIFIER:-${SCRIPT_DIR}/verify-update-metadata.cjs}"
 
-artifact_files=(
-  "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg"
-  "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-x64.dmg"
-  "${ARTIFACT_DIR}/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
-  "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-arm64.zip"
-  "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-x64.zip"
-  "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg"
-  "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg"
-  "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
-  "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip"
-  "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
-)
-artifact_keys=(
-  "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg"
-  "Floatboat-${FLOATBOAT_VERSION}-x64.dmg"
-  "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
-  "Floatboat-${FLOATBOAT_VERSION}-arm64.zip"
-  "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
-  "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg"
-  "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg"
-  "deepseek-agent/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
-  "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip"
-  "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
-)
-metadata_files=(
-  "${METADATA_ROOT}/latest-mac.yml"
-  "${METADATA_ROOT}/latest.yml"
-  "${METADATA_ROOT}/deepseek-agent/deepseek-agent-mac.yml"
-  "${METADATA_ROOT}/deepseek-agent/deepseek-agent.yml"
-)
-metadata_keys=(
-  "latest-mac.yml"
-  "latest.yml"
-  "deepseek-agent/deepseek-agent-mac.yml"
-  "deepseek-agent/deepseek-agent.yml"
-)
+artifact_files=()
+artifact_keys=()
+metadata_files=()
+metadata_keys=()
+
+append_floatboat_release() {
+  artifact_files+=(
+    "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg"
+    "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-x64.dmg"
+    "${ARTIFACT_DIR}/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+    "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-arm64.zip"
+    "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+  )
+  artifact_keys+=(
+    "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg"
+    "Floatboat-${FLOATBOAT_VERSION}-x64.dmg"
+    "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+    "Floatboat-${FLOATBOAT_VERSION}-arm64.zip"
+    "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+  )
+  metadata_files+=(
+    "${METADATA_ROOT}/latest-mac.yml"
+    "${METADATA_ROOT}/latest.yml"
+  )
+  metadata_keys+=(
+    "latest-mac.yml"
+    "latest.yml"
+  )
+}
+
+append_deepseek_release() {
+  artifact_files+=(
+    "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg"
+    "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg"
+    "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
+    "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip"
+    "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
+  )
+  artifact_keys+=(
+    "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg"
+    "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg"
+    "deepseek-agent/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
+    "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip"
+    "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
+  )
+  metadata_files+=(
+    "${METADATA_ROOT}/deepseek-agent/deepseek-agent-mac.yml"
+    "${METADATA_ROOT}/deepseek-agent/deepseek-agent.yml"
+  )
+  metadata_keys+=(
+    "deepseek-agent/deepseek-agent-mac.yml"
+    "deepseek-agent/deepseek-agent.yml"
+  )
+}
+
+if [ "$DESKTOP_VARIANT" = "all" ]; then
+  append_floatboat_release
+fi
+append_deepseek_release
 
 for file_path in "${artifact_files[@]}" "${metadata_files[@]}" "$METADATA_VERIFIER"; do
   require_file "$file_path"
@@ -74,19 +109,21 @@ done
 
 verify_metadata_set() {
   local metadata_root="$1"
-  node "$METADATA_VERIFIER" \
-    --metadata "${metadata_root}/latest-mac.yml" \
-    --artifact-dir "$ARTIFACT_DIR" \
-    --release-version "$FLOATBOAT_VERSION" \
-    --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" \
-    --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg" \
-    --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip" \
-    --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
-  node "$METADATA_VERIFIER" \
-    --metadata "${metadata_root}/latest.yml" \
-    --artifact-dir "$ARTIFACT_DIR" \
-    --release-version "$FLOATBOAT_VERSION" \
-    --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+  if [ "$DESKTOP_VARIANT" = "all" ]; then
+    node "$METADATA_VERIFIER" \
+      --metadata "${metadata_root}/latest-mac.yml" \
+      --artifact-dir "$ARTIFACT_DIR" \
+      --release-version "$FLOATBOAT_VERSION" \
+      --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" \
+      --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg" \
+      --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip" \
+      --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+    node "$METADATA_VERIFIER" \
+      --metadata "${metadata_root}/latest.yml" \
+      --artifact-dir "$ARTIFACT_DIR" \
+      --release-version "$FLOATBOAT_VERSION" \
+      --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+  fi
   node "$METADATA_VERIFIER" \
     --metadata "${metadata_root}/deepseek-agent/deepseek-agent-mac.yml" \
     --artifact-dir "$ARTIFACT_DIR" \
@@ -102,7 +139,7 @@ verify_metadata_set() {
     --expected-artifact "Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
 }
 
-echo "🔎 Rechecking all four local updater metadata files before S3 mutation"
+echo "🔎 Rechecking ${#metadata_files[@]} local updater metadata files before S3 mutation"
 verify_metadata_set "$METADATA_ROOT"
 
 verify_s3_object() {
@@ -141,7 +178,7 @@ verify_s3_object() {
   echo "  ✅ S3 ${key}: ${remote_size} bytes, ETag ${etag}"
 }
 
-echo "📤 Uploading ten immutable updater artifacts before publishing any live metadata"
+echo "📤 Uploading ${#artifact_files[@]} immutable updater artifacts before publishing any live metadata"
 for index in "${!artifact_files[@]}"; do
   aws s3 cp "${artifact_files[$index]}" "s3://${RELEASE_BUCKET}/${artifact_keys[$index]}" \
     --no-progress \
@@ -149,7 +186,7 @@ for index in "${!artifact_files[@]}"; do
     --cache-control "public,max-age=31536000,immutable"
 done
 
-echo "🔎 Verifying ten updater artifacts in S3"
+echo "🔎 Verifying ${#artifact_files[@]} updater artifacts in S3"
 for index in "${!artifact_files[@]}"; do
   verify_s3_object \
     "${artifact_files[$index]}" \
@@ -157,7 +194,7 @@ for index in "${!artifact_files[@]}"; do
     "public,max-age=31536000,immutable"
 done
 
-echo "📤 Publishing four live updater metadata files"
+echo "📤 Publishing ${#metadata_files[@]} live updater metadata files"
 for index in "${!metadata_files[@]}"; do
   aws s3 cp "${metadata_files[$index]}" "s3://${RELEASE_BUCKET}/${metadata_keys[$index]}" \
     --no-progress \
@@ -166,7 +203,7 @@ for index in "${!metadata_files[@]}"; do
     --cache-control "no-cache,no-store,must-revalidate"
 done
 
-echo "🔎 Verifying four updater metadata objects in S3"
+echo "🔎 Verifying ${#metadata_files[@]} updater metadata objects in S3"
 for index in "${!metadata_files[@]}"; do
   verify_s3_object \
     "${metadata_files[$index]}" \
@@ -176,9 +213,14 @@ for index in "${!metadata_files[@]}"; do
 done
 
 echo "♻️ Invalidating CloudFront and waiting for completion"
+if [ "$DESKTOP_VARIANT" = "all" ]; then
+  invalidation_paths=("/*")
+else
+  invalidation_paths=("/deepseek-agent/*")
+fi
 invalidation=$(aws cloudfront create-invalidation \
   --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-  --paths "/*" \
+  --paths "${invalidation_paths[@]}" \
   --output json)
 echo "$invalidation" | jq '{Id: .Invalidation.Id, Status: .Invalidation.Status, CreateTime: .Invalidation.CreateTime}'
 invalidation_id=$(jq -r '.Invalidation.Id' <<<"$invalidation")
@@ -231,9 +273,13 @@ verify_cdn_artifact() {
   echo "  ✅ CDN ${key}: ${remote_size} bytes"
 }
 
-echo "🔎 Verifying all ten updater artifacts through CloudFront"
+echo "🔎 Verifying all ${#artifact_files[@]} updater artifacts through CloudFront"
 for index in "${!artifact_files[@]}"; do
   verify_cdn_artifact "${artifact_files[$index]}" "${artifact_keys[$index]}"
 done
 
-echo "✅ Floatboat and DeepSeek stable updater feeds are published and externally readable"
+if [ "$DESKTOP_VARIANT" = "all" ]; then
+  echo "✅ Floatboat and DeepSeek stable updater feeds are published and externally readable"
+else
+  echo "✅ DeepSeek stable updater feed is published and externally readable; Floatboat feed was untouched"
+fi
