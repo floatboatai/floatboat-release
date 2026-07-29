@@ -224,10 +224,13 @@ invalidation=$(aws cloudfront create-invalidation \
   --output json)
 echo "$invalidation" | jq '{Id: .Invalidation.Id, Status: .Invalidation.Status, CreateTime: .Invalidation.CreateTime}'
 invalidation_id=$(jq -r '.Invalidation.Id' <<<"$invalidation")
-aws cloudfront wait invalidation-completed \
+if aws cloudfront wait invalidation-completed \
   --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-  --id "$invalidation_id"
-echo "  ✅ CloudFront invalidation completed: ${invalidation_id}"
+  --id "$invalidation_id"; then
+  echo "  ✅ CloudFront invalidation completed: ${invalidation_id}"
+else
+  echo "::warning::CloudFront invalidation waiter is unavailable; falling back to CDN content polling for ${invalidation_id}"
+fi
 
 curl_common=(
   --fail
@@ -244,14 +247,34 @@ curl_common=(
 
 published_metadata_root=$(mktemp -d)
 mkdir -p "${published_metadata_root}/deepseek-agent"
-for index in "${!metadata_keys[@]}"; do
-  curl "${curl_common[@]}" \
-    --output "${published_metadata_root}/${metadata_keys[$index]}" \
-    "${RELEASE_BASE_URL}/${metadata_keys[$index]}"
-done
+
+download_published_metadata() {
+  local index
+  for index in "${!metadata_keys[@]}"; do
+    curl "${curl_common[@]}" \
+      --output "${published_metadata_root}/${metadata_keys[$index]}" \
+      "${RELEASE_BASE_URL}/${metadata_keys[$index]}"
+  done
+}
 
 echo "🔎 Verifying CDN metadata contents against local artifacts"
-verify_metadata_set "$published_metadata_root"
+metadata_verified=false
+for attempt in 1 2 3 4 5 6; do
+  if download_published_metadata && verify_metadata_set "$published_metadata_root"; then
+    metadata_verified=true
+    echo "  ✅ CDN metadata matched on attempt ${attempt}"
+    break
+  fi
+  if [ "$attempt" -lt 6 ]; then
+    delay=$((attempt * 5))
+    echo "::warning::CDN metadata is not current yet; retrying in ${delay}s (${attempt}/6)"
+    sleep "$delay"
+  fi
+done
+if [ "$metadata_verified" != "true" ]; then
+  echo "::error::CDN metadata did not converge to the published release"
+  exit 1
+fi
 
 verify_cdn_artifact() {
   local file_path="$1"
