@@ -20,6 +20,14 @@ on:
           - "macos,windows"
           - "macos"
           - "windows"
+      desktop_variant:
+        description: "Desktop variants to publish"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - "all"
+          - "deepseek-agent"
       is_rc:
         description: "Is this a Release Candidate?"
         required: false
@@ -40,7 +48,7 @@ on:
           - "test"
           - "internal-test"
       package_set:
-        description: "Package set to build (auto: non-release=app, release=all)"
+        description: "Package set to build (auto: DeepSeek-only/non-release=app, full release=all)"
         required: false
         default: "auto"
         type: choice
@@ -72,6 +80,9 @@ jobs:
       platforms: ${{ inputs.platforms }}
       build_profile: ${{ inputs.build_profile }}
       package_set: ${{ steps.package_set.outputs.package_set }}
+      desktop_variant: ${{ steps.release_scope.outputs.desktop_variant }}
+      desktop_matrix: ${{ steps.release_scope.outputs.desktop_matrix }}
+      release_tag: ${{ steps.release_scope.outputs.release_tag }}
       source_sha: ${{ steps.source.outputs.source_sha }}
       source_release_tag: ${{ steps.source.outputs.release_tag }}
       floatboat_version: ${{ steps.desktop_versions.outputs.floatboat_version }}
@@ -80,17 +91,68 @@ jobs:
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
 
     steps:
+      - name: Resolve release scope
+        id: release_scope
+        shell: bash
+        env:
+          INPUT_DESKTOP_VARIANT: ${{ inputs.desktop_variant }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_IS_RC: ${{ inputs.is_rc }}
+          INPUT_BUILD_PROFILE: ${{ inputs.build_profile }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+          INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
+        run: |
+          set -euo pipefail
+
+          case "$INPUT_DESKTOP_VARIANT" in
+            all)
+              release_tag="v${INPUT_VERSION}"
+              desktop_matrix='{"include":[{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat"},{"variant":"deepseek-agent","display_name":"Floatboat DeepSeek Agent","artifact_base":"Floatboat-DeepSeek-Agent","app_name":"Floatboat DeepSeek Agent"}]}'
+              ;;
+            deepseek-agent)
+              if [ "$INPUT_IS_RC" != "false" ] || [ "$INPUT_BUILD_PROFILE" != "release" ]; then
+                echo "::error::DeepSeek-only publishing is restricted to official release-profile builds"
+                exit 1
+              fi
+              if [ "$INPUT_PLATFORMS" != "macos,windows" ]; then
+                echo "::error::DeepSeek-only official publishing requires macOS and Windows together"
+                exit 1
+              fi
+              if [ "$INPUT_PROMOTE_MERGED_BUGS" = "true" ]; then
+                echo "::error::DeepSeek-only publishing must not promote the shared Floatboat bug queue"
+                exit 1
+              fi
+              release_tag="deepseek-v${INPUT_VERSION}"
+              desktop_matrix='{"include":[{"variant":"deepseek-agent","display_name":"Floatboat DeepSeek Agent","artifact_base":"Floatboat-DeepSeek-Agent","app_name":"Floatboat DeepSeek Agent"}]}'
+              ;;
+            *)
+              echo "::error::Unsupported desktop_variant: ${INPUT_DESKTOP_VARIANT}"
+              exit 1
+              ;;
+          esac
+
+          echo "desktop_variant=${INPUT_DESKTOP_VARIANT}" >> "$GITHUB_OUTPUT"
+          echo "desktop_matrix=${desktop_matrix}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "🎯 Desktop release scope: ${INPUT_DESKTOP_VARIANT} (${release_tag})"
+
       - name: Resolve package set
         id: package_set
         shell: bash
         run: |
           package_set="${{ inputs.package_set }}"
           if [ "$package_set" = "auto" ]; then
-            if [ "${{ inputs.build_profile }}" != "release" ]; then
+            if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ]; then
+              package_set="app"
+            elif [ "${{ inputs.build_profile }}" != "release" ]; then
               package_set="app"
             else
               package_set="all"
             fi
+          fi
+          if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ] && [ "$package_set" != "app" ]; then
+            echo "::error::DeepSeek-only publishing requires package_set=app"
+            exit 1
           fi
           echo "package_set=$package_set" >> "$GITHUB_OUTPUT"
           echo "📦 Package set: $package_set"
@@ -138,10 +200,10 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_IS_RC: ${{ inputs.is_rc }}
           INPUT_REPO_REF: ${{ inputs.repo_ref }}
+          RELEASE_TAG: ${{ steps.release_scope.outputs.release_tag }}
         run: |
           set -euo pipefail
           SOURCE_SHA=$(git rev-parse HEAD)
-          RELEASE_TAG="v${INPUT_VERSION}"
 
           echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
@@ -191,7 +253,7 @@ jobs:
 
       - name: Inject version into package.json
         env:
-          VERSION: ${{ steps.desktop_versions.outputs.floatboat_version }}
+          VERSION: ${{ steps.release_scope.outputs.desktop_variant == 'deepseek-agent' && steps.desktop_versions.outputs.deepseek_version || steps.desktop_versions.outputs.floatboat_version }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
@@ -207,7 +269,8 @@ jobs:
           set -e
           VERSION="${{ inputs.version }}"
           IS_RC="${{ inputs.is_rc }}"
-          CURRENT_TAG="v${VERSION}"
+          DESKTOP_VARIANT="${{ steps.release_scope.outputs.desktop_variant }}"
+          CURRENT_TAG="${{ steps.release_scope.outputs.release_tag }}"
 
           echo "🔍 Finding previous tag for ${CURRENT_TAG} (is_rc=${IS_RC})"
 
@@ -225,7 +288,11 @@ jobs:
             fi
           else
             # Official release: find previous official release
-            PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${CURRENT_TAG}$" | head -1)
+            if [ "$DESKTOP_VARIANT" = "deepseek-agent" ]; then
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^deepseek-v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${CURRENT_TAG}$" | head -1)
+            else
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${CURRENT_TAG}$" | head -1)
+            fi
             echo "  → Previous release: ${PREV_TAG:-none}"
           fi
 
@@ -288,16 +355,7 @@ jobs:
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - variant: floatboat
-            display_name: Floatboat
-            artifact_base: Floatboat
-            app_name: Floatboat
-          - variant: deepseek-agent
-            display_name: Floatboat DeepSeek Agent
-            artifact_base: Floatboat-DeepSeek-Agent
-            app_name: Floatboat DeepSeek Agent
+      matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
 
     steps:
       - name: Checkout source repo
@@ -490,16 +548,7 @@ jobs:
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - variant: floatboat
-            display_name: Floatboat
-            artifact_base: Floatboat
-            app_name: Floatboat
-          - variant: deepseek-agent
-            display_name: Floatboat DeepSeek Agent
-            artifact_base: Floatboat-DeepSeek-Agent
-            app_name: Floatboat DeepSeek Agent
+      matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
 
     steps:
       - name: Checkout source repo
@@ -692,14 +741,7 @@ jobs:
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'windows')
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - variant: floatboat
-            display_name: Floatboat
-            artifact_base: Floatboat
-          - variant: deepseek-agent
-            display_name: Floatboat DeepSeek Agent
-            artifact_base: Floatboat-DeepSeek-Agent
+      matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
 
     steps:
       - name: Checkout source repo
@@ -878,7 +920,7 @@ jobs:
     name: Test Launcher macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -1025,7 +1067,7 @@ jobs:
     name: Test Launcher macOS (x64)
     needs: prepare
     runs-on: macos-15-intel
-    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
 
     steps:
       - name: Checkout source repo
@@ -1172,7 +1214,7 @@ jobs:
     name: Test Launcher Windows (x64)
     needs: prepare
     runs-on: windows-latest
-    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'windows')
+    if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'windows')
 
     steps:
       - name: Checkout source repo
@@ -1419,6 +1461,7 @@ jobs:
         if: needs.prepare.outputs.package_set != 'launcher'
         shell: bash
         env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
@@ -1435,23 +1478,33 @@ jobs:
             echo "  ✅ ${label}: $(basename "$file_path")"
           }
 
-          echo "🔎 Verifying complete six-package Desktop release set"
-          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
-          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
-          require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "Floatboat Windows x64 installer"
+          echo "🔎 Verifying Desktop release set for ${DESKTOP_VARIANT}"
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
+            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
+            require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "Floatboat Windows x64 installer"
+            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.zip" "Floatboat macOS arm64 updater ZIP"
+            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.zip" "Floatboat macOS x64 updater ZIP"
+          fi
+
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
           require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
-
-          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.zip" "Floatboat macOS arm64 updater ZIP"
-          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.zip" "Floatboat macOS x64 updater ZIP"
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
 
           main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
           updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
-          if [ "$main_installer_count" -ne 6 ] || [ "$updater_zip_count" -ne 4 ]; then
-            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected 6), mac_zip=$updater_zip_count (expected 4)"
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            # Compatibility marker for release tooling: all scope is expected 6 main installers and 4 updater ZIPs.
+            expected_main=6
+            expected_zip=4
+          else
+            expected_main=3
+            expected_zip=2
+          fi
+          if [ "$main_installer_count" -ne "$expected_main" ] || [ "$updater_zip_count" -ne "$expected_zip" ]; then
+            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected $expected_main), mac_zip=$updater_zip_count (expected $expected_zip)"
             exit 1
           fi
 
@@ -1462,9 +1515,11 @@ jobs:
             echo ""
             echo "| Variant | Platform | Arch | App version | Main installer |"
             echo "| --- | --- | --- | --- | --- |"
-            echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
-            echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
-            echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
+            if [ "$DESKTOP_VARIANT" = "all" ]; then
+              echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
+              echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
+              echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
+            fi
             echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
             echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
             echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
@@ -1473,6 +1528,7 @@ jobs:
       - name: Generate macOS Update Metadata
         if: needs.prepare.outputs.package_set != 'launcher'
         env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           IS_RC: ${{ inputs.is_rc }}
@@ -1480,7 +1536,9 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
-          ./scripts/generate-latest-yml.sh --platform mac --release-version "$FLOATBOAT_VERSION"
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            ./scripts/generate-latest-yml.sh --platform mac --release-version "$FLOATBOAT_VERSION"
+          fi
           if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
             ./scripts/generate-latest-yml.sh --platform mac --release-version "$DEEPSEEK_VERSION"
           else
@@ -1490,6 +1548,7 @@ jobs:
       - name: Generate Windows Update Metadata
         if: needs.prepare.outputs.package_set != 'launcher'
         env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           IS_RC: ${{ inputs.is_rc }}
@@ -1497,7 +1556,9 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
-          ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+          fi
           if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
             ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
           else
@@ -1508,6 +1569,7 @@ jobs:
         if: needs.prepare.outputs.package_set != 'launcher'
         shell: bash
         env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           IS_RC: ${{ inputs.is_rc }}
@@ -1519,20 +1581,25 @@ jobs:
             node release-tooling/.github/scripts/verify-update-metadata.cjs "$@"
           }
 
-          verify_metadata \
-            --metadata dist/latest-mac.yml \
-            --artifact-dir out/make \
-            --release-version "$FLOATBOAT_VERSION" \
-            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" \
-            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg" \
-            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip" \
-            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            verify_metadata \
+              --metadata dist/latest-mac.yml \
+              --artifact-dir out/make \
+              --release-version "$FLOATBOAT_VERSION" \
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" \
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg" \
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip" \
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
 
-          verify_metadata \
-            --metadata dist/latest.yml \
-            --artifact-dir out/make \
-            --release-version "$FLOATBOAT_VERSION" \
-            --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+            verify_metadata \
+              --metadata dist/latest.yml \
+              --artifact-dir out/make \
+              --release-version "$FLOATBOAT_VERSION" \
+              --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+          elif [ -f dist/latest-mac.yml ] || [ -f dist/latest.yml ]; then
+            echo "::error::DeepSeek-only publishing must not generate Floatboat updater metadata"
+            exit 1
+          fi
 
           if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
             verify_metadata \
@@ -1563,8 +1630,8 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ inputs.version }}
-          name: ${{ inputs.build_profile == 'internal-test' && format('Internal Test v{0}', inputs.version) || inputs.build_profile == 'test' && format('Test v{0}', inputs.version) || inputs.is_rc == true && format('RC v{0}', inputs.version) || format('Release v{0}', inputs.version) }}
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: ${{ needs.prepare.outputs.desktop_variant == 'deepseek-agent' && format('DeepSeek Release v{0}', inputs.version) || inputs.build_profile == 'internal-test' && format('Internal Test v{0}', inputs.version) || inputs.build_profile == 'test' && format('Test v{0}', inputs.version) || inputs.is_rc == true && format('RC v{0}', inputs.version) || format('Release v{0}', inputs.version) }}
           body_path: /tmp/empty-release-body.md
           draft: false
           prerelease: ${{ inputs.is_rc || inputs.build_profile != 'release' }}
@@ -1787,12 +1854,13 @@ jobs:
         if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
         shell: bash
         env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
         run: bash release-tooling/.github/scripts/publish-stable-updater.sh
 
       - name: Sync Floatboat website installer URLs
-        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all'
         env:
           INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
           INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
@@ -1948,7 +2016,10 @@ jobs:
           echo ""
           echo "📦 Build Results:"
           echo "   Package set:  ${{ needs.prepare.outputs.package_set }}"
+          echo "   Scope:        ${{ needs.prepare.outputs.desktop_variant }}"
+          if [ "${{ needs.prepare.outputs.desktop_variant }}" = "all" ]; then
           echo "   Floatboat:    ${{ needs.prepare.outputs.floatboat_version }}"
+          fi
           echo "   DeepSeek:     ${{ needs.prepare.outputs.deepseek_version }}"
           echo "   macOS arm64:  ${{ needs.build-macos-arm64.result || 'skipped' }}"
           echo "   macOS x64:    ${{ needs.build-macos-x64.result || 'skipped' }}"
@@ -1958,7 +2029,11 @@ jobs:
           if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" = "release" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
           echo "☁️  S3 Deploy:    included in upload job"
           echo "🌐 CDN:          configured by INSTALLER_DOWNLOAD_BASE_URL"
+          if [ "${{ needs.prepare.outputs.desktop_variant }}" = "all" ]; then
           echo "🔗 Floatboat URLs: synced via installer URL management API"
+          else
+          echo "🛡️  Floatboat:     packages, feed, and website URLs untouched"
+          fi
           echo "🐋 DeepSeek feed: release.aoe.chat/deepseek-agent"
           fi
           echo ""
@@ -1977,6 +2052,7 @@ jobs:
           version = "${{ inputs.version }}"
           floatboat_version = "${{ needs.prepare.outputs.floatboat_version }}"
           deepseek_version = "${{ needs.prepare.outputs.deepseek_version }}"
+          desktop_variant = "${{ needs.prepare.outputs.desktop_variant }}"
           build_profile = "${{ inputs.build_profile }}"
           package_set = "${{ needs.prepare.outputs.package_set }}"
           is_rc = "${{ inputs.is_rc }}" == "true"
@@ -2000,22 +2076,29 @@ jobs:
           emoji = "🏠" if build_profile == "internal-test" else ("🧪" if build_profile == "test" else ("🚧" if is_rc else "🎉"))
           release_type = "内网测试版本" if build_profile == "internal-test" else ("测试版本" if build_profile == "test" else ("RC 预发布" if is_rc else "正式发布"))
           range_hint = f"  (since {prev_tag})" if prev_tag else ""
-          release_tag = f"v{version}"
+          release_tag = "${{ needs.prepare.outputs.release_tag }}"
           release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
-          main_installer_names = [
-              f"Floatboat-{floatboat_version}-arm64.dmg",
-              f"Floatboat-{floatboat_version}-x64.dmg",
-              f"Floatboat-Setup-{floatboat_version}-x64.exe",
+          main_installer_names = []
+          updater_zip_names = []
+          if desktop_variant == "all":
+              main_installer_names.extend([
+                  f"Floatboat-{floatboat_version}-arm64.dmg",
+                  f"Floatboat-{floatboat_version}-x64.dmg",
+                  f"Floatboat-Setup-{floatboat_version}-x64.exe",
+              ])
+              updater_zip_names.extend([
+                  f"Floatboat-{floatboat_version}-arm64.zip",
+                  f"Floatboat-{floatboat_version}-x64.zip",
+              ])
+          main_installer_names.extend([
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg",
               f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
-          ]
-          updater_zip_names = [
-              f"Floatboat-{floatboat_version}-arm64.zip",
-              f"Floatboat-{floatboat_version}-x64.zip",
+          ])
+          updater_zip_names.extend([
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip",
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip",
-          ]
+          ])
           launcher_names = [
               f"floatboat-test-launcher-{version}-macos-arm64.zip",
               f"floatboat-test-launcher-{version}-macos-x64.zip",
@@ -2040,7 +2123,8 @@ jobs:
           header = f"""{emoji} AOE Desktop {release_type} v{version}
 
           包类型：{package_set}
-          Floatboat 版本：{floatboat_version}
+          发行范围：{desktop_variant}
+          {f'Floatboat 版本：{floatboat_version}' if desktop_variant == 'all' else 'Floatboat：未构建、未发布、未更新 feed'}
           DeepSeek Agent 版本：{deepseek_version}
 
           构建结果：
@@ -2049,7 +2133,7 @@ jobs:
             Windows x64：{icon(windows)} {windows}
             上传：       {icon(upload)} {upload}
 
-          主安装包下载（完整发布共 6 个）：
+          主安装包下载（本次共 {len(main_installer_names)} 个）：
           {main_installer_links}
 
           macOS updater ZIP：
