@@ -1329,6 +1329,11 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           fetch-depth: 0
 
+      - name: Checkout release verification tooling
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
@@ -1355,6 +1360,9 @@ jobs:
             sleep "$delay"
           done
           node -e "require('js-yaml'); require('./scripts/packaging/updateMetadata.cjs')"
+
+      - name: Test release verification tooling
+        run: node --test release-tooling/.github/scripts/*.test.cjs
 
       - name: Download changelog
         uses: actions/download-artifact@v4
@@ -1494,6 +1502,56 @@ jobs:
             ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
           else
             echo "ℹ️ DeepSeek Agent RC/test metadata intentionally skipped; manual-download artifacts only."
+          fi
+
+      - name: Verify generated update metadata
+        if: needs.prepare.outputs.package_set != 'launcher'
+        shell: bash
+        env:
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          IS_RC: ${{ inputs.is_rc }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+        run: |
+          set -euo pipefail
+
+          verify_metadata() {
+            node release-tooling/.github/scripts/verify-update-metadata.cjs "$@"
+          }
+
+          verify_metadata \
+            --metadata dist/latest-mac.yml \
+            --artifact-dir out/make \
+            --release-version "$FLOATBOAT_VERSION" \
+            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" \
+            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg" \
+            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip" \
+            --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+
+          verify_metadata \
+            --metadata dist/latest.yml \
+            --artifact-dir out/make \
+            --release-version "$FLOATBOAT_VERSION" \
+            --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+
+          if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
+            verify_metadata \
+              --metadata dist/deepseek-agent/deepseek-agent-mac.yml \
+              --artifact-dir out/make \
+              --release-version "$DEEPSEEK_VERSION" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
+
+            verify_metadata \
+              --metadata dist/deepseek-agent/deepseek-agent.yml \
+              --artifact-dir out/make \
+              --release-version "$DEEPSEEK_VERSION" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
+          elif find dist/deepseek-agent -maxdepth 1 -type f -name '*.yml' -print -quit 2>/dev/null | grep -q .; then
+            echo "::error::DeepSeek Agent RC/test metadata must not be generated"
+            exit 1
           fi
 
       - name: Prepare empty public release body
@@ -1725,58 +1783,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Upload installers to S3
+      - name: Publish and verify stable updater feeds
         if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
-        run: |
-          set -euo pipefail
-          echo "📤 Uploading installers to S3..."
-
-          for f in out/make/*.dmg out/make/*.zip out/make/*.exe; do
-            [ -f "$f" ] || continue
-            filename=$(basename "$f")
-            case "$filename" in
-              Floatboat-DeepSeek-Agent-*)
-                target="s3://aoe-desktop-releases/deepseek-agent/$filename"
-                ;;
-              *)
-                target="s3://aoe-desktop-releases/$filename"
-                ;;
-            esac
-            echo "  Uploading: $filename -> $target"
-            aws s3 cp "$f" "$target" --no-progress
-          done
-
-          for f in dist/latest-mac.yml dist/latest.yml; do
-            [ -f "$f" ] || continue
-            filename=$(basename "$f")
-            echo "  Uploading: $filename"
-            aws s3 cp "$f" "s3://aoe-desktop-releases/$filename" --no-progress
-          done
-
-          for f in dist/deepseek-agent/*.yml; do
-            [ -f "$f" ] || continue
-            filename=$(basename "$f")
-            echo "  Uploading DeepSeek metadata: $filename"
-            aws s3 cp "$f" "s3://aoe-desktop-releases/deepseek-agent/$filename" --no-progress
-          done
-
-          echo ""
-          echo "✅ S3 upload complete. Uploaded files:"
-          aws s3 ls "s3://aoe-desktop-releases/" | grep "${{ needs.prepare.outputs.floatboat_version }}" || true
-          aws s3 ls "s3://aoe-desktop-releases/latest" || true
-          aws s3 ls "s3://aoe-desktop-releases/deepseek-agent/" | grep "${{ needs.prepare.outputs.deepseek_version }}" || true
-          aws s3 ls "s3://aoe-desktop-releases/deepseek-agent/deepseek-agent" || true
-
-      - name: Invalidate CloudFront cache
-        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
-        run: |
-          INVALIDATION=$(aws cloudfront create-invalidation \
-            --distribution-id EOFLQQ0A8KCX1 \
-            --paths "/*" \
-            --output json)
-
-          echo "$INVALIDATION" | jq '{Id: .Invalidation.Id, Status: .Invalidation.Status, CreateTime: .Invalidation.CreateTime}'
-          echo "✅ CloudFront invalidation created"
+        shell: bash
+        env:
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+        run: bash release-tooling/.github/scripts/publish-stable-updater.sh
 
       - name: Sync Floatboat website installer URLs
         if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'

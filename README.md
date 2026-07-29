@@ -18,5 +18,7 @@
 - 应用发布只有在两个变体的 macOS arm64、macOS x64、Windows x64 全部成功后才创建 GitHub Release。定向选择单一平台时只保留 Actions artifact，用于诊断，不冒充完整发布。
 - 正式版分别生成 Floatboat 与 DeepSeek Agent 自动更新元数据。DeepSeek RC 与 Nightly 只提供手动下载，不写入自动更新 feed。
 - Floatboat 正式制品与 `latest*.yml` 上传到 S3 根路径；DeepSeek 正式制品与 `deepseek-agent*.yml` 上传到 `deepseek-agent/` 前缀。
+- 正式版发布会先校验四份 updater 元数据中的版本、文件集合、大小和 SHA512，再上传并通过 S3 `head-object`
+  核对对象；CloudFront 失效完成后还会从公网回读两个 feed 及 HEAD 全部十个更新制品，任一不一致都会阻止发布任务成功。
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
