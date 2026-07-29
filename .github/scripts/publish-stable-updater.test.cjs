@@ -62,6 +62,10 @@ if (args[0] === 'cloudfront' && args[1] === 'create-invalidation') {
   process.exit(0);
 }
 if (args[0] === 'cloudfront' && args[1] === 'wait') {
+  if (process.env.MOCK_CLOUDFRONT_WAIT_DENIED === '1') {
+    process.stderr.write('AccessDenied: cloudfront:GetInvalidation is not allowed\\n');
+    process.exit(255);
+  }
   process.exit(0);
 }
 process.stderr.write(\`Unexpected aws invocation: \${args.join(' ')}\\n\`);
@@ -191,7 +195,7 @@ function createFixture() {
   };
 }
 
-function runPublish(fixture, desktopVariant = 'all') {
+function runPublish(fixture, desktopVariant = 'all', extraEnv = {}) {
   return spawnSync('bash', [scriptPath], {
     cwd: fixture.workspace,
     encoding: 'utf8',
@@ -204,6 +208,7 @@ function runPublish(fixture, desktopVariant = 'all') {
       DEEPSEEK_VERSION: fixture.deepseekVersion,
       MOCK_S3_ROOT: fixture.s3Root,
       MOCK_CALL_LOG: fixture.callLog,
+      ...extraEnv,
     },
   });
 }
@@ -286,6 +291,19 @@ test('DeepSeek-only 只发布独立前缀下的五个制品和两份元数据', 
     'DeepSeek-only 只能失效独立 CDN 前缀',
   );
   assert.equal(calls.some((call) => /s3:\/\/aoe-desktop-releases\/(latest|Floatboat-)/.test(call)), false);
+});
+
+test('CloudFront waiter 无权限时回退到 CDN 内容校验并保持发布成功', (context) => {
+  const fixture = createFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  const result = runPublish(fixture, 'deepseek-agent', { MOCK_CLOUDFRONT_WAIT_DENIED: '1' });
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /falling back to CDN content polling/);
+  assert.match(result.stdout, /CDN metadata matched on attempt 1/);
+  assert.match(result.stdout, /Floatboat feed was untouched/);
+  assert.match(result.stderr, /AccessDenied: cloudfront:GetInvalidation/);
 });
 
 test('缺少任一 DeepSeek 正式制品时在 S3 mutation 前失败', (context) => {
