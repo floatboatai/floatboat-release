@@ -351,7 +351,7 @@ jobs:
   build-macos-arm64:
     name: Build ${{ matrix.display_name }} macOS (arm64)
     needs: prepare
-    runs-on: macos-latest
+    runs-on: macos-26
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
     strategy:
       fail-fast: false
@@ -490,6 +490,47 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
 
+      - name: Verify packaged runtime architectures (arm64)
+        shell: bash
+        env:
+          APP_PATH: out/${{ matrix.app_name }}-darwin-arm64/${{ matrix.app_name }}.app
+          APP_EXECUTABLE_NAME: ${{ matrix.app_name }}
+          EXPECTED_MACH_ARCH: arm64
+        run: |
+          set -euo pipefail
+
+          verify_arch() {
+            local binary="$1"
+            local actual_arch
+            [ -f "$binary" ] || { echo "::error::Required binary not found: $binary"; exit 1; }
+            actual_arch=$(lipo -archs "$binary")
+            if [ "$actual_arch" != "$EXPECTED_MACH_ARCH" ]; then
+              echo "::error::Architecture mismatch: $binary is [$actual_arch], expected [$EXPECTED_MACH_ARCH]"
+              exit 1
+            fi
+            echo "✅ $binary: $actual_arch"
+          }
+
+          RESOURCES="$APP_PATH/Contents/Resources"
+          PYTHON="$RESOURCES/python/python/bin/python3"
+          UV="$RESOURCES/uv/uv"
+          NODE="$RESOURCES/nodejs/node"
+          verify_arch "$APP_PATH/Contents/MacOS/$APP_EXECUTABLE_NAME"
+          verify_arch "$PYTHON"
+          verify_arch "$UV"
+          verify_arch "$NODE"
+
+          libpython_count=0
+          while IFS= read -r libpython; do
+            verify_arch "$libpython"
+            libpython_count=$((libpython_count + 1))
+          done < <(find "$RESOURCES/python/python/lib" -type f -name 'libpython*.dylib' -print)
+          [ "$libpython_count" -gt 0 ] || { echo "::error::No bundled libpython dylib found"; exit 1; }
+
+          "$PYTHON" --version
+          "$UV" --version
+          "$NODE" --version
+
       - name: Verify signed and notarized app (arm64)
         if: steps.signing.outputs.available == 'true'
         shell: bash
@@ -544,7 +585,7 @@ jobs:
   build-macos-x64:
     name: Build ${{ matrix.display_name }} macOS (x64)
     needs: prepare
-    runs-on: macos-latest
+    runs-on: macos-26-intel
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
     strategy:
       fail-fast: false
@@ -682,6 +723,47 @@ jobs:
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Verify packaged runtime architectures (x64)
+        shell: bash
+        env:
+          APP_PATH: out/${{ matrix.app_name }}-darwin-x64/${{ matrix.app_name }}.app
+          APP_EXECUTABLE_NAME: ${{ matrix.app_name }}
+          EXPECTED_MACH_ARCH: x86_64
+        run: |
+          set -euo pipefail
+
+          verify_arch() {
+            local binary="$1"
+            local actual_arch
+            [ -f "$binary" ] || { echo "::error::Required binary not found: $binary"; exit 1; }
+            actual_arch=$(lipo -archs "$binary")
+            if [ "$actual_arch" != "$EXPECTED_MACH_ARCH" ]; then
+              echo "::error::Architecture mismatch: $binary is [$actual_arch], expected [$EXPECTED_MACH_ARCH]"
+              exit 1
+            fi
+            echo "✅ $binary: $actual_arch"
+          }
+
+          RESOURCES="$APP_PATH/Contents/Resources"
+          PYTHON="$RESOURCES/python/python/bin/python3"
+          UV="$RESOURCES/uv/uv"
+          NODE="$RESOURCES/nodejs/node"
+          verify_arch "$APP_PATH/Contents/MacOS/$APP_EXECUTABLE_NAME"
+          verify_arch "$PYTHON"
+          verify_arch "$UV"
+          verify_arch "$NODE"
+
+          libpython_count=0
+          while IFS= read -r libpython; do
+            verify_arch "$libpython"
+            libpython_count=$((libpython_count + 1))
+          done < <(find "$RESOURCES/python/python/lib" -type f -name 'libpython*.dylib' -print)
+          [ "$libpython_count" -gt 0 ] || { echo "::error::No bundled libpython dylib found"; exit 1; }
+
+          "$PYTHON" --version
+          "$UV" --version
+          "$NODE" --version
 
       - name: Verify signed and notarized app (x64)
         if: steps.signing.outputs.available == 'true'
@@ -919,7 +1001,7 @@ jobs:
   build-test-launcher-macos-arm64:
     name: Test Launcher macOS (arm64)
     needs: prepare
-    runs-on: macos-latest
+    runs-on: macos-26
     if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
 
     steps:
@@ -1019,6 +1101,7 @@ jobs:
       - name: Package test launcher (macOS arm64)
         run: pnpm run package:test-launcher:macos
         env:
+          ARCH: arm64
           NODE_OPTIONS: --max-old-space-size=8192
           APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
@@ -1066,7 +1149,7 @@ jobs:
   build-test-launcher-macos-x64:
     name: Test Launcher macOS (x64)
     needs: prepare
-    runs-on: macos-15-intel
+    runs-on: macos-26-intel
     if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
 
     steps:
@@ -1166,6 +1249,7 @@ jobs:
       - name: Package test launcher (macOS x64)
         run: pnpm run package:test-launcher:macos
         env:
+          ARCH: x64
           NODE_OPTIONS: --max-old-space-size=8192
           APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
