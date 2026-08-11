@@ -387,6 +387,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"AOE_INTERNAL_TEST_BUILD=true"
               ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
@@ -622,6 +623,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"AOE_INTERNAL_TEST_BUILD=true"
               ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
@@ -857,6 +859,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"AOE_INTERNAL_TEST_BUILD=true"
               ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
@@ -1037,6 +1040,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"AOE_INTERNAL_TEST_BUILD=true"
               ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
@@ -1186,6 +1190,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"AOE_INTERNAL_TEST_BUILD=true"
               ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
@@ -1335,6 +1340,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"AOE_INTERNAL_TEST_BUILD=true"
               ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
