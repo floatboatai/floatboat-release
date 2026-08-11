@@ -56,3 +56,10 @@ test('DeepSeek-only 生成和验证元数据时不会生成 Floatboat latest 文
   assert.match(windowsMetadataStep, /if \[ "\$DESKTOP_VARIANT" = "all" \]; then[\s\S]*Floatboat-Setup/);
   assert.match(verifyStep, /DeepSeek-only publishing must not generate Floatboat updater metadata/);
 });
+
+test('所有内网构建任务都会默认开启批注与语音创作功能', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const assignments = workflow.match(/VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true/g) ?? [];
+
+  assert.equal(assignments.length, 6);
+});
