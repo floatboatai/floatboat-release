@@ -387,6 +387,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
               echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
@@ -621,6 +622,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
               echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
@@ -855,6 +857,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
               echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
@@ -1034,6 +1037,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
               echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
@@ -1182,6 +1186,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
               echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
@@ -1330,6 +1335,7 @@ jobs:
                 exit 1
               fi
               ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ENV_CONTENT="${ENV_CONTENT}"$'\n'"VITE_ANNOTATION_WORKBENCH_ROLLOUT_ENABLED=true"
               ;;
             *)
               echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
