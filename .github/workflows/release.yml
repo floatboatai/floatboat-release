@@ -998,8 +998,8 @@ jobs:
         env:
           TARGET_PLATFORM: win32
           TARGET_ARCH: x64
-          TEMP: ${{ steps.ffmpeg-source.outputs.cache_directory }}
-          TMP: ${{ steps.ffmpeg-source.outputs.cache_directory }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
           FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
 
       - name: Verify Racent signing configuration
