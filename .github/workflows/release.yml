@@ -397,6 +397,15 @@ jobs:
             [ -n "$line" ] && echo "::add-mask::$line"
           done <<< "$ENV_CONTENT"
           printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
@@ -489,6 +498,28 @@ jobs:
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Verify packaged internal-test ASR config
+        if: inputs.build_profile == 'internal-test'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packaged_env=$(find out -type f -name .env -print -quit)
+          if [ -z "$packaged_env" ]; then
+            echo "::error::Packaged .env was not found"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*AOE_INTERNAL_TEST_BUILD[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$packaged_env"; then
+            echo "::error::Packaged .env is missing the internal-test marker"
+            exit 1
+          fi
+          for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+            if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$packaged_env"; then
+              echo "::error::Packaged .env is missing a non-empty ${required_key}"
+              exit 1
+            fi
+          done
+          echo "✅ Packaged internal-test ASR config is complete."
 
       - name: Verify packaged runtime architectures (arm64)
         shell: bash
@@ -631,6 +662,15 @@ jobs:
             [ -n "$line" ] && echo "::add-mask::$line"
           done <<< "$ENV_CONTENT"
           printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
@@ -723,6 +763,28 @@ jobs:
           APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Verify packaged internal-test ASR config
+        if: inputs.build_profile == 'internal-test'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packaged_env=$(find out -type f -name .env -print -quit)
+          if [ -z "$packaged_env" ]; then
+            echo "::error::Packaged .env was not found"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*AOE_INTERNAL_TEST_BUILD[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$packaged_env"; then
+            echo "::error::Packaged .env is missing the internal-test marker"
+            exit 1
+          fi
+          for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+            if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$packaged_env"; then
+              echo "::error::Packaged .env is missing a non-empty ${required_key}"
+              exit 1
+            fi
+          done
+          echo "✅ Packaged internal-test ASR config is complete."
 
       - name: Verify packaged runtime architectures (x64)
         shell: bash
@@ -865,6 +927,15 @@ jobs:
             [ -n "$line" ] && echo "::add-mask::$line"
           done <<< "$ENV_CONTENT"
           printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
@@ -947,6 +1018,28 @@ jobs:
           SIGNTOOL_ACCESS_KEY: ${{ inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
           SIGNTOOL_ACCESS_SECRET: ${{ inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
           SIGNTOOL_CERT_CODE: ${{ inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
+
+      - name: Verify packaged internal-test ASR config
+        if: inputs.build_profile == 'internal-test'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packaged_env=$(find out -type f -name .env -print -quit)
+          if [ -z "$packaged_env" ]; then
+            echo "::error::Packaged .env was not found"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*AOE_INTERNAL_TEST_BUILD[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$packaged_env"; then
+            echo "::error::Packaged .env is missing the internal-test marker"
+            exit 1
+          fi
+          for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+            if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$packaged_env"; then
+              echo "::error::Packaged .env is missing a non-empty ${required_key}"
+              exit 1
+            fi
+          done
+          echo "✅ Packaged internal-test ASR config is complete."
 
       - name: Collect production Windows artifact
         shell: bash
@@ -1044,6 +1137,15 @@ jobs:
             [ -n "$line" ] && echo "::add-mask::$line"
           done <<< "$ENV_CONTENT"
           printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
@@ -1192,6 +1294,15 @@ jobs:
             [ -n "$line" ] && echo "::add-mask::$line"
           done <<< "$ENV_CONTENT"
           printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
@@ -1340,6 +1451,15 @@ jobs:
             [ -n "$line" ] && echo "::add-mask::$line"
           done <<< "$ENV_CONTENT"
           printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
           entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
           echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
 
