@@ -9,6 +9,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const workflowPath = path.join(__dirname, '..', 'workflows', 'release.yml');
+const nightlyWorkflowPath = path.join(__dirname, '..', 'workflows', 'nightly.yml');
 
 function readNamedStep(workflow, stepName) {
   const startMarker = `      - name: ${stepName}`;
@@ -55,4 +56,38 @@ test('DeepSeek-only 生成和验证元数据时不会生成 Floatboat latest 文
   assert.match(macMetadataStep, /if \[ "\$DESKTOP_VARIANT" = "all" \]; then[\s\S]*FLOATBOAT_VERSION/);
   assert.match(windowsMetadataStep, /if \[ "\$DESKTOP_VARIANT" = "all" \]; then[\s\S]*Floatboat-Setup/);
   assert.match(verifyStep, /DeepSeek-only publishing must not generate Floatboat updater metadata/);
+});
+
+test('macOS 发布打包会在外部签名或公证瞬时失败时进行三轮有界重试', () => {
+  const workflows = [
+    {
+      path: workflowPath,
+      steps: [
+        'Build and package ${{ matrix.display_name }} (arm64)',
+        'Build and package ${{ matrix.display_name }} (x64)',
+      ],
+    },
+    {
+      path: nightlyWorkflowPath,
+      steps: ['Build ${{ matrix.display_name }} arm64', 'Build ${{ matrix.display_name }} x64'],
+    },
+  ];
+
+  for (const workflowConfig of workflows) {
+    const workflow = fs.readFileSync(workflowConfig.path, 'utf8');
+    for (const stepName of workflowConfig.steps) {
+      const packagingStep = readNamedStep(workflow, stepName);
+      const location = `${path.basename(workflowConfig.path)}: ${stepName}`;
+
+      assert.ok(packagingStep.includes('for attempt in 1 2 3; do'), `${location} 必须最多尝试三轮`);
+      assert.ok(packagingStep.includes('if [ "$attempt" -eq 3 ]; then'), `${location} 必须在第三轮后失败`);
+      assert.ok(
+        packagingStep.includes('packaging attempt ${attempt}/3 failed'),
+        `${location} 必须记录当前重试轮次`,
+      );
+      assert.ok(packagingStep.includes('hdiutil detach'), `${location} 重试前必须清理 DMG 挂载`);
+      assert.ok(packagingStep.includes('rm -rf out'), `${location} 重试前必须清理不完整产物`);
+      assert.ok(packagingStep.includes('sleep $((attempt * 20))'), `${location} 必须递增等待外部服务恢复`);
+    }
+  }
 });
