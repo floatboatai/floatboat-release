@@ -84,6 +84,7 @@ jobs:
       package_set: ${{ steps.package_set.outputs.package_set }}
       desktop_variant: ${{ steps.release_scope.outputs.desktop_variant }}
       desktop_matrix: ${{ steps.release_scope.outputs.desktop_matrix }}
+      linux_matrix: ${{ steps.release_scope.outputs.linux_matrix }}
       release_tag: ${{ steps.release_scope.outputs.release_tag }}
       source_sha: ${{ steps.source.outputs.source_sha }}
       source_release_tag: ${{ steps.source.outputs.release_tag }}
@@ -137,10 +138,27 @@ jobs:
               ;;
           esac
 
+          # Linux 需要变体 × 架构两个维度；desktop_matrix 用的是 include 形式，
+          # 无法在 job 内再叠加 arch，因此在这里由同一份变体清单派生出独立的 linux 矩阵。
+          # arm64 固定用 GitHub 公共 arm64 runner 原生构建。
+          linux_matrix=$(
+            DESKTOP_MATRIX="$desktop_matrix" node <<'NODE'
+          const base = JSON.parse(process.env.DESKTOP_MATRIX).include;
+          const arches = [
+            { arch: 'x64', debArch: 'amd64', runner: 'ubuntu-latest' },
+            { arch: 'arm64', debArch: 'arm64', runner: 'ubuntu-24.04-arm' },
+          ];
+          const include = base.flatMap((variant) => arches.map((target) => ({ ...variant, ...target })));
+          process.stdout.write(JSON.stringify({ include }));
+          NODE
+          )
+
           echo "desktop_variant=${INPUT_DESKTOP_VARIANT}" >> "$GITHUB_OUTPUT"
           echo "desktop_matrix=${desktop_matrix}" >> "$GITHUB_OUTPUT"
+          echo "linux_matrix=${linux_matrix}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "🎯 Desktop release scope: ${INPUT_DESKTOP_VARIANT} (${release_tag})"
+          echo "🐧 Linux matrix: ${linux_matrix}"
 
       - name: Resolve package set
         id: package_set
@@ -1095,19 +1113,22 @@ jobs:
           if-no-files-found: error
 
   # ===========================================
-  # Desktop App - Linux x64 (.deb)
+  # Desktop App - Linux x64 / arm64 (.deb)
   # ===========================================
   # Linux 与 macOS / Windows 在同一次 dispatch 内并行构建，产物汇总到同一个 Release。
   # 只产出 .deb 供手动下载：客户端 UpdateManager 仅在 darwin/win32 启用自动更新，
   # scripts/packaging/updateMetadata.cjs 也不接受 linux 平台，因此不写 updater metadata、不传 S3。
+  #
+  # arm64 在 GitHub 公共 ubuntu-24.04-arm runner 上**原生**构建，不做交叉编译：
+  # better-sqlite3 / lancedb / sharp 等原生模块交叉编译不可靠，且交叉产物无法在构建机上验证。
   build-linux:
-    name: Build ${{ matrix.display_name }} Linux (x64)
+    name: Build ${{ matrix.display_name }} Linux (${{ matrix.arch }})
     needs: prepare
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}
 
     steps:
       - name: Checkout source repo
@@ -1180,7 +1201,7 @@ jobs:
           set -euo pipefail
           # MakerDeb 依赖 dpkg/fakeroot；ubuntu-latest 默认镜像不保证 fakeroot 存在。
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fakeroot dpkg
+          sudo apt-get install -y --no-install-recommends fakeroot dpkg binutils
           dpkg --version | head -1
           fakeroot --version
 
@@ -1195,8 +1216,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build and package ${{ matrix.display_name }} (Linux x64)
-        run: pnpm run forge:make -- --platform=linux --arch=x64 --targets=@electron-forge/maker-deb
+      - name: Build and package ${{ matrix.display_name }} (Linux ${{ matrix.arch }})
+        run: pnpm run forge:make -- --platform=linux --arch=${{ matrix.arch }} --targets=@electron-forge/maker-deb
         env:
           # Vite 打包 renderer/worker 目标会超过 Node 默认 ~4GB heap 上限并 FATAL OOM，
           # 与 macOS job 用同一个上限；缺这行会在 floatboatWorker 之后的阶段构建失败。
@@ -1230,6 +1251,7 @@ jobs:
         env:
           VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
           ARTIFACT_BASE: ${{ matrix.artifact_base }}
+          DEB_ARCH: ${{ matrix.debArch }}
         run: |
           set -euo pipefail
           mkdir -p dist/linux
@@ -1248,7 +1270,7 @@ jobs:
             exit 1
           fi
           BUILT_DEB=$(find out/make -type f -name '*.deb' -print -quit)
-          RELEASE_NAME="${ARTIFACT_BASE}-${VERSION}-amd64.deb"
+          RELEASE_NAME="${ARTIFACT_BASE}-${VERSION}-${DEB_ARCH}.deb"
           cp "$BUILT_DEB" "dist/linux/${RELEASE_NAME}"
           echo "✅ ${{ matrix.display_name }} Linux artifact: ${RELEASE_NAME} (built as $(basename "$BUILT_DEB"))"
 
@@ -1257,26 +1279,54 @@ jobs:
         env:
           VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
           ARTIFACT_BASE: ${{ matrix.artifact_base }}
+          DEB_ARCH: ${{ matrix.debArch }}
         run: |
           set -euo pipefail
-          DEB="dist/linux/${ARTIFACT_BASE}-${VERSION}-amd64.deb"
+          DEB="dist/linux/${ARTIFACT_BASE}-${VERSION}-${DEB_ARCH}.deb"
           # 结构损坏的 .deb 在用户机上才报错代价太高，打包后立即校验可安装性元数据。
           dpkg-deb --info "$DEB"
           pkg_arch=$(dpkg-deb --field "$DEB" Architecture)
-          if [ "$pkg_arch" != "amd64" ]; then
-            echo "::error::Unexpected Debian architecture: $pkg_arch (expected amd64)"
+          if [ "$pkg_arch" != "$DEB_ARCH" ]; then
+            echo "::error::Unexpected Debian architecture: $pkg_arch (expected $DEB_ARCH)"
             exit 1
           fi
           if ! dpkg-deb --contents "$DEB" | grep -q '\.desktop$'; then
             echo "::error::Debian package is missing a .desktop entry"
             exit 1
           fi
-          echo "✅ Debian package metadata verified: $(basename "$DEB") ($pkg_arch)"
+          # 错架构的二进制在用户机上才会暴露；直接读主可执行文件的 ELF 头确认与包架构一致。
+          # 主二进制固定在 ./usr/lib/<pkg>/<pkg>（即 usr/bin 下符号链接的目标），
+          # 不能取"第一个可执行文件"——那会命中 chrome_crashpad_handler 之类的附属程序。
+          PKG_NAME=$(dpkg-deb --field "$DEB" Package)
+          MAIN_BIN="usr/lib/${PKG_NAME}/${PKG_NAME}"
+          if ! command -v readelf >/dev/null 2>&1; then
+            echo "::error::readelf is required for ELF architecture verification"
+            exit 1
+          fi
+          extract_dir=$(mktemp -d)
+          dpkg-deb --fsys-tarfile "$DEB" > "${extract_dir}/fsys.tar"
+          if tar -xf "${extract_dir}/fsys.tar" -C "$extract_dir" "./${MAIN_BIN}" 2>/dev/null; then
+            elf_arch=$(readelf -h "${extract_dir}/${MAIN_BIN}" | awk -F: '/Machine/ {gsub(/^[ \t]+/, "", $2); print $2}')
+            echo "Main binary (${MAIN_BIN}) ELF machine: ${elf_arch}"
+            case "$DEB_ARCH:$elf_arch" in
+              amd64:*X86-64*) ;;
+              arm64:*AArch64*) ;;
+              *)
+                echo "::error::ELF architecture mismatch: package=$DEB_ARCH binary=$elf_arch"
+                exit 1
+                ;;
+            esac
+          else
+            echo "::error::Main binary not found in package: ./${MAIN_BIN}"
+            exit 1
+          fi
+          rm -rf "$extract_dir"
+          echo "✅ Debian package metadata verified: $(basename "$DEB") ($pkg_arch, ${elf_arch})"
 
       - name: Upload Linux artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: desktop-linux-x64-${{ matrix.variant }}
+          name: desktop-linux-${{ matrix.arch }}-${{ matrix.variant }}
           path: |
             dist/linux/*.deb
           retention-days: 3
@@ -1896,11 +1946,15 @@ jobs:
           # Linux 是可选平台：只有 dispatch 明确带上 linux 时才要求 .deb 存在。
           # .deb 不进 mac/win 的主安装包计数，避免改动既有六包门禁的语义。
           if [ "$LINUX_REQUESTED" = "true" ]; then
-            if [ "$DESKTOP_VARIANT" = "all" ]; then
-              require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-amd64.deb" "Floatboat Linux x64 deb"
-            fi
-            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-amd64.deb" "DeepSeek Agent Linux x64 deb"
-            expected_deb=$([ "$DESKTOP_VARIANT" = "all" ] && echo 2 || echo 1)
+            # 每个变体出 x64(amd64) 与 arm64 两个 deb。
+            for deb_arch in amd64 arm64; do
+              if [ "$DESKTOP_VARIANT" = "all" ]; then
+                require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-${deb_arch}.deb" "Floatboat Linux ${deb_arch} deb"
+              fi
+              require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-${deb_arch}.deb" \
+                "DeepSeek Agent Linux ${deb_arch} deb"
+            done
+            expected_deb=$([ "$DESKTOP_VARIANT" = "all" ] && echo 4 || echo 2)
           else
             expected_deb=0
           fi
@@ -1941,10 +1995,12 @@ jobs:
             echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
             echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
             if [ "$LINUX_REQUESTED" = "true" ]; then
-              if [ "$DESKTOP_VARIANT" = "all" ]; then
-                echo "| Floatboat | Linux | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-amd64.deb\` |"
-              fi
-              echo "| Floatboat DeepSeek Agent | Linux | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-amd64.deb\` |"
+              for deb_arch in amd64 arm64; do
+                if [ "$DESKTOP_VARIANT" = "all" ]; then
+                  echo "| Floatboat | Linux | ${deb_arch} | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-${deb_arch}.deb\` |"
+                fi
+                echo "| Floatboat DeepSeek Agent | Linux | ${deb_arch} | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-${deb_arch}.deb\` |"
+              done
               echo ""
               echo "> Linux \`.deb\` 仅供手动下载：客户端自动更新只在 macOS / Windows 启用。"
             fi
@@ -2450,7 +2506,7 @@ jobs:
           echo "   macOS arm64:  ${{ needs.build-macos-arm64.result || 'skipped' }}"
           echo "   macOS x64:    ${{ needs.build-macos-x64.result || 'skipped' }}"
           echo "   Windows x64:  ${{ needs.build-windows.result || 'skipped' }}"
-          echo "   Linux x64:    ${{ needs.build-linux.result || 'skipped' }}"
+          echo "   Linux (all):  ${{ needs.build-linux.result || 'skipped' }}"
           echo ""
           echo "📤 Upload:       ${{ needs.upload.result || 'skipped' }}"
           if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" = "release" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
@@ -2527,9 +2583,10 @@ jobs:
           # Linux .deb 只提供手动下载，不写 updater metadata，因此单独列出而不混入主安装包清单。
           linux_deb_names = []
           if linux_requested:
-              if desktop_variant == "all":
-                  linux_deb_names.append(f"Floatboat-{floatboat_version}-amd64.deb")
-              linux_deb_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-amd64.deb")
+              for deb_arch in ("amd64", "arm64"):
+                  if desktop_variant == "all":
+                      linux_deb_names.append(f"Floatboat-{floatboat_version}-{deb_arch}.deb")
+                  linux_deb_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-{deb_arch}.deb")
           updater_zip_names.extend([
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip",
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip",
@@ -2571,7 +2628,7 @@ jobs:
             macOS arm64：{icon(macos_arm64)} {macos_arm64}
             macOS x64：  {icon(macos_x64)} {macos_x64}
             Windows x64：{icon(windows)} {windows}
-            Linux x64：  {icon(linux)} {linux}
+            Linux x64+arm64：{icon(linux)} {linux}
             上传：       {icon(upload)} {upload}
 
           主安装包下载（本次共 {len(main_installer_names)} 个）：
