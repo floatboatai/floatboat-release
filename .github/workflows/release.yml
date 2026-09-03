@@ -1198,6 +1198,9 @@ jobs:
       - name: Build and package ${{ matrix.display_name }} (Linux x64)
         run: pnpm run forge:make -- --platform=linux --arch=x64 --targets=@electron-forge/maker-deb
         env:
+          # Vite 打包 renderer/worker 目标会超过 Node 默认 ~4GB heap 上限并 FATAL OOM，
+          # 与 macOS job 用同一个上限；缺这行会在 floatboatWorker 之后的阶段构建失败。
+          NODE_OPTIONS: --max-old-space-size=8192
           BUILD_OBFUSCATE: "true"
 
       - name: Verify packaged internal-test ASR config
@@ -1232,6 +1235,12 @@ jobs:
           mkdir -p dist/linux
           # MakerDeb 的文件名由 package.json name/version + Debian 架构决定，与 macOS/Windows 的
           # ARTIFACT_BASE 命名不同；这里只断言"恰好一个 .deb"，再统一改名为发布资产名。
+          # out/make 缺失说明打包步骤本身没产出（例如构建 OOM）；先明确报出来，
+          # 否则 find 的 "No such file or directory" 会盖住真正的失败原因。
+          if [ ! -d out/make ]; then
+            echo "::error::out/make does not exist — packaging did not produce any artifact"
+            exit 1
+          fi
           count=$(find out/make -type f -name '*.deb' | wc -l | tr -d ' ')
           if [ "$count" -ne 1 ]; then
             echo "::error::Expected exactly one .deb, found $count"
