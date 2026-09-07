@@ -658,6 +658,93 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Resolve FFmpeg source metadata
+        id: ffmpeg-source
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const os = require('node:os');
+
+          import('./scripts/bundle-ffmpeg.mjs').then(({ FFMPEG_SOURCE, FFMPEG_VERSION }) => {
+            const cacheDirectory = `${os.tmpdir()}\\floatboat-bundled-tools`;
+            const archiveName = `${FFMPEG_SOURCE.sha256.slice(0, 16)}-${FFMPEG_SOURCE.fileName}`;
+            fs.appendFileSync(
+              process.env.GITHUB_OUTPUT,
+              [
+                `version=${FFMPEG_VERSION}`,
+                `sha256=${FFMPEG_SOURCE.sha256}`,
+                `file_name=${FFMPEG_SOURCE.fileName}`,
+                `archive_name=${archiveName}`,
+                `cache_directory=${cacheDirectory}`,
+                `official_url=${FFMPEG_SOURCE.url}`,
+              ].join('\n') + '\n',
+            );
+          });
+          NODE
+
+      - name: Restore FFmpeg source cache
+        id: ffmpeg-source-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.ffmpeg-source.outputs.cache_directory }}
+          key: windows-ffmpeg-source-${{ steps.ffmpeg-source.outputs.version }}-${{ steps.ffmpeg-source.outputs.sha256 }}
+
+      - name: Download verified FFmpeg source
+        if: steps.ffmpeg-source-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        env:
+          FFMPEG_ARCHIVE_NAME: ${{ steps.ffmpeg-source.outputs.archive_name }}
+          FFMPEG_CACHE_DIRECTORY: ${{ steps.ffmpeg-source.outputs.cache_directory }}
+          FFMPEG_FILE_NAME: ${{ steps.ffmpeg-source.outputs.file_name }}
+          FFMPEG_OFFICIAL_URL: ${{ steps.ffmpeg-source.outputs.official_url }}
+          FFMPEG_SHA256: ${{ steps.ffmpeg-source.outputs.sha256 }}
+          FFMPEG_VERSION: ${{ steps.ffmpeg-source.outputs.version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cacheDirectory = $env:FFMPEG_CACHE_DIRECTORY
+          $archivePath = Join-Path $cacheDirectory $env:FFMPEG_ARCHIVE_NAME
+          $partialPath = "${archivePath}.part"
+          $expectedSha256 = $env:FFMPEG_SHA256
+          $sources = @(
+            $env:FFMPEG_OFFICIAL_URL,
+            "https://distfiles.macports.org/ffmpeg/$($env:FFMPEG_FILE_NAME)"
+          )
+
+          New-Item -ItemType Directory -Force -Path $cacheDirectory | Out-Null
+          foreach ($source in $sources) {
+            Remove-Item -Force -ErrorAction SilentlyContinue $partialPath
+            Write-Host "Downloading FFmpeg source from $source"
+            & curl.exe --fail --location --retry 3 --retry-all-errors --retry-delay 5 `
+              --connect-timeout 30 --max-time 300 --output $partialPath $source
+            if ($LASTEXITCODE -ne 0) {
+              Write-Warning "FFmpeg source download failed from $source"
+              continue
+            }
+
+            $actualSha256 = (Get-FileHash -Algorithm SHA256 $partialPath).Hash.ToLowerInvariant()
+            if ($actualSha256 -ne $expectedSha256) {
+              Write-Warning "FFmpeg source SHA-256 mismatch from $source"
+              continue
+            }
+
+            Move-Item -Force $partialPath $archivePath
+            Write-Host "FFmpeg source cached with verified SHA-256."
+            break
+          }
+
+          Remove-Item -Force -ErrorAction SilentlyContinue $partialPath
+          if (-not (Test-Path $archivePath)) {
+            throw "Unable to download a verified FFmpeg $($env:FFMPEG_VERSION) source archive."
+          }
+
+      - name: Save FFmpeg source cache
+        if: steps.ffmpeg-source-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ steps.ffmpeg-source.outputs.cache_directory }}
+          key: windows-ffmpeg-source-${{ steps.ffmpeg-source.outputs.version }}-${{ steps.ffmpeg-source.outputs.sha256 }}
+
       - name: Setup FFmpeg build toolchain
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
@@ -677,6 +764,8 @@ jobs:
         env:
           TARGET_PLATFORM: win32
           TARGET_ARCH: x64
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
           FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
 
       - name: Verify Racent signing configuration
