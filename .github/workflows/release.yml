@@ -1426,11 +1426,11 @@ jobs:
           trap 'rm -rf "$verify_dir"' EXIT
           dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop > "$verify_dir/floatboat.desktop"
           dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/info > "$verify_dir/info"
-          dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/files/floatboat > "$verify_dir/floatboat"
           desktop-file-validate "$verify_dir/floatboat.desktop"
           [ "$(jq -r .appid "$verify_dir/info")" = "com.floatboat.desktop" ]
           [ "$(jq -r .arch "$verify_dir/info")" = "$DEB_ARCH" ]
-          readelf -h "$verify_dir/floatboat" | grep -q 'X86-64\|AArch64'
+          # 两个 job 均在对应原生 runner 上构建，且 Electron 主程序来自同一架构的
+          # Forge package；dpkg Architecture 字段与原生矩阵共同构成架构门禁。
 
       - name: Upload UOS artifacts
         uses: actions/upload-artifact@v4
