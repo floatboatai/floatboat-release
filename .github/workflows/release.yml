@@ -1419,9 +1419,9 @@ jobs:
           [ -f "$DEB" ] || { echo "::error::UOS DEB not found: $DEB"; find out/make -type f -print || true; exit 1; }
           [ "$(dpkg-deb --field "$DEB" Package)" = "com.floatboat.desktop" ]
           [ "$(dpkg-deb --field "$DEB" Architecture)" = "$DEB_ARCH" ]
-          dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/files/floatboat$'
-          dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop$'
-          dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/info$'
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/files/floatboat' >/dev/null
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop' >/dev/null
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/info' >/dev/null
           # 两个 job 均在对应原生 runner 上构建，且 Electron 主程序来自同一架构的
           # Forge package；dpkg Architecture 字段与原生矩阵共同构成架构门禁。
 
