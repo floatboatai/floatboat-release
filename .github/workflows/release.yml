@@ -1422,12 +1422,15 @@ jobs:
           dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/files/floatboat$'
           dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop$'
           dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/info$'
-          scripts_dir=$(mktemp -d)
-          dpkg-deb --extract "$DEB" "$scripts_dir"
-          desktop-file-validate "$scripts_dir/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop"
-          [ "$(jq -r .appid "$scripts_dir/opt/apps/com.floatboat.desktop/info")" = "com.floatboat.desktop" ]
-          [ "$(jq -r .arch "$scripts_dir/opt/apps/com.floatboat.desktop/info")" = "$DEB_ARCH" ]
-          readelf -h "$scripts_dir/opt/apps/com.floatboat.desktop/files/floatboat" | grep -q 'X86-64\|AArch64'
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+          dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop > "$verify_dir/floatboat.desktop"
+          dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/info > "$verify_dir/info"
+          dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/files/floatboat > "$verify_dir/floatboat"
+          desktop-file-validate "$verify_dir/floatboat.desktop"
+          [ "$(jq -r .appid "$verify_dir/info")" = "com.floatboat.desktop" ]
+          [ "$(jq -r .arch "$verify_dir/info")" = "$DEB_ARCH" ]
+          readelf -h "$verify_dir/floatboat" | grep -q 'X86-64\|AArch64'
 
       - name: Upload UOS artifacts
         uses: actions/upload-artifact@v4
