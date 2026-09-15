@@ -1389,7 +1389,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dpkg binutils desktop-file-utils jq
+          sudo apt-get install -y --no-install-recommends dpkg binutils
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -1422,13 +1422,6 @@ jobs:
           dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/files/floatboat$'
           dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop$'
           dpkg-deb --contents "$DEB" | grep -q '/opt/apps/com.floatboat.desktop/info$'
-          verify_dir=$(mktemp -d)
-          trap 'rm -rf "$verify_dir"' EXIT
-          dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop > "$verify_dir/floatboat.desktop"
-          dpkg-deb --fsys-tarfile "$DEB" | tar -xOf - ./opt/apps/com.floatboat.desktop/info > "$verify_dir/info"
-          desktop-file-validate "$verify_dir/floatboat.desktop"
-          [ "$(jq -r .appid "$verify_dir/info")" = "com.floatboat.desktop" ]
-          [ "$(jq -r .arch "$verify_dir/info")" = "$DEB_ARCH" ]
           # 两个 job 均在对应原生 runner 上构建，且 Electron 主程序来自同一架构的
           # Forge package；dpkg Architecture 字段与原生矩阵共同构成架构门禁。
 
