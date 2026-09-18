@@ -1422,6 +1422,36 @@ jobs:
           dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/files/floatboat' >/dev/null
           dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop' >/dev/null
           dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/info' >/dev/null
+          AUDIT="out/make/uos/${DEB_ARCH}/Floatboat-${VERSION}-${DEB_ARCH}-dependency-audit.json"
+          [ -f "$AUDIT" ] || { echo "::error::UOS dependency audit not found: $AUDIT"; exit 1; }
+          extract_dir=$(mktemp -d)
+          trap 'rm -rf "$extract_dir"' EXIT
+          dpkg-deb --extract "$DEB" "$extract_dir"
+          PACKAGE_ROOT="$extract_dir/opt/apps/com.floatboat.desktop"
+          [ ! -e "$PACKAGE_ROOT/files/resources/app-update.yml" ]
+          [ -f "$PACKAGE_ROOT/files/resources/uos-app-store.json" ]
+          if [ "$DEB_ARCH" = amd64 ]; then expected_machine='Advanced Micro Devices X86-64'; else expected_machine='AArch64'; fi
+          readelf -h "$PACKAGE_ROOT/files/floatboat" | grep -F "$expected_machine" >/dev/null
+          PACKAGE_ROOT="$PACKAGE_ROOT" AUDIT="$AUDIT" node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const assert = require('node:assert/strict');
+          const root = process.env.PACKAGE_ROOT;
+          const arch = process.env.DEB_ARCH;
+          const version = process.env.VERSION.replace(/-rc\.(\d+)$/, '.$1');
+          const info = JSON.parse(fs.readFileSync(path.join(root, 'info'), 'utf8'));
+          const marker = JSON.parse(fs.readFileSync(path.join(root, 'files/resources/uos-app-store.json'), 'utf8'));
+          const audit = JSON.parse(fs.readFileSync(process.env.AUDIT, 'utf8'));
+          assert.equal(info.appid, 'com.floatboat.desktop');
+          assert.equal(info.version, version);
+          assert.deepEqual(info.arch, [arch]);
+          assert.equal(typeof info.permissions, 'object');
+          assert.equal(marker.appid, info.appid);
+          assert.equal(audit.appid, info.appid);
+          assert.equal(audit.version, version);
+          assert.equal(audit.arch, arch);
+          assert.ok(Array.isArray(audit.neededLibraries) && audit.neededLibraries.length > 0);
+          NODE
           # 两个 job 均在对应原生 runner 上构建，且 Electron 主程序来自同一架构的
           # Forge package；dpkg Architecture 字段与原生矩阵共同构成架构门禁。
 
@@ -1429,7 +1459,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: desktop-linux-uos-${{ matrix.arch }}
-          path: out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}.deb
+          path: |
+            out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}.deb
+            out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}-dependency-audit.json
           retention-days: 7
           if-no-files-found: error
 
