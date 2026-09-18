@@ -22,6 +22,14 @@ on:
           - "macos"
           - "windows"
           - "linux"
+      linux_package:
+        description: "Linux package flavor"
+        required: false
+        default: "deb"
+        type: choice
+        options:
+          - "deb"
+          - "uos-floatboat"
       desktop_variant:
         description: "Desktop variants to publish"
         required: false
@@ -29,6 +37,7 @@ on:
         type: choice
         options:
           - "all"
+          - "floatboat"
           - "deepseek-agent"
       is_rc:
         description: "Is this a Release Candidate?"
@@ -108,6 +117,10 @@ jobs:
           set -euo pipefail
 
           case "$INPUT_DESKTOP_VARIANT" in
+            floatboat)
+              release_tag="v${INPUT_VERSION}"
+              desktop_matrix='{"include":[{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat"}]}'
+              ;;
             all)
               release_tag="v${INPUT_VERSION}"
               desktop_matrix='{"include":[{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat"},{"variant":"deepseek-agent","display_name":"Floatboat DeepSeek Agent","artifact_base":"Floatboat-DeepSeek-Agent","app_name":"Floatboat DeepSeek Agent"}]}'
@@ -1125,7 +1138,7 @@ jobs:
     name: Build ${{ matrix.display_name }} Linux (${{ matrix.arch }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
+    if: inputs.notify_only == false && inputs.linux_package == 'deb' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}
@@ -1330,6 +1343,126 @@ jobs:
           path: |
             dist/linux/*.deb
           retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Floatboat UOS Linux (.deb, artifact only)
+  # ===========================================
+  # UOS 使用 /opt/apps/com.floatboat.desktop 布局，与通用 Debian 包并行保留。
+  # 该 job 只上传 Actions artifact，不进入 macOS/Windows 发布与 updater 门禁。
+  build-linux-uos:
+    name: Build Floatboat UOS Linux (${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    if: inputs.notify_only == false && inputs.linux_package == 'uos-floatboat' && inputs.desktop_variant == 'floatboat' && needs.prepare.outputs.package_set == 'app' && contains(inputs.platforms, 'linux')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            debArch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            debArch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject Floatboat version into package.json
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+
+      - name: Install Linux packaging toolchain
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg binutils
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Floatboat UOS package
+        run: pnpm run forge:make:linux:uos
+        env:
+          ARCH: ${{ matrix.arch }}
+          NODE_OPTIONS: --max-old-space-size=8192
+          BUILD_OBFUSCATE: "true"
+
+      - name: Verify UOS package metadata and layout
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEB_ARCH: ${{ matrix.debArch }}
+        run: |
+          set -euo pipefail
+          DEB="out/make/uos/${DEB_ARCH}/Floatboat-${VERSION}-${DEB_ARCH}.deb"
+          [ -f "$DEB" ] || { echo "::error::UOS DEB not found: $DEB"; find out/make -type f -print || true; exit 1; }
+          [ "$(dpkg-deb --field "$DEB" Package)" = "com.floatboat.desktop" ]
+          [ "$(dpkg-deb --field "$DEB" Architecture)" = "$DEB_ARCH" ]
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/files/floatboat' >/dev/null
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop' >/dev/null
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/info' >/dev/null
+          AUDIT="out/make/uos/${DEB_ARCH}/Floatboat-${VERSION}-${DEB_ARCH}-dependency-audit.json"
+          [ -f "$AUDIT" ] || { echo "::error::UOS dependency audit not found: $AUDIT"; exit 1; }
+          extract_dir=$(mktemp -d)
+          trap 'rm -rf "$extract_dir"' EXIT
+          dpkg-deb --extract "$DEB" "$extract_dir"
+          PACKAGE_ROOT="$extract_dir/opt/apps/com.floatboat.desktop"
+          [ ! -e "$PACKAGE_ROOT/files/resources/app-update.yml" ]
+          [ -f "$PACKAGE_ROOT/files/resources/uos-app-store.json" ]
+          if [ "$DEB_ARCH" = amd64 ]; then expected_machine='Advanced Micro Devices X86-64'; else expected_machine='AArch64'; fi
+          readelf -h "$PACKAGE_ROOT/files/floatboat" | grep -F "$expected_machine" >/dev/null
+          PACKAGE_ROOT="$PACKAGE_ROOT" AUDIT="$AUDIT" node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const assert = require('node:assert/strict');
+          const root = process.env.PACKAGE_ROOT;
+          const arch = process.env.DEB_ARCH;
+          const version = process.env.VERSION.replace(/-rc\.(\d+)$/, '.$1');
+          const info = JSON.parse(fs.readFileSync(path.join(root, 'info'), 'utf8'));
+          const marker = JSON.parse(fs.readFileSync(path.join(root, 'files/resources/uos-app-store.json'), 'utf8'));
+          const audit = JSON.parse(fs.readFileSync(process.env.AUDIT, 'utf8'));
+          assert.equal(info.appid, 'com.floatboat.desktop');
+          assert.equal(info.version, version);
+          assert.deepEqual(info.arch, [arch]);
+          assert.equal(typeof info.permissions, 'object');
+          assert.equal(marker.appid, info.appid);
+          assert.equal(audit.appid, info.appid);
+          assert.equal(audit.version, version);
+          assert.equal(audit.arch, arch);
+          assert.ok(Array.isArray(audit.neededLibraries) && audit.neededLibraries.length > 0);
+          NODE
+          # 两个 job 均在对应原生 runner 上构建，且 Electron 主程序来自同一架构的
+          # Forge package；dpkg Architecture 字段与原生矩阵共同构成架构门禁。
+
+      - name: Upload UOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-uos-${{ matrix.arch }}
+          path: |
+            out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}.deb
+            out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}-dependency-audit.json
+          retention-days: 7
           if-no-files-found: error
 
   # ===========================================
@@ -1786,7 +1919,7 @@ jobs:
   # ===========================================
   upload:
     name: Upload All Artifacts
-    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
+    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
     runs-on: ubuntu-latest
     if: |
       inputs.notify_only == false &&
@@ -2478,7 +2611,7 @@ jobs:
   # ===========================================
   notify:
     name: Release Summary
-    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, upload]
+    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload]
     runs-on: ubuntu-latest
     if: always()
 
@@ -2507,6 +2640,7 @@ jobs:
           echo "   macOS x64:    ${{ needs.build-macos-x64.result || 'skipped' }}"
           echo "   Windows x64:  ${{ needs.build-windows.result || 'skipped' }}"
           echo "   Linux (all):  ${{ needs.build-linux.result || 'skipped' }}"
+          echo "   Linux UOS:    ${{ needs.build-linux-uos.result || 'skipped' }}"
           echo ""
           echo "📤 Upload:       ${{ needs.upload.result || 'skipped' }}"
           if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" = "release" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
