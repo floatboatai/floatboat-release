@@ -1432,18 +1432,25 @@ jobs:
           [ -f "$PACKAGE_ROOT/files/resources/uos-app-store.json" ]
           if [ "$DEB_ARCH" = amd64 ]; then expected_machine='Advanced Micro Devices X86-64'; else expected_machine='AArch64'; fi
           readelf -h "$PACKAGE_ROOT/files/floatboat" | grep -F "$expected_machine" >/dev/null
-          PACKAGE_ROOT="$PACKAGE_ROOT" AUDIT="$AUDIT" node <<'NODE'
+          PACKAGE_ROOT="$PACKAGE_ROOT" AUDIT="$AUDIT" DEB="$DEB" node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
           const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
           const root = process.env.PACKAGE_ROOT;
           const arch = process.env.DEB_ARCH;
-          const version = process.env.VERSION.replace(/-rc\.(\d+)$/, '.$1');
+          const inputVersion = process.env.VERSION;
+          const match = /^(\d+\.\d+\.\d+)(?:\.(\d+)|-rc\.(\d+))?$/.exec(inputVersion);
+          assert.ok(match, `UOS 不支持的版本格式：${inputVersion}`);
+          const version = `${match[1]}.${match[2] ?? match[3] ?? '0'}`;
+          assert.match(version, /^\d+\.\d+\.\d+\.\d+$/);
+          const field = (name) => execFileSync('dpkg-deb', ['--field', process.env.DEB, name], { encoding: 'utf8' }).trim();
           const info = JSON.parse(fs.readFileSync(path.join(root, 'info'), 'utf8'));
           const marker = JSON.parse(fs.readFileSync(path.join(root, 'files/resources/uos-app-store.json'), 'utf8'));
           const audit = JSON.parse(fs.readFileSync(process.env.AUDIT, 'utf8'));
           assert.equal(info.appid, 'com.floatboat.desktop');
           assert.equal(info.version, version);
+          assert.equal(field('Version'), version);
           assert.deepEqual(info.arch, [arch]);
           assert.equal(typeof info.permissions, 'object');
           assert.equal(marker.appid, info.appid);
@@ -1451,6 +1458,11 @@ jobs:
           assert.equal(audit.version, version);
           assert.equal(audit.arch, arch);
           assert.ok(Array.isArray(audit.neededLibraries) && audit.neededLibraries.length > 0);
+          assert.ok(Array.isArray(audit.depends) && audit.depends.length > 0);
+          assert.ok(audit.depends.every((dependency) => typeof dependency === 'string' && dependency.trim() === dependency && dependency.length > 0));
+          const controlDepends = field('Depends');
+          assert.ok(controlDepends, 'UOS DEB 缺少 Depends');
+          assert.deepEqual(controlDepends.split(',').map((dependency) => dependency.trim()), audit.depends);
           NODE
           # 两个 job 均在对应原生 runner 上构建，且 Electron 主程序来自同一架构的
           # Forge package；dpkg Architecture 字段与原生矩阵共同构成架构门禁。
