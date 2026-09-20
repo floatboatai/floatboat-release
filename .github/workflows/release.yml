@@ -2631,7 +2631,7 @@ jobs:
     name: Release Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload]
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
 
     steps:
       - name: Download changelog
