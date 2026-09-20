@@ -1417,6 +1417,12 @@ jobs:
           set -euo pipefail
           DEB="out/make/uos/${DEB_ARCH}/Floatboat-${VERSION}-${DEB_ARCH}.deb"
           [ -f "$DEB" ] || { echo "::error::UOS DEB not found: $DEB"; find out/make -type f -print || true; exit 1; }
+          members=$(ar t "$DEB")
+          expected_members=$'debian-binary\ncontrol.tar.gz\ndata.tar.gz'
+          if [ "$members" != "$expected_members" ]; then
+            echo "::error::UOS DEB must contain gzip-compressed control/data archives, found: $members"
+            exit 1
+          fi
           [ "$(dpkg-deb --field "$DEB" Package)" = "com.floatboat.desktop" ]
           [ "$(dpkg-deb --field "$DEB" Architecture)" = "$DEB_ARCH" ]
           dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/files/floatboat' >/dev/null
