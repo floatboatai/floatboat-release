@@ -640,6 +640,7 @@ jobs:
   build-macos-x64:
     name: Build ${{ matrix.display_name }} macOS (x64)
     needs: prepare
+    # Pin Intel: macos-latest currently resolves to an arm64 runner, where packaged x64 runtimes time out under emulation.
     runs-on: macos-26-intel
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
     strategy:
