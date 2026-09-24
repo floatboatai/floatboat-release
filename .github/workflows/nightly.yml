@@ -420,9 +420,9 @@ jobs:
   build-macos-x64:
     name: Build ${{ matrix.display_name }} macOS (x64)
     needs: prepare
-    # Pin Intel: macos-latest currently resolves to an arm64 runner, where packaged x64 runtimes time out under emulation.
+    # Desktop macOS x64 packages are intentionally disabled for nightly builds.
     runs-on: macos-26-intel
-    if: needs.prepare.outputs.package_set != 'launcher' && contains(needs.prepare.outputs.platforms, 'macos')
+    if: ${{ false }}
     strategy:
       fail-fast: false
       matrix:
@@ -1139,7 +1139,6 @@ jobs:
           contains(needs.prepare.outputs.platforms, 'macos') &&
           contains(needs.prepare.outputs.platforms, 'windows') &&
           needs.build-macos-arm64.result == 'success' &&
-          needs.build-macos-x64.result == 'success' &&
           needs.build-windows.result == 'success'
         )
       )
@@ -1226,20 +1225,16 @@ jobs:
           }
 
           require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
-          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
           require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "Floatboat Windows x64 installer"
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
           require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
           require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.zip" "Floatboat macOS arm64 updater ZIP"
-          require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.zip" "Floatboat macOS x64 updater ZIP"
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
 
           main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
           updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
-          if [ "$main_installer_count" -ne 6 ] || [ "$updater_zip_count" -ne 4 ]; then
-            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected 6), mac_zip=$updater_zip_count (expected 4)"
+          if [ "$main_installer_count" -ne 4 ] || [ "$updater_zip_count" -ne 2 ]; then
+            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected 4), mac_zip=$updater_zip_count (expected 2)"
             exit 1
           fi
 
@@ -1251,10 +1246,8 @@ jobs:
             echo "| Variant | Platform | Arch | App version | Main installer |"
             echo "| --- | --- | --- | --- | --- |"
             echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
-            echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
             echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
             echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
-            echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
             echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -1572,17 +1565,13 @@ jobs:
           release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
           main_installer_names = [
               f"Floatboat-{floatboat_version}-arm64.dmg",
-              f"Floatboat-{floatboat_version}-x64.dmg",
               f"Floatboat-Setup-{floatboat_version}-x64.exe",
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg",
               f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
           ]
           updater_zip_names = [
               f"Floatboat-{floatboat_version}-arm64.zip",
-              f"Floatboat-{floatboat_version}-x64.zip",
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip",
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip",
           ]
           launcher_names = [
               f"floatboat-test-launcher-{version}-macos-arm64.zip",
@@ -1618,7 +1607,7 @@ jobs:
             Windows x64：{icon(windows)} {windows}
             上传：       {icon(upload)} {upload}
 
-          主安装包下载（完整 Nightly 共 6 个）：
+          主安装包下载（Nightly 共 4 个；macOS x64 桌面包已停用）：
           {main_installer_links}
 
           macOS updater ZIP：

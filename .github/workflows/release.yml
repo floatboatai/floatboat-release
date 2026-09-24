@@ -640,9 +640,9 @@ jobs:
   build-macos-x64:
     name: Build ${{ matrix.display_name }} macOS (x64)
     needs: prepare
-    # Pin Intel: macos-latest currently resolves to an arm64 runner, where packaged x64 runtimes time out under emulation.
+    # RC builds skip desktop macOS x64; official releases still build it on a native Intel runner.
     runs-on: macos-26-intel
-    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
+    if: inputs.notify_only == false && inputs.is_rc == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
@@ -1806,7 +1806,7 @@ jobs:
           contains(inputs.platforms, 'macos') &&
           contains(inputs.platforms, 'windows') &&
           needs.build-macos-arm64.result == 'success' &&
-          needs.build-macos-x64.result == 'success' &&
+          (inputs.is_rc == true || needs.build-macos-x64.result == 'success') &&
           needs.build-windows.result == 'success' &&
           (!contains(inputs.platforms, 'linux') || needs.build-linux.result == 'success')
         )
@@ -1916,6 +1916,7 @@ jobs:
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           LINUX_REQUESTED: ${{ contains(inputs.platforms, 'linux') }}
+          INCLUDE_MACOS_X64: ${{ inputs.is_rc == false }}
         run: |
           set -euo pipefail
 
@@ -1932,17 +1933,25 @@ jobs:
           echo "🔎 Verifying Desktop release set for ${DESKTOP_VARIANT}"
           if [ "$DESKTOP_VARIANT" = "all" ]; then
             require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
-            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
+            fi
             require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "Floatboat Windows x64 installer"
             require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.zip" "Floatboat macOS arm64 updater ZIP"
-            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.zip" "Floatboat macOS x64 updater ZIP"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.zip" "Floatboat macOS x64 updater ZIP"
+            fi
           fi
 
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
+          if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
+          fi
           require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
           require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
+          if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
+          fi
 
           # Linux 是可选平台：只有 dispatch 明确带上 linux 时才要求 .deb 存在。
           # .deb 不进 mac/win 的主安装包计数，避免改动既有六包门禁的语义。
@@ -1968,9 +1977,13 @@ jobs:
           main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
           updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
           if [ "$DESKTOP_VARIANT" = "all" ]; then
-            # Compatibility marker for release tooling: all scope is expected 6 main installers and 4 updater ZIPs.
-            expected_main=6
-            expected_zip=4
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              expected_main=6
+              expected_zip=4
+            else
+              expected_main=4
+              expected_zip=2
+            fi
           else
             expected_main=3
             expected_zip=2
@@ -1989,11 +2002,11 @@ jobs:
             echo "| --- | --- | --- | --- | --- |"
             if [ "$DESKTOP_VARIANT" = "all" ]; then
               echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
-              echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
+              [ "$INCLUDE_MACOS_X64" != "true" ] || echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
               echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
             fi
             echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
-            echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
+            [ "$INCLUDE_MACOS_X64" != "true" ] || echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
             echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
             if [ "$LINUX_REQUESTED" = "true" ]; then
               for deb_arch in amd64 arm64; do
@@ -2064,14 +2077,20 @@ jobs:
           }
 
           if [ "$DESKTOP_VARIANT" = "all" ]; then
-            verify_metadata \
-              --metadata dist/latest-mac.yml \
-              --artifact-dir out/make \
-              --release-version "$FLOATBOAT_VERSION" \
-              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" \
-              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg" \
-              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip" \
-              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+            mac_metadata_args=(
+              --metadata dist/latest-mac.yml
+              --artifact-dir out/make
+              --release-version "$FLOATBOAT_VERSION"
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg"
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip"
+            )
+            if [ "$IS_RC" = "false" ]; then
+              mac_metadata_args+=(
+                --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg"
+                --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+              )
+            fi
+            verify_metadata "${mac_metadata_args[@]}"
 
             verify_metadata \
               --metadata dist/latest.yml \
@@ -2569,18 +2588,18 @@ jobs:
           if desktop_variant == "all":
               main_installer_names.extend([
                   f"Floatboat-{floatboat_version}-arm64.dmg",
-                  f"Floatboat-{floatboat_version}-x64.dmg",
                   f"Floatboat-Setup-{floatboat_version}-x64.exe",
               ])
-              updater_zip_names.extend([
-                  f"Floatboat-{floatboat_version}-arm64.zip",
-                  f"Floatboat-{floatboat_version}-x64.zip",
-              ])
+              updater_zip_names.append(f"Floatboat-{floatboat_version}-arm64.zip")
+              if not is_rc:
+                  main_installer_names.append(f"Floatboat-{floatboat_version}-x64.dmg")
+                  updater_zip_names.append(f"Floatboat-{floatboat_version}-x64.zip")
           main_installer_names.extend([
               f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg",
               f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
           ])
+          if not is_rc:
+              main_installer_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg")
           # Linux .deb 只提供手动下载，不写 updater metadata，因此单独列出而不混入主安装包清单。
           linux_deb_names = []
           if linux_requested:
@@ -2588,10 +2607,9 @@ jobs:
                   if desktop_variant == "all":
                       linux_deb_names.append(f"Floatboat-{floatboat_version}-{deb_arch}.deb")
                   linux_deb_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-{deb_arch}.deb")
-          updater_zip_names.extend([
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip",
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip",
-          ])
+          updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip")
+          if not is_rc:
+              updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip")
           launcher_names = [
               f"floatboat-test-launcher-{version}-macos-arm64.zip",
               f"floatboat-test-launcher-{version}-macos-x64.zip",
