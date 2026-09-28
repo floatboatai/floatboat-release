@@ -49,8 +49,34 @@ permissions:
   actions: read
 
 jobs:
+  schedule-gate:
+    name: Check holiday pause
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.pause.outputs.enabled }}
+    steps:
+      - name: Check nightly resume time
+        id: pause
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          python3 <<'PY'
+          import os
+          from datetime import datetime, timezone
+
+          # Resume on 2026-10-09 00:00 Beijing time (2026-10-08 16:00 UTC).
+          resume_at = datetime(2026, 10, 8, 16, tzinfo=timezone.utc)
+          enabled = os.environ['EVENT_NAME'] != 'schedule' or datetime.now(timezone.utc) >= resume_at
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'enabled={str(enabled).lower()}\n')
+          if not enabled:
+              print('Scheduled nightly builds paused until 2026-10-09 00:00 Asia/Shanghai.')
+          PY
+
   prepare:
     name: Prepare Nightly
+    needs: schedule-gate
+    if: needs.schedule-gate.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.nightly_version }}
@@ -1521,7 +1547,7 @@ jobs:
     name: Nightly Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, upload]
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && needs.prepare.result != 'skipped'
 
     steps:
       - name: Download internal nightly release note
