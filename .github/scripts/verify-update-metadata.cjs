@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const yaml = require('js-yaml');
+const { parseCanonicalPayload } = require('./release-notes-envelope.cjs');
 
 function fail(message) {
   throw new Error(message);
@@ -36,15 +37,27 @@ function parseArgs(argv) {
     artifactDirectory: '',
     releaseVersion: '',
     expectedArtifacts: [],
+    releaseNotesPayloadPath: '',
+    releaseNotesSha256: '',
+    baseVersion: '',
+    forbidReleaseNotes: false,
   };
 
   for (let index = 0; index < argv.length; ) {
     const current = argv[index];
+    if (current === '--forbid-release-notes') {
+      options.forbidReleaseNotes = true;
+      index += 1;
+      continue;
+    }
     const optionName = [
       '--metadata',
       '--artifact-dir',
       '--release-version',
       '--expected-artifact',
+      '--release-notes-payload',
+      '--release-notes-sha256',
+      '--base-version',
     ].find((candidate) => current === candidate || current.startsWith(`${candidate}=`));
     if (!optionName) {
       fail(`未知参数：${current}`);
@@ -57,8 +70,14 @@ function parseArgs(argv) {
       options.artifactDirectory = value;
     } else if (optionName === '--release-version') {
       options.releaseVersion = value;
-    } else {
+    } else if (optionName === '--expected-artifact') {
       options.expectedArtifacts.push(value);
+    } else if (optionName === '--release-notes-payload') {
+      options.releaseNotesPayloadPath = value;
+    } else if (optionName === '--release-notes-sha256') {
+      options.releaseNotesSha256 = value;
+    } else {
+      options.baseVersion = value;
     }
     index += consumed;
   }
@@ -67,6 +86,13 @@ function parseArgs(argv) {
   if (!options.artifactDirectory) fail('--artifact-dir 为必填项');
   if (!options.releaseVersion) fail('--release-version 为必填项');
   if (options.expectedArtifacts.length === 0) fail('至少需要一个 --expected-artifact');
+  const releaseNoteOptions = [options.releaseNotesPayloadPath, options.releaseNotesSha256, options.baseVersion];
+  if (releaseNoteOptions.some(Boolean) && !releaseNoteOptions.every(Boolean)) {
+    fail('release note 校验必须同时提供 --release-notes-payload、--release-notes-sha256 与 --base-version');
+  }
+  if (options.forbidReleaseNotes && releaseNoteOptions.some(Boolean)) {
+    fail('--forbid-release-notes 不能与 release note payload 校验参数同时使用');
+  }
 
   return options;
 }
@@ -166,6 +192,29 @@ function verifyUpdateMetadata(options) {
   }
   if (typeof metadata.releaseDate !== 'string' || Number.isNaN(Date.parse(metadata.releaseDate))) {
     fail(`元数据 releaseDate 无效：${String(metadata.releaseDate)}`);
+  }
+
+  if (options.forbidReleaseNotes && metadata.releaseNotes != null) {
+    fail('非 stable updater 元数据不得包含 releaseNotes');
+  }
+
+  if (options.releaseNotesPayloadPath) {
+    const payload = fs.readFileSync(path.resolve(options.releaseNotesPayloadPath), 'utf8');
+    const parsedPayload = parseCanonicalPayload(payload);
+    const digest = crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
+    if (digest !== options.releaseNotesSha256.toLowerCase()) {
+      fail(`release note payload SHA256 不匹配：期望 ${options.releaseNotesSha256}，实际 ${digest}`);
+    }
+    if (parsedPayload.version !== options.baseVersion) {
+      fail(`release note 基础版本不匹配：期望 ${options.baseVersion}，实际 ${parsedPayload.version}`);
+    }
+    const normalizedMetadataVersion = String(metadata.version).replace(/-deepseek$/, '');
+    if (normalizedMetadataVersion !== options.baseVersion) {
+      fail(`元数据应用版本无法规范化为基础版本：${metadata.version} -> ${normalizedMetadataVersion}`);
+    }
+    if (metadata.releaseNotes !== payload) {
+      fail('元数据 releaseNotes 与 canonical payload bytes 不一致');
+    }
   }
 
   return {

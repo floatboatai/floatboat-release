@@ -49,6 +49,16 @@ on:
         required: false
         default: false
         type: boolean
+      release_notes_en:
+        description: "Public English release notes (required only for official stable release-profile app publishing)"
+        required: false
+        default: ""
+        type: string
+      release_notes_zh_cn:
+        description: "公开的简体中文更新日志（仅 official stable release-profile app 发布必填）"
+        required: false
+        default: ""
+        type: string
       build_profile:
         description: "Build profile (test injects TEST_BUILD_ENV_FILE; internal-test injects LAN test .env)"
         required: false
@@ -101,6 +111,8 @@ jobs:
       deepseek_version: ${{ steps.desktop_versions.outputs.deepseek_version }}
       changelog_file: ${{ steps.changelog.outputs.changelog_file }}
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
+      release_notes_enabled: ${{ steps.release_notes.outputs.enabled }}
+      release_notes_sha256: ${{ steps.release_notes.outputs.payload_sha256 }}
 
     steps:
       - name: Resolve release scope
@@ -202,6 +214,11 @@ jobs:
           token: ${{ secrets.SOURCE_REPO_PAT }}
           fetch-depth: 0
 
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+
       - name: Resolve Desktop variant versions
         id: desktop_versions
         env:
@@ -229,6 +246,46 @@ jobs:
           console.log(`Floatboat version: ${floatboatVersion}`);
           console.log(`DeepSeek version: ${deepseekVersion}`);
           NODE
+
+      - name: Generate canonical release notes payload
+        id: release_notes
+        shell: bash
+        env:
+          RELEASE_NOTES_EN: ${{ inputs.release_notes_en }}
+          RELEASE_NOTES_ZH_CN: ${{ inputs.release_notes_zh_cn }}
+          BASE_VERSION: ${{ inputs.version }}
+          IS_RC: ${{ inputs.is_rc }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          NOTIFY_ONLY: ${{ inputs.notify_only }}
+          PACKAGE_SET: ${{ steps.package_set.outputs.package_set }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/release-notes
+          if [ "$NOTIFY_ONLY" = "false" ] && [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ] && [ "$PACKAGE_SET" != "launcher" ]; then
+            node release-tooling/.github/scripts/release-notes-envelope.cjs generate \
+              --base-version "$BASE_VERSION" \
+              --payload-output /tmp/release-notes/payload.json \
+              --manifest-output /tmp/release-notes/manifest.json
+            payload_sha256=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('/tmp/release-notes/manifest.json', 'utf8')).payloadSha256)")
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "payload_sha256=$payload_sha256" >> "$GITHUB_OUTPUT"
+            echo "✅ Stable release notes payload prepared for public updater metadata."
+          else
+            if [ -n "${RELEASE_NOTES_EN//[[:space:]]/}" ] || [ -n "${RELEASE_NOTES_ZH_CN//[[:space:]]/}" ]; then
+              echo "::notice::Release note inputs are ignored outside official stable release-profile app publishing."
+            fi
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "payload_sha256=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload canonical release notes payload
+        if: steps.release_notes.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-release-notes
+          path: /tmp/release-notes/
+          retention-days: 7
+          if-no-files-found: error
 
       - name: Resolve source release tag
         id: source
@@ -2007,6 +2064,13 @@ jobs:
       - name: Test release verification tooling
         run: node --test release-tooling/.github/scripts/*.test.cjs
 
+      - name: Download canonical release notes payload
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: /tmp/release-notes/
+
       - name: Download changelog
         uses: actions/download-artifact@v4
         with:
@@ -2211,6 +2275,24 @@ jobs:
             echo "ℹ️ DeepSeek Agent RC/test metadata intentionally skipped; manual-download artifacts only."
           fi
 
+      - name: Inject canonical release notes into stable metadata
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
+        run: |
+          set -euo pipefail
+          payload=/tmp/release-notes/payload.json
+          metadata=(dist/deepseek-agent/deepseek-agent-mac.yml dist/deepseek-agent/deepseek-agent.yml)
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            metadata=(dist/latest-mac.yml dist/latest.yml "${metadata[@]}")
+          fi
+          for metadata_path in "${metadata[@]}"; do
+            node release-tooling/.github/scripts/release-notes-envelope.cjs inject \
+              --metadata "$metadata_path" \
+              --payload "$payload"
+          done
+
       - name: Verify generated update metadata
         if: needs.prepare.outputs.package_set != 'launcher'
         shell: bash
@@ -2220,11 +2302,24 @@ jobs:
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           IS_RC: ${{ inputs.is_rc }}
           BUILD_PROFILE: ${{ inputs.build_profile }}
+          RELEASE_NOTES_ENABLED: ${{ needs.prepare.outputs.release_notes_enabled }}
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+          BASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
 
+          if [ "$RELEASE_NOTES_ENABLED" = "true" ]; then
+            release_note_args=(
+              --release-notes-payload /tmp/release-notes/payload.json
+              --release-notes-sha256 "$RELEASE_NOTES_SHA256"
+              --base-version "$BASE_VERSION"
+            )
+          else
+            release_note_args=(--forbid-release-notes)
+          fi
+
           verify_metadata() {
-            node release-tooling/.github/scripts/verify-update-metadata.cjs "$@"
+            node release-tooling/.github/scripts/verify-update-metadata.cjs "$@" "${release_note_args[@]}"
           }
 
           if [ "$DESKTOP_VARIANT" = "all" ]; then
@@ -2510,6 +2605,9 @@ jobs:
           DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          RELEASE_NOTES_PAYLOAD: /tmp/release-notes/payload.json
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+          RELEASE_NOTES_BASE_VERSION: ${{ inputs.version }}
         run: bash release-tooling/.github/scripts/publish-stable-updater.sh
 
       - name: Sync Floatboat website installer URLs

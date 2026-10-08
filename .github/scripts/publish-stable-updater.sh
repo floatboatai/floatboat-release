@@ -42,6 +42,10 @@ RELEASE_BUCKET="${RELEASE_BUCKET:-aoe-desktop-releases}"
 RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://release.aoe.chat}"
 CLOUDFRONT_DISTRIBUTION_ID="${CLOUDFRONT_DISTRIBUTION_ID:-EOFLQQ0A8KCX1}"
 METADATA_VERIFIER="${METADATA_VERIFIER:-${SCRIPT_DIR}/verify-update-metadata.cjs}"
+require_env RELEASE_NOTES_PAYLOAD
+require_env RELEASE_NOTES_SHA256
+require_env RELEASE_NOTES_BASE_VERSION
+RELEASE_NOTES_PAYLOAD="$(cd "$(dirname "$RELEASE_NOTES_PAYLOAD")" && pwd)/$(basename "$RELEASE_NOTES_PAYLOAD")"
 
 artifact_files=()
 artifact_keys=()
@@ -103,12 +107,17 @@ if [ "$DESKTOP_VARIANT" = "all" ]; then
 fi
 append_deepseek_release
 
-for file_path in "${artifact_files[@]}" "${metadata_files[@]}" "$METADATA_VERIFIER"; do
+for file_path in "${artifact_files[@]}" "${metadata_files[@]}" "$METADATA_VERIFIER" "$RELEASE_NOTES_PAYLOAD"; do
   require_file "$file_path"
 done
 
 verify_metadata_set() {
   local metadata_root="$1"
+  local release_note_args=(
+    --release-notes-payload "$RELEASE_NOTES_PAYLOAD"
+    --release-notes-sha256 "$RELEASE_NOTES_SHA256"
+    --base-version "$RELEASE_NOTES_BASE_VERSION"
+  )
   if [ "$DESKTOP_VARIANT" = "all" ]; then
     node "$METADATA_VERIFIER" \
       --metadata "${metadata_root}/latest-mac.yml" \
@@ -117,12 +126,14 @@ verify_metadata_set() {
       --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" \
       --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg" \
       --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip" \
-      --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+      --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip" \
+      "${release_note_args[@]}"
     node "$METADATA_VERIFIER" \
       --metadata "${metadata_root}/latest.yml" \
       --artifact-dir "$ARTIFACT_DIR" \
       --release-version "$FLOATBOAT_VERSION" \
-      --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+      --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" \
+      "${release_note_args[@]}"
   fi
   node "$METADATA_VERIFIER" \
     --metadata "${metadata_root}/deepseek-agent/deepseek-agent-mac.yml" \
@@ -131,12 +142,14 @@ verify_metadata_set() {
     --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" \
     --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" \
     --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" \
-    --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
+    --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" \
+    "${release_note_args[@]}"
   node "$METADATA_VERIFIER" \
     --metadata "${metadata_root}/deepseek-agent/deepseek-agent.yml" \
     --artifact-dir "$ARTIFACT_DIR" \
     --release-version "$DEEPSEEK_VERSION" \
-    --expected-artifact "Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
+    --expected-artifact "Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" \
+    "${release_note_args[@]}"
 }
 
 echo "🔎 Rechecking ${#metadata_files[@]} local updater metadata files before S3 mutation"
