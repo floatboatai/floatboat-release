@@ -486,7 +486,8 @@ jobs:
   build-macos-x64:
     name: Build ${{ matrix.display_name }} macOS (x64)
     needs: prepare
-    runs-on: macos-latest
+    # 随包 Node 的 SQLite 校验必须在目标架构原生执行，避免依赖 Rosetta。
+    runs-on: macos-15-intel
     if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
     strategy:
       fail-fast: false
