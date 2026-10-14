@@ -59,6 +59,11 @@ on:
         required: false
         default: ""
         type: string
+      skip_release_notes:
+        description: "Explicitly publish an official stable release without public release notes"
+        required: false
+        default: false
+        type: boolean
       build_profile:
         description: "Build profile (test injects TEST_BUILD_ENV_FILE; internal-test injects LAN test .env)"
         required: false
@@ -253,6 +258,7 @@ jobs:
         env:
           RELEASE_NOTES_EN: ${{ inputs.release_notes_en }}
           RELEASE_NOTES_ZH_CN: ${{ inputs.release_notes_zh_cn }}
+          SKIP_RELEASE_NOTES: ${{ inputs.skip_release_notes }}
           BASE_VERSION: ${{ inputs.version }}
           IS_RC: ${{ inputs.is_rc }}
           BUILD_PROFILE: ${{ inputs.build_profile }}
@@ -261,7 +267,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p /tmp/release-notes
+          is_stable_app_release=false
           if [ "$NOTIFY_ONLY" = "false" ] && [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ] && [ "$PACKAGE_SET" != "launcher" ]; then
+            is_stable_app_release=true
+          fi
+
+          if [ "$is_stable_app_release" = "true" ] && [ "$SKIP_RELEASE_NOTES" = "true" ]; then
+            if [ -n "${RELEASE_NOTES_EN//[[:space:]]/}" ] || [ -n "${RELEASE_NOTES_ZH_CN//[[:space:]]/}" ]; then
+              echo "::error::skip_release_notes=true cannot be combined with release note content"
+              exit 1
+            fi
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "payload_sha256=" >> "$GITHUB_OUTPUT"
+            echo "::warning::Official stable release will be published without public release notes (explicit override)."
+          elif [ "$is_stable_app_release" = "true" ]; then
             node release-tooling/.github/scripts/release-notes-envelope.cjs generate \
               --base-version "$BASE_VERSION" \
               --payload-output /tmp/release-notes/payload.json \
@@ -271,6 +290,9 @@ jobs:
             echo "payload_sha256=$payload_sha256" >> "$GITHUB_OUTPUT"
             echo "✅ Stable release notes payload prepared for public updater metadata."
           else
+            if [ "$SKIP_RELEASE_NOTES" = "true" ]; then
+              echo "::notice::skip_release_notes is ignored outside official stable release-profile app publishing."
+            fi
             if [ -n "${RELEASE_NOTES_EN//[[:space:]]/}" ] || [ -n "${RELEASE_NOTES_ZH_CN//[[:space:]]/}" ]; then
               echo "::notice::Release note inputs are ignored outside official stable release-profile app publishing."
             fi
