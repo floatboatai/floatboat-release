@@ -11,6 +11,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const yaml = require('js-yaml');
+const { createEnvelope } = require('./release-notes-envelope.cjs');
 
 const scriptPath = path.join(__dirname, 'publish-stable-updater.sh');
 
@@ -122,6 +123,7 @@ function createMetadata(artifactDirectory, releaseVersion, artifactNames) {
     path: primary.url,
     sha512: primary.sha512,
     releaseDate: '2026-07-28T00:00:00.000Z',
+    releaseNotes: createEnvelope(releaseVersion.replace(/-deepseek$/, ''), 'Release notes', '更新说明').payload,
   };
 }
 
@@ -142,6 +144,9 @@ function createFixture() {
 
   const floatboatVersion = '1.2.3';
   const deepseekVersion = '1.2.3-deepseek';
+  const releaseNotes = createEnvelope(floatboatVersion, 'Release notes', '更新说明');
+  const releaseNotesPath = path.join(root, 'payload.json');
+  fs.writeFileSync(releaseNotesPath, releaseNotes.payload);
   const floatboatMacArtifacts = [
     `Floatboat-${floatboatVersion}-arm64.dmg`,
     `Floatboat-${floatboatVersion}-x64.dmg`,
@@ -192,6 +197,8 @@ function createFixture() {
     callLog,
     floatboatVersion,
     deepseekVersion,
+    releaseNotesPath,
+    releaseNotesDigest: releaseNotes.digest,
   };
 }
 
@@ -206,12 +213,33 @@ function runPublish(fixture, desktopVariant = 'all', extraEnv = {}) {
       DESKTOP_VARIANT: desktopVariant,
       FLOATBOAT_VERSION: fixture.floatboatVersion,
       DEEPSEEK_VERSION: fixture.deepseekVersion,
+      RELEASE_NOTES_PAYLOAD: fixture.releaseNotesPath,
+      RELEASE_NOTES_SHA256: fixture.releaseNotesDigest,
+      RELEASE_NOTES_BASE_VERSION: fixture.floatboatVersion,
       MOCK_S3_ROOT: fixture.s3Root,
       MOCK_CALL_LOG: fixture.callLog,
       ...extraEnv,
     },
   });
 }
+
+test('缺少 canonical 说明或 metadata 正文漂移时不触碰 S3', (context) => {
+  const fixture = createFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  const missing = runPublish(fixture, 'all', { RELEASE_NOTES_PAYLOAD: '' });
+  assert.notEqual(missing.status, 0);
+  assert.match(missing.stdout, /RELEASE_NOTES_PAYLOAD is required/);
+  assert.equal(fs.readFileSync(fixture.callLog, 'utf8'), '');
+
+  const metadataPath = path.join(fixture.metadataDirectory, 'latest.yml');
+  const metadata = yaml.load(fs.readFileSync(metadataPath, 'utf8'));
+  metadata.releaseNotes = createEnvelope(fixture.floatboatVersion, 'Different notes', '不同说明').payload;
+  fs.writeFileSync(metadataPath, yaml.dump(metadata));
+  const drifted = runPublish(fixture);
+  assert.notEqual(drifted.status, 0);
+  assert.match(drifted.stderr, /canonical payload bytes 不一致/);
+  assert.equal(fs.readFileSync(fixture.callLog, 'utf8'), '');
+});
 
 test('依次发布十个制品和四份元数据，并完成 CDN 回读', (context) => {
   const fixture = createFixture();

@@ -565,6 +565,31 @@ jobs:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
       - name: Build and package ${{ matrix.display_name }} (arm64)
         run: |
           set -euo pipefail
@@ -830,6 +855,31 @@ jobs:
         with:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
 
       - name: Build and package ${{ matrix.display_name }} (x64)
         run: |
@@ -1105,6 +1155,31 @@ jobs:
           }
           Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
 
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
       - name: Build and package ${{ matrix.display_name }} (Windows x64)
         run: pnpm run forge:make
         env:
@@ -1287,6 +1362,31 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
       - name: Build and package ${{ matrix.display_name }} (Linux ${{ matrix.arch }})
         run: pnpm run forge:make -- --platform=linux --arch=${{ matrix.arch }} --targets=@electron-forge/maker-deb
         env:
@@ -1459,6 +1559,31 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
 
       - name: Build Floatboat UOS package
         run: pnpm run forge:make:linux:uos

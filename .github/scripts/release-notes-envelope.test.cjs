@@ -50,3 +50,24 @@ test('release workflow 仅为 official stable app 生成并传播 canonical payl
   assert.match(workflow, /--forbid-release-notes/);
   assert.match(workflow, /body_path: \/tmp\/empty-release-body\.md/);
 });
+
+test('每个 Desktop 打包任务在打包前领取同一说明 artifact，非正式构建清理残留', () => {
+  const workflow = yaml.load(fs.readFileSync(path.join(__dirname, '..', 'workflows', 'release.yml'), 'utf8'));
+  for (const jobName of ['build-macos-arm64', 'build-macos-x64', 'build-windows', 'build-linux', 'build-linux-uos']) {
+    const steps = workflow.jobs[jobName].steps;
+    const clear = steps.findIndex((step) => step.name === 'Clear bundled release notes');
+    const download = steps.findIndex((step) => step.name === 'Download bundled release notes');
+    const verify = steps.findIndex((step) => step.name === 'Verify bundled release notes digest');
+    const packageStep = steps.findIndex((step) => /pnpm run forge:make/.test(step.run || ''));
+    assert.ok(clear >= 0 && clear < download && download < verify && verify < packageStep, jobName);
+    assert.equal(steps[clear].if, undefined, jobName);
+    assert.match(steps[clear].run, /rm -rf resources\/release-notes/);
+    assert.equal(steps[download].uses, 'actions/download-artifact@v4');
+    assert.equal(steps[download].with.name, 'stable-release-notes');
+    assert.equal(steps[download].with.path, 'resources/release-notes/');
+    assert.equal(steps[download].if, "needs.prepare.outputs.release_notes_enabled == 'true'");
+    assert.equal(steps[verify].if, steps[download].if);
+    assert.equal(steps[verify].env.RELEASE_NOTES_SHA256, '${{ needs.prepare.outputs.release_notes_sha256 }}');
+    assert.match(steps[verify].run, /resources\/release-notes\/payload.json/);
+  }
+});
