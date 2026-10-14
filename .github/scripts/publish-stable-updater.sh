@@ -42,10 +42,20 @@ RELEASE_BUCKET="${RELEASE_BUCKET:-aoe-desktop-releases}"
 RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://release.aoe.chat}"
 CLOUDFRONT_DISTRIBUTION_ID="${CLOUDFRONT_DISTRIBUTION_ID:-EOFLQQ0A8KCX1}"
 METADATA_VERIFIER="${METADATA_VERIFIER:-${SCRIPT_DIR}/verify-update-metadata.cjs}"
-require_env RELEASE_NOTES_PAYLOAD
-require_env RELEASE_NOTES_SHA256
-require_env RELEASE_NOTES_BASE_VERSION
-RELEASE_NOTES_PAYLOAD="$(cd "$(dirname "$RELEASE_NOTES_PAYLOAD")" && pwd)/$(basename "$RELEASE_NOTES_PAYLOAD")"
+RELEASE_NOTES_ENABLED="${RELEASE_NOTES_ENABLED:-true}"
+case "$RELEASE_NOTES_ENABLED" in
+  true)
+    require_env RELEASE_NOTES_PAYLOAD
+    require_env RELEASE_NOTES_SHA256
+    require_env RELEASE_NOTES_BASE_VERSION
+    RELEASE_NOTES_PAYLOAD="$(cd "$(dirname "$RELEASE_NOTES_PAYLOAD")" && pwd)/$(basename "$RELEASE_NOTES_PAYLOAD")"
+    ;;
+  false) ;;
+  *)
+    echo "::error::RELEASE_NOTES_ENABLED must be true or false"
+    exit 1
+    ;;
+esac
 
 artifact_files=()
 artifact_keys=()
@@ -107,17 +117,26 @@ if [ "$DESKTOP_VARIANT" = "all" ]; then
 fi
 append_deepseek_release
 
-for file_path in "${artifact_files[@]}" "${metadata_files[@]}" "$METADATA_VERIFIER" "$RELEASE_NOTES_PAYLOAD"; do
+required_files=("${artifact_files[@]}" "${metadata_files[@]}" "$METADATA_VERIFIER")
+if [ "$RELEASE_NOTES_ENABLED" = "true" ]; then
+  required_files+=("$RELEASE_NOTES_PAYLOAD")
+fi
+for file_path in "${required_files[@]}"; do
   require_file "$file_path"
 done
 
 verify_metadata_set() {
   local metadata_root="$1"
-  local release_note_args=(
-    --release-notes-payload "$RELEASE_NOTES_PAYLOAD"
-    --release-notes-sha256 "$RELEASE_NOTES_SHA256"
-    --base-version "$RELEASE_NOTES_BASE_VERSION"
-  )
+  local release_note_args
+  if [ "$RELEASE_NOTES_ENABLED" = "true" ]; then
+    release_note_args=(
+      --release-notes-payload "$RELEASE_NOTES_PAYLOAD"
+      --release-notes-sha256 "$RELEASE_NOTES_SHA256"
+      --base-version "$RELEASE_NOTES_BASE_VERSION"
+    )
+  else
+    release_note_args=(--forbid-release-notes)
+  fi
   if [ "$DESKTOP_VARIANT" = "all" ]; then
     node "$METADATA_VERIFIER" \
       --metadata "${metadata_root}/latest-mac.yml" \

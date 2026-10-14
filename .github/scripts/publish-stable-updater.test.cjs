@@ -241,6 +241,45 @@ test('缺少 canonical 说明或 metadata 正文漂移时不触碰 S3', (context
   assert.equal(fs.readFileSync(fixture.callLog, 'utf8'), '');
 });
 
+test('显式禁用 release notes 时要求 metadata 不包含 releaseNotes 并仍完成发布', (context) => {
+  const fixture = createFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  for (const metadataPath of [
+    path.join(fixture.metadataDirectory, 'latest-mac.yml'),
+    path.join(fixture.metadataDirectory, 'latest.yml'),
+    path.join(fixture.metadataDirectory, 'deepseek-agent', 'deepseek-agent-mac.yml'),
+    path.join(fixture.metadataDirectory, 'deepseek-agent', 'deepseek-agent.yml'),
+  ]) {
+    const metadata = yaml.load(fs.readFileSync(metadataPath, 'utf8'));
+    delete metadata.releaseNotes;
+    fs.writeFileSync(metadataPath, yaml.dump(metadata));
+  }
+
+  const result = runPublish(fixture, 'all', {
+    RELEASE_NOTES_ENABLED: 'false',
+    RELEASE_NOTES_PAYLOAD: '',
+    RELEASE_NOTES_SHA256: '',
+    RELEASE_NOTES_BASE_VERSION: '',
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /stable updater feeds are published and externally readable/);
+});
+
+test('禁用 release notes 时拒绝 metadata 中残留的 releaseNotes', (context) => {
+  const fixture = createFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+  const result = runPublish(fixture, 'all', {
+    RELEASE_NOTES_ENABLED: 'false',
+    RELEASE_NOTES_PAYLOAD: '',
+    RELEASE_NOTES_SHA256: '',
+    RELEASE_NOTES_BASE_VERSION: '',
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /不得包含 releaseNotes/);
+  assert.equal(fs.readFileSync(fixture.callLog, 'utf8'), '');
+});
+
 test('依次发布十个制品和四份元数据，并完成 CDN 回读', (context) => {
   const fixture = createFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));

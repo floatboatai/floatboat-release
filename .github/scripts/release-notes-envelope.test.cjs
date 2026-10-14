@@ -49,6 +49,7 @@ test('release workflow 仅为 official stable app 生成并传播 canonical payl
   assert.match(workflow, /\[ "\$is_stable_app_release" = "true" \] && \[ "\$SKIP_RELEASE_NOTES" = "true" \]/);
   assert.match(workflow, /skip_release_notes=true cannot be combined with release note content/);
   assert.match(workflow, /Official stable release will be published without public release notes/);
+  assert.match(workflow, /RELEASE_NOTES_ENABLED: \$\{\{ needs\.prepare\.outputs\.release_notes_enabled \}\}/);
   assert.match(workflow, /name: stable-release-notes/);
   assert.match(workflow, /release-notes-envelope\.cjs inject/);
   assert.match(workflow, /--forbid-release-notes/);
