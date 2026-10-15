@@ -131,6 +131,7 @@ test('UOS 双架构只在固定的 V20 ABI 容器中重编 SQLite 并复核最�
   assert.match(verifyStep, /CXXABI: '1\.3\.11'/);
   assert.match(verifyStep, /GCC: '7\.0\.0'/);
   assert.match(verifyStep, /LIBATOMIC: '1\.2'/);
+  assert.match(verifyStep, /maxBuffer: 64 \* 1024 \* 1024/);
   assert.match(verifyStep, /--version-info/);
   assert.match(verifyStep, /--file-header/);
   assert.match(verifyStep, /RPATH\|RUNPATH/);
