@@ -1770,6 +1770,10 @@ jobs:
           const version = `${match[1]}.${match[2] ?? match[3] ?? '0'}`;
           assert.match(version, /^\d+\.\d+\.\d+\.\d+$/);
           const field = (name) => execFileSync('dpkg-deb', ['--field', process.env.DEB, name], { encoding: 'utf8' }).trim();
+          const readElf = (args) => execFileSync('readelf', args, {
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024 * 1024,
+          });
           const info = JSON.parse(fs.readFileSync(path.join(root, 'info'), 'utf8'));
           const marker = JSON.parse(fs.readFileSync(path.join(root, 'files/resources/uos-app-store.json'), 'utf8'));
           const audit = JSON.parse(fs.readFileSync(process.env.AUDIT, 'utf8'));
@@ -1806,12 +1810,12 @@ jobs:
                 fs.closeSync(handle);
               }
               const relativePath = path.relative(root, entryPath);
-              const fileHeader = execFileSync('readelf', ['--file-header', '--wide', entryPath], { encoding: 'utf8' });
+              const fileHeader = readElf(['--file-header', '--wide', entryPath]);
               const machine = /^\s*Machine:\s*(.+)$/m.exec(fileHeader)?.[1].trim();
               if (machine !== expectedElfMachine) {
                 incompatibleArchitecture.push(relativePath);
               }
-              const dynamicInfo = execFileSync('readelf', ['--dynamic', '--wide', entryPath], { encoding: 'utf8' });
+              const dynamicInfo = readElf(['--dynamic', '--wide', entryPath]);
               for (const runtimePath of dynamicInfo.matchAll(/\((?:RPATH|RUNPATH)\).*?\[([^\]]+)\]/g)) {
                 for (const value of runtimePath[1].split(':')) {
                   if (/^\/(?:opt\/(?:rh|python)|workspace)(?:\/|$)|^\/home\/runner\/work(?:\/|$)/.test(value)) {
@@ -1819,7 +1823,7 @@ jobs:
                   }
                 }
               }
-              const versionInfo = execFileSync('readelf', ['--version-info', '--wide', entryPath], { encoding: 'utf8' });
+              const versionInfo = readElf(['--version-info', '--wide', entryPath]);
               for (const requirement of versionInfo.matchAll(/\bName:\s+(GLIBCXX|GLIBC|CXXABI|GCC|LIBATOMIC)_([0-9]+(?:\.[0-9]+)+)\b/g)) {
                 if (compareVersions(requirement[2], abiLimits[requirement[1]]) > 0) {
                   incompatibleAbi.push(`${relativePath}: ${requirement[1]}_${requirement[2]}`);
