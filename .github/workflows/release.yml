@@ -1542,9 +1542,11 @@ jobs:
           - arch: x64
             debArch: amd64
             runner: ubuntu-latest
+            abiBuilderImage: quay.io/pypa/manylinux_2_28_x86_64@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae
           - arch: arm64
             debArch: arm64
             runner: ubuntu-24.04-arm
+            abiBuilderImage: quay.io/pypa/manylinux_2_28_aarch64@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6
 
     steps:
       - name: Checkout source repo
@@ -1565,12 +1567,6 @@ jobs:
           fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
           NODE
 
-      - name: Install Linux packaging toolchain
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends dpkg binutils
-
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
@@ -1581,6 +1577,55 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - name: Install Linux packaging toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg binutils
+
+      - name: Rebuild SQLite for UOS V20 ABI
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          ABI_BUILDER_IMAGE: ${{ matrix.abiBuilderImage }}
+        run: |
+          set -euo pipefail
+          electron_version=$(node -p "require('./package.json').devDependencies.electron.replace(/^[\\^~>=<]+/, '')")
+          node_root=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+          module_path=node_modules/better-sqlite3-multiple-ciphers/build/Release/better_sqlite3.node
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/workspace" \
+            --volume "$node_root:/opt/node:ro" \
+            --workdir /workspace \
+            --env ARCH \
+            --env ELECTRON_VERSION="$electron_version" \
+            --env HOME=/tmp/uos-builder-home \
+            --env CC=/opt/rh/gcc-toolset-14/root/usr/bin/gcc \
+            --env CXX=/opt/rh/gcc-toolset-14/root/usr/bin/g++ \
+            --env PYTHON=/opt/python/cp311-cp311/bin/python \
+            --env npm_config_build_from_source=true \
+            "$ABI_BUILDER_IMAGE" \
+            /bin/bash -lc '
+              set -euo pipefail
+              export PATH="/opt/node/bin:/opt/rh/gcc-toolset-14/root/usr/bin:$PATH"
+              mkdir -p "$HOME"
+              /opt/node/bin/node node_modules/@electron/rebuild/lib/cli.js \
+                --force \
+                --build-from-source \
+                --disable-pre-gyp-copy \
+                --only better-sqlite3-multiple-ciphers \
+                --module-dir /workspace \
+                --arch "$ARCH" \
+                --version "$ELECTRON_VERSION"
+              rm -rf node_modules/better-sqlite3-multiple-ciphers/bin
+            '
+
+          test -f "$module_path"
+          if [ "$ARCH" = x64 ]; then expected_machine='Advanced Micro Devices X86-64'; else expected_machine='AArch64'; fi
+          readelf --file-header "$module_path" | grep -F "Machine:" | grep -F "$expected_machine"
+          readelf --version-info --wide "$module_path" | grep -E 'Name: (GLIBC|GLIBCXX|CXXABI|GCC|LIBATOMIC)_' | sort -u
 
       - name: Clear bundled release notes
         shell: bash
@@ -1656,9 +1701,67 @@ jobs:
           const version = `${match[1]}.${match[2] ?? match[3] ?? '0'}`;
           assert.match(version, /^\d+\.\d+\.\d+\.\d+$/);
           const field = (name) => execFileSync('dpkg-deb', ['--field', process.env.DEB, name], { encoding: 'utf8' }).trim();
+          const readElf = (args) => execFileSync('readelf', args, {
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024 * 1024,
+          });
           const info = JSON.parse(fs.readFileSync(path.join(root, 'info'), 'utf8'));
           const marker = JSON.parse(fs.readFileSync(path.join(root, 'files/resources/uos-app-store.json'), 'utf8'));
           const audit = JSON.parse(fs.readFileSync(process.env.AUDIT, 'utf8'));
+          const abiBaseline = 'UOS V20 (glibc 2.28 / GCC 8)';
+          const abiLimits = {
+            GLIBC: '2.28', GLIBCXX: '3.4.25', CXXABI: '1.3.11', GCC: '7.0.0', LIBATOMIC: '1.2',
+          };
+          const expectedElfMachine = arch === 'amd64' ? 'Advanced Micro Devices X86-64' : 'AArch64';
+          const compareVersions = (left, right) => {
+            const leftParts = left.split('.').map(Number);
+            const rightParts = right.split('.').map(Number);
+            for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+              const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+              if (difference !== 0) return difference;
+            }
+            return 0;
+          };
+          const incompatibleAbi = [];
+          const incompatibleArchitecture = [];
+          const forbiddenRuntimePaths = [];
+          const scanElfAbi = (directory) => {
+            for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+              const entryPath = path.join(directory, entry.name);
+              if (entry.isDirectory()) {
+                scanElfAbi(entryPath);
+                continue;
+              }
+              if (!entry.isFile()) continue;
+              const header = Buffer.alloc(4);
+              const handle = fs.openSync(entryPath, 'r');
+              try {
+                if (fs.readSync(handle, header, 0, 4, 0) !== 4 || !header.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) continue;
+              } finally {
+                fs.closeSync(handle);
+              }
+              const relativePath = path.relative(root, entryPath);
+              const fileHeader = readElf(['--file-header', '--wide', entryPath]);
+              const machine = /^\s*Machine:\s*(.+)$/m.exec(fileHeader)?.[1].trim();
+              if (machine !== expectedElfMachine) {
+                incompatibleArchitecture.push(relativePath);
+              }
+              const dynamicInfo = readElf(['--dynamic', '--wide', entryPath]);
+              for (const runtimePath of dynamicInfo.matchAll(/\((?:RPATH|RUNPATH)\).*?\[([^\]]+)\]/g)) {
+                for (const value of runtimePath[1].split(':')) {
+                  if (/^\/(?:opt\/(?:rh|python)|workspace)(?:\/|$)|^\/home\/runner\/work(?:\/|$)/.test(value)) {
+                    forbiddenRuntimePaths.push(`${relativePath}: ${value}`);
+                  }
+                }
+              }
+              const versionInfo = readElf(['--version-info', '--wide', entryPath]);
+              for (const requirement of versionInfo.matchAll(/\bName:\s+(GLIBCXX|GLIBC|CXXABI|GCC|LIBATOMIC)_([0-9]+(?:\.[0-9]+)+)\b/g)) {
+                if (compareVersions(requirement[2], abiLimits[requirement[1]]) > 0) {
+                  incompatibleAbi.push(`${relativePath}: ${requirement[1]}_${requirement[2]}`);
+                }
+              }
+            }
+          };
           assert.equal(info.appid, 'com.floatboat.desktop');
           assert.equal(info.version, version);
           assert.equal(field('Version'), version);
@@ -1671,6 +1774,13 @@ jobs:
           assert.ok(Array.isArray(audit.neededLibraries) && audit.neededLibraries.length > 0);
           assert.ok(Array.isArray(audit.depends) && audit.depends.length > 0);
           assert.ok(audit.depends.every((dependency) => typeof dependency === 'string' && dependency.trim() === dependency && dependency.length > 0));
+          assert.equal(audit.abiCompatibility.baseline, abiBaseline);
+          assert.deepEqual(audit.abiCompatibility.limits, abiLimits);
+          assert.ok(Array.isArray(audit.abiCompatibility.maximumVersions));
+          scanElfAbi(path.join(root, 'files'));
+          assert.deepEqual(incompatibleAbi.sort(), [], `UOS V20 ABI 超出基线：${incompatibleAbi.sort().join(', ')}`);
+          assert.deepEqual(incompatibleArchitecture.sort(), [], `UOS ELF 架构不匹配：${incompatibleArchitecture.sort().join(', ')}`);
+          assert.deepEqual(forbiddenRuntimePaths.sort(), [], `UOS ELF 残留构建路径：${forbiddenRuntimePaths.sort().join(', ')}`);
           const controlDepends = field('Depends');
           assert.ok(controlDepends, 'UOS DEB 缺少 Depends');
           assert.deepEqual(controlDepends.split(',').map((dependency) => dependency.trim()), audit.depends);
