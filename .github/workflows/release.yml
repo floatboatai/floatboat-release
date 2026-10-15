@@ -2897,7 +2897,8 @@ jobs:
     name: Release Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload]
     runs-on: ubuntu-latest
-    if: always() && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
+    # 此临时分支仅为 PR #2537 生成手动下载测试包，不发送发行通知。
+    if: ${{ false }}
 
     steps:
       - name: Download changelog
