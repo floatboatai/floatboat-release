@@ -19,6 +19,15 @@ function readNamedStep(workflow, stepName) {
   return workflow.slice(start, nextStep === -1 ? workflow.length : nextStep);
 }
 
+function readNamedJob(workflow, jobName) {
+  const startMarker = `  ${jobName}:\n`;
+  const start = workflow.indexOf(startMarker);
+  assert.notEqual(start, -1, `workflow 缺少 job：${jobName}`);
+  const remaining = workflow.slice(start + startMarker.length);
+  const nextJob = /\n  [a-z0-9-]+:\n/.exec(remaining);
+  return workflow.slice(start, nextJob ? start + startMarker.length + nextJob.index : workflow.length);
+}
+
 test('只有正式 release 会发布并验证选定范围的 stable feed', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const publishStep = readNamedStep(workflow, 'Publish and verify stable updater feeds');
@@ -90,4 +99,41 @@ test('macOS 发布打包会在外部签名或公证瞬时失败时进行三轮�
       assert.ok(packagingStep.includes('sleep $((attempt * 20))'), `${location} 必须递增等待外部服务恢复`);
     }
   }
+});
+
+test('UOS 双架构只在固定的 V20 ABI 容器中重编 SQLite 并复核最终 ELF', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const job = readNamedJob(workflow, 'build-linux-uos');
+  const rebuildStep = readNamedStep(job, 'Rebuild SQLite for UOS V20 ABI');
+  const verifyStep = readNamedStep(job, 'Verify UOS package metadata and layout');
+  const otherJobs = workflow.replace(job, '');
+
+  assert.match(job, /quay\.io\/pypa\/manylinux_2_28_x86_64@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae/);
+  assert.match(job, /quay\.io\/pypa\/manylinux_2_28_aarch64@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6/);
+  assert.doesNotMatch(job, /^\s+container:/m);
+  assert.doesNotMatch(otherJobs, /manylinux_2_28|Rebuild SQLite for UOS V20 ABI/);
+  assert.ok(
+    job.indexOf('- name: Install dependencies') < job.indexOf('- name: Rebuild SQLite for UOS V20 ABI') &&
+      job.indexOf('- name: Rebuild SQLite for UOS V20 ABI') < job.indexOf('- name: Build Floatboat UOS package'),
+    'SQLite 必须在安装依赖后、UOS 打包前按 V20 ABI 重编',
+  );
+  assert.match(rebuildStep, /docker run --rm/);
+  assert.match(rebuildStep, /--build-from-source/);
+  assert.match(rebuildStep, /--disable-pre-gyp-copy/);
+  assert.match(rebuildStep, /--only better-sqlite3-multiple-ciphers/);
+  assert.match(rebuildStep, /rm -rf node_modules\/better-sqlite3-multiple-ciphers\/bin/);
+  assert.match(rebuildStep, /gcc-toolset-14/);
+  assert.match(rebuildStep, /Advanced Micro Devices X86-64/);
+  assert.match(rebuildStep, /AArch64/);
+  assert.match(verifyStep, /UOS V20 \(glibc 2\.28 \/ GCC 8\)/);
+  assert.match(verifyStep, /GLIBC: '2\.28'/);
+  assert.match(verifyStep, /GLIBCXX: '3\.4\.25'/);
+  assert.match(verifyStep, /CXXABI: '1\.3\.11'/);
+  assert.match(verifyStep, /GCC: '7\.0\.0'/);
+  assert.match(verifyStep, /LIBATOMIC: '1\.2'/);
+  assert.match(verifyStep, /--version-info/);
+  assert.match(verifyStep, /--file-header/);
+  assert.match(verifyStep, /RPATH\|RUNPATH/);
+  assert.match(verifyStep, /UOS ELF 架构不匹配/);
+  assert.match(verifyStep, /UOS ELF 残留构建路径/);
 });
