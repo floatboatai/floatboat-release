@@ -43,6 +43,14 @@ RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://release.aoe.chat}"
 CLOUDFRONT_DISTRIBUTION_ID="${CLOUDFRONT_DISTRIBUTION_ID:-EOFLQQ0A8KCX1}"
 METADATA_VERIFIER="${METADATA_VERIFIER:-${SCRIPT_DIR}/verify-update-metadata.cjs}"
 RELEASE_NOTES_ENABLED="${RELEASE_NOTES_ENABLED:-true}"
+LINUX_DEB_ENABLED="${LINUX_DEB_ENABLED:-false}"
+case "$LINUX_DEB_ENABLED" in
+  true | false) ;;
+  *)
+    echo "::error::LINUX_DEB_ENABLED must be true or false"
+    exit 1
+    ;;
+esac
 case "$RELEASE_NOTES_ENABLED" in
   true)
     require_env RELEASE_NOTES_PAYLOAD
@@ -77,6 +85,16 @@ append_floatboat_release() {
     "Floatboat-${FLOATBOAT_VERSION}-arm64.zip"
     "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
   )
+  if [ "$LINUX_DEB_ENABLED" = "true" ]; then
+    artifact_files+=(
+      "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-amd64.deb"
+      "${ARTIFACT_DIR}/Floatboat-${FLOATBOAT_VERSION}-arm64.deb"
+    )
+    artifact_keys+=(
+      "Floatboat-${FLOATBOAT_VERSION}-amd64.deb"
+      "Floatboat-${FLOATBOAT_VERSION}-arm64.deb"
+    )
+  fi
   metadata_files+=(
     "${METADATA_ROOT}/latest-mac.yml"
     "${METADATA_ROOT}/latest.yml"
@@ -102,6 +120,16 @@ append_deepseek_release() {
     "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip"
     "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
   )
+  if [ "$LINUX_DEB_ENABLED" = "true" ]; then
+    artifact_files+=(
+      "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-amd64.deb"
+      "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.deb"
+    )
+    artifact_keys+=(
+      "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-amd64.deb"
+      "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.deb"
+    )
+  fi
   metadata_files+=(
     "${METADATA_ROOT}/deepseek-agent/deepseek-agent-mac.yml"
     "${METADATA_ROOT}/deepseek-agent/deepseek-agent.yml"

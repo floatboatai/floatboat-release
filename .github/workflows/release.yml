@@ -1285,7 +1285,8 @@ jobs:
   # ===========================================
   # Linux 与 macOS / Windows 在同一次 dispatch 内并行构建，产物汇总到同一个 Release。
   # 只产出 .deb 供手动下载：客户端 UpdateManager 仅在 darwin/win32 启用自动更新，
-  # scripts/packaging/updateMetadata.cjs 也不接受 linux 平台，因此不写 updater metadata、不传 S3。
+  # scripts/packaging/updateMetadata.cjs 不接受 linux 平台，因此不写 updater metadata；
+  # 正式版仍会把 .deb 上传 S3，供网站手动下载。
   #
   # arm64 在 GitHub 公共 ubuntu-24.04-arm runner 上**原生**构建，不做交叉编译：
   # better-sqlite3 / lancedb / sharp 等原生模块交叉编译不可靠，且交叉产物无法在构建机上验证。
@@ -1687,6 +1688,135 @@ jobs:
             out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}-dependency-audit.json
           retention-days: 7
           if-no-files-found: error
+
+  # ===========================================
+  # Publish Floatboat UOS Linux (.deb)
+  # ===========================================
+  publish-linux-uos:
+    name: Publish Floatboat UOS Linux
+    needs: [prepare, build-linux-uos]
+    runs-on: ubuntu-latest
+    if: inputs.notify_only == false && inputs.is_rc == false && inputs.build_profile == 'release' && inputs.linux_package == 'uos-floatboat' && inputs.desktop_variant == 'floatboat' && needs.prepare.outputs.package_set == 'app' && contains(inputs.platforms, 'linux') && needs.build-linux-uos.result == 'success'
+    steps:
+      - name: Download UOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-linux-uos-*
+          path: artifacts/uos/
+          merge-multiple: true
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Publish UOS packages and sync installer URLs
+        env:
+          INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
+          INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
+          INSTALLER_DOWNLOAD_BASE_URL: ${{ vars.INSTALLER_DOWNLOAD_BASE_URL }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          RELEASE_BUCKET: aoe-desktop-releases
+          CLOUDFRONT_DISTRIBUTION_ID: EOFLQQ0A8KCX1
+        run: |
+          set -euo pipefail
+          for name in INSTALLER_URLS_API_TOKEN INSTALLER_URLS_API_BASE_URL INSTALLER_DOWNLOAD_BASE_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is required to publish UOS installers"
+              exit 1
+            fi
+          done
+
+          INSTALLER_URLS_API_URL="${INSTALLER_URLS_API_BASE_URL%/}/api/ops/installer-urls"
+          DOWNLOAD_BASE_URL="${INSTALLER_DOWNLOAD_BASE_URL%/}/uos"
+          declare -A package_urls
+          for arch in amd64 arm64; do
+            package="artifacts/uos/Floatboat-${VERSION}-${arch}.deb"
+            if [ ! -f "$package" ]; then
+              echo "::error::Missing Floatboat UOS ${arch} package: ${package}"
+              exit 1
+            fi
+            key="uos/$(basename "$package")"
+            aws s3 cp "$package" "s3://${RELEASE_BUCKET}/${key}" \
+              --no-progress \
+              --checksum-algorithm SHA256 \
+              --cache-control "public,max-age=31536000,immutable"
+            local_size=$(wc -c < "$package" | tr -d ' ')
+            remote_size=$(aws s3api head-object --bucket "$RELEASE_BUCKET" --key "$key" --query ContentLength --output text)
+            if [ "$remote_size" != "$local_size" ]; then
+              echo "::error::S3 object size mismatch for ${key}: local=${local_size}, remote=${remote_size}"
+              exit 1
+            fi
+            package_urls[$arch]="${DOWNLOAD_BASE_URL}/$(basename "$package")"
+          done
+
+          invalidation_id=$(aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths '/uos/*' \
+            --query 'Invalidation.Id' \
+            --output text)
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --id "$invalidation_id" || echo "::warning::CloudFront waiter unavailable; continuing with CDN checks"
+
+          for arch in amd64 arm64; do
+            expected_size=$(wc -c < "artifacts/uos/Floatboat-${VERSION}-${arch}.deb" | tr -d ' ')
+            remote_size=$(curl --fail --silent --show-error --location --retry 6 --retry-all-errors \
+              --head "${package_urls[$arch]}" | awk 'BEGIN { IGNORECASE=1 } /^content-length:/ { value=$2; gsub("\r", "", value) } END { print value }')
+            if [ "$remote_size" != "$expected_size" ]; then
+              echo "::error::CDN package size mismatch for ${arch}: local=${expected_size}, remote=${remote_size:-missing}"
+              exit 1
+            fi
+          done
+
+          payload=$(jq -n \
+            --arg amd64 "${package_urls[amd64]}" \
+            --arg arm64 "${package_urls[arm64]}" \
+            '{
+              DOWNLOAD_UOS_AMD64_INSTALLER_URL: $amd64,
+              DOWNLOAD_UOS_ARM64_INSTALLER_URL: $arm64
+            }')
+          curl --fail-with-body --silent --show-error -X PATCH "$INSTALLER_URLS_API_URL" \
+            -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "Cache-Control: no-cache" \
+            -d "$payload" \
+            -o /tmp/uos-installer-urls-update.json
+          jq -e \
+            --arg amd64 "${package_urls[amd64]}" \
+            --arg arm64 "${package_urls[arm64]}" \
+            '.code == 0
+              and .data.DOWNLOAD_UOS_AMD64_INSTALLER_URL == $amd64
+              and .data.DOWNLOAD_UOS_ARM64_INSTALLER_URL == $arm64' \
+            /tmp/uos-installer-urls-update.json >/dev/null
+
+          verified=false
+          for attempt in 1 2 3 4 5; do
+            curl --fail-with-body --silent --show-error \
+              "${INSTALLER_URLS_API_URL}?verify_version=${VERSION}&verify_attempt=${attempt}&verify_nonce=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+              -H "Cache-Control: no-cache, no-store" \
+              -o /tmp/uos-installer-urls-current.json
+            if jq -e \
+              --arg amd64 "${package_urls[amd64]}" \
+              --arg arm64 "${package_urls[arm64]}" \
+              '.code == 0
+                and .data.DOWNLOAD_UOS_AMD64_INSTALLER_URL == $amd64
+                and .data.DOWNLOAD_UOS_ARM64_INSTALLER_URL == $arm64' \
+              /tmp/uos-installer-urls-current.json >/dev/null; then
+              verified=true
+              break
+            fi
+            sleep $((attempt * 3))
+          done
+          if [ "$verified" != "true" ]; then
+            echo "::error::UOS installer URLs did not converge"
+            jq '{code, message, data}' /tmp/uos-installer-urls-current.json
+            exit 1
+          fi
+          echo "✅ UOS amd64/arm64 packages published and installer URLs verified"
 
   # ===========================================
   # Test Launcher - macOS arm64
@@ -2756,6 +2886,7 @@ jobs:
           RELEASE_NOTES_PAYLOAD: /tmp/release-notes/payload.json
           RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
           RELEASE_NOTES_BASE_VERSION: ${{ inputs.version }}
+          LINUX_DEB_ENABLED: ${{ contains(inputs.platforms, 'linux') && inputs.linux_package == 'deb' }}
         run: bash release-tooling/.github/scripts/publish-stable-updater.sh
 
       - name: Sync Floatboat website installer URLs
@@ -2820,7 +2951,6 @@ jobs:
           echo "  Windows: $(basename "$WINDOWS_EXE")"
           echo "  macOS arm64: $(basename "$MAC_ARM_DMG")"
           echo "  macOS x64: $(basename "$MAC_X64_DMG")"
-
           curl --fail-with-body --silent --show-error -X PATCH "$INSTALLER_URLS_API_URL" \
             -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
             -H "Content-Type: application/json" \

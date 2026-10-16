@@ -29,6 +29,7 @@ test('只有正式 release 会发布并验证选定范围的 stable feed', () =>
   assert.match(publishStep, /DESKTOP_VARIANT: \$\{\{ needs\.prepare\.outputs\.desktop_variant \}\}/);
   assert.match(publishStep, /FLOATBOAT_VERSION: \$\{\{ needs\.prepare\.outputs\.floatboat_version \}\}/);
   assert.match(publishStep, /DEEPSEEK_VERSION: \$\{\{ needs\.prepare\.outputs\.deepseek_version \}\}/);
+  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && inputs\.linux_package == 'deb' \}\}/);
   assert.match(publishStep, /bash release-tooling\/\.github\/scripts\/publish-stable-updater\.sh/);
 });
 
@@ -90,4 +91,23 @@ test('macOS 发布打包会在外部签名或公证瞬时失败时进行三轮�
       assert.ok(packagingStep.includes('sleep $((attempt * 20))'), `${location} 必须递增等待外部服务恢复`);
     }
   }
+});
+
+test('正式通用 Linux deb 会随 stable 制品上传 S3', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const publishStep = readNamedStep(workflow, 'Publish and verify stable updater feeds');
+
+  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && inputs\.linux_package == 'deb' \}\}/);
+});
+
+test('正式 UOS deb 会上传 S3 并同步后端 UOS 下载地址', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const uosStep = readNamedStep(workflow, 'Publish UOS packages and sync installer URLs');
+
+  assert.match(workflow, /publish-linux-uos:[\s\S]*inputs\.linux_package == 'uos-floatboat'/);
+  assert.match(uosStep, /s3:\/\/\$\{RELEASE_BUCKET\}\/\$\{key\}/);
+  assert.match(uosStep, /DOWNLOAD_UOS_AMD64_INSTALLER_URL: \$amd64/);
+  assert.match(uosStep, /DOWNLOAD_UOS_ARM64_INSTALLER_URL: \$arm64/);
+  assert.match(uosStep, /\.data\.DOWNLOAD_UOS_AMD64_INSTALLER_URL == \$amd64/);
+  assert.match(uosStep, /\.data\.DOWNLOAD_UOS_ARM64_INSTALLER_URL == \$arm64/);
 });

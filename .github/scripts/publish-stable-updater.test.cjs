@@ -161,11 +161,21 @@ function createFixture() {
     `Floatboat-DeepSeek-Agent-${deepseekVersion}-x64.zip`,
   ];
   const deepseekWindowsArtifact = `Floatboat-DeepSeek-Agent-Setup-${deepseekVersion}-x64.exe`;
+  const floatboatLinuxArtifacts = [
+    `Floatboat-${floatboatVersion}-amd64.deb`,
+    `Floatboat-${floatboatVersion}-arm64.deb`,
+  ];
+  const deepseekLinuxArtifacts = [
+    `Floatboat-DeepSeek-Agent-${deepseekVersion}-amd64.deb`,
+    `Floatboat-DeepSeek-Agent-${deepseekVersion}-arm64.deb`,
+  ];
   const allArtifacts = [
     ...floatboatMacArtifacts,
     floatboatWindowsArtifact,
+    ...floatboatLinuxArtifacts,
     ...deepseekMacArtifacts,
     deepseekWindowsArtifact,
+    ...deepseekLinuxArtifacts,
   ];
   for (const artifactName of allArtifacts) {
     fs.writeFileSync(path.join(artifactDirectory, artifactName), `content:${artifactName}`);
@@ -325,6 +335,28 @@ test('依次发布十个制品和四份元数据，并完成 CDN 回读', (conte
   assert.equal(metadataUploadIndices.length, 4);
   assert.ok(Math.max(...artifactUploadIndices) < Math.min(...metadataUploadIndices));
   assert.match(calls.join('\n'), /aws cloudfront wait invalidation-completed/);
+});
+
+test('启用 Linux DEB 时先上传四个 deb，并通过 S3 与 CDN 校验', (context) => {
+  const fixture = createFixture();
+  context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
+
+  const result = runPublish(fixture, 'all', { LINUX_DEB_ENABLED: 'true' });
+
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  const releaseRoot = path.join(fixture.s3Root, 'aoe-desktop-releases');
+  for (const objectPath of [
+    `Floatboat-${fixture.floatboatVersion}-amd64.deb`,
+    `Floatboat-${fixture.floatboatVersion}-arm64.deb`,
+    path.join('deepseek-agent', `Floatboat-DeepSeek-Agent-${fixture.deepseekVersion}-amd64.deb`),
+    path.join('deepseek-agent', `Floatboat-DeepSeek-Agent-${fixture.deepseekVersion}-arm64.deb`),
+  ]) {
+    assert.ok(fs.existsSync(path.join(releaseRoot, objectPath)), `缺少 Linux S3 对象：${objectPath}`);
+  }
+
+  const calls = fs.readFileSync(fixture.callLog, 'utf8');
+  assert.equal((calls.match(/\.deb s3:\/\/aoe-desktop-releases\//g) || []).length, 4);
+  assert.equal((calls.match(/--head[^\n]+\.deb/g) || []).length, 4);
 });
 
 test('DeepSeek-only 只发布独立前缀下的五个制品和两份元数据', (context) => {
