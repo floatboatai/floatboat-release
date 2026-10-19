@@ -111,3 +111,27 @@ test('正式 UOS deb 会上传 S3 并同步后端 UOS 下载地址', () => {
   assert.match(uosStep, /\.data\.DOWNLOAD_UOS_AMD64_INSTALLER_URL == \$amd64/);
   assert.match(uosStep, /\.data\.DOWNLOAD_UOS_ARM64_INSTALLER_URL == \$arm64/);
 });
+
+test('Nightly release-profile 完整应用发布 internal/nightly，定时任务默认不切轨', () => {
+  const workflow = fs.readFileSync(nightlyWorkflowPath, 'utf8');
+  const publishStep = readNamedStep(workflow, 'Publish and verify internal nightly updater');
+  assert.match(workflow, /internal_preferred_prerelease:[\s\S]*default: 'unchanged'[\s\S]*- 'nightly'[\s\S]*- 'rc'/);
+  assert.match(publishStep, /build_profile == 'release'/);
+  assert.match(publishStep, /package_set != 'launcher'/);
+  assert.match(publishStep, /TRACK: nightly/);
+  assert.match(publishStep, /github\.event_name == 'workflow_dispatch'[\s\S]*\|\| 'unchanged'/);
+  assert.match(publishStep, /publish-internal-updater\.sh/);
+});
+
+test('RC 仅在 release 双变体及完整 macOS Windows 构建时发布 internal/rc', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const publishStep = readNamedStep(workflow, 'Publish and verify internal RC updater');
+  assert.match(workflow, /internal_preferred_prerelease:[\s\S]*default: "unchanged"[\s\S]*- "nightly"[\s\S]*- "rc"/);
+  assert.match(publishStep, /inputs\.is_rc == true/);
+  assert.match(publishStep, /inputs\.build_profile == 'release'/);
+  assert.match(publishStep, /desktop_variant == 'all'/);
+  assert.match(publishStep, /contains\(inputs\.platforms, 'macos'\)/);
+  assert.match(publishStep, /contains\(inputs\.platforms, 'windows'\)/);
+  assert.match(publishStep, /TRACK: rc/);
+  assert.match(publishStep, /PREFERRED_PRERELEASE: \$\{\{ inputs\.internal_preferred_prerelease \}\}/);
+});

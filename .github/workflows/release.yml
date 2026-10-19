@@ -83,6 +83,15 @@ on:
           - "app"
           - "launcher"
           - "all"
+      internal_preferred_prerelease:
+        description: "Internal updater preferred prerelease track"
+        required: false
+        default: "unchanged"
+        type: choice
+        options:
+          - "unchanged"
+          - "nightly"
+          - "rc"
       promote_merged_bugs:
         description: "Promote merged dev bug PRs to acceptance after app packaging succeeds"
         required: false
@@ -2863,6 +2872,23 @@ jobs:
             echo "::error::Bug handoff failed after packaging. See the summary for details."
             exit "$status"
           fi
+
+      - name: Configure AWS credentials for internal RC updater
+        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Publish and verify internal RC updater
+        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        shell: bash
+        env:
+          TRACK: rc
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          PREFERRED_PRERELEASE: ${{ inputs.internal_preferred_prerelease }}
+        run: bash release-tooling/.github/scripts/publish-internal-updater.sh
 
       # ===========================================
       # S3 Deploy (official releases only)

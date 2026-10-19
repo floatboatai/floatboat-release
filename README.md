@@ -24,3 +24,17 @@
   核对对象；CloudFront 失效完成后还会从公网回读两个 feed 及 HEAD 全部十个更新制品，任一不一致都会阻止发布任务成功。
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
+
+## 内部自动更新轨道
+
+内部 Floatboat updater 使用独立前缀，不影响正式版 stable feed：
+
+- `s3://aoe-desktop-releases/internal/nightly/`：Nightly 的 `latest-mac.yml`、`latest.yml` 及其引用的 Floatboat macOS/Windows 制品。
+- `s3://aoe-desktop-releases/internal/rc/`：RC 的同类文件。
+- `s3://aoe-desktop-releases/internal/channel.yml`：受控客户端策略，固定 schema 为 `schemaVersion: 1` 与 `preferredPrerelease: nightly|rc`。
+
+两个内部轨道都只发布 Floatboat。Floatboat DeepSeek Agent 制品和元数据一律排除；测试、`internal-test`、launcher-only、缺少必要 macOS/Windows 构建的任务也不会写入内部 feed。macOS 架构集合以本次 `latest-mac.yml` 的完整声明为准，因此当前 Nightly 或 RC 只有 arm64 时可以发布，但 arm64 updater ZIP 与 Windows x64 EXE 是最低门槛。
+
+工作流输入 `internal_preferred_prerelease` 默认为 `unchanged`。发布 Nightly/RC 本身不会自动抢占客户端轨道；只有操作者显式选择与当前发布轨道相同的 `nightly` 或 `rc`，并且该轨道的本地 metadata 校验、immutable 制品上传与 S3 校验、no-cache metadata 上传、CloudFront 失效、公网 metadata 回读及所有制品 HEAD 校验全部成功后，才会更新 `internal/channel.yml`。定时 Nightly 始终按 `unchanged` 执行，因此不会覆盖已选中的 RC。
+
+内部发布采用失败关闭门禁：任何缺失制品、版本/文件集合/大小/SHA512 不匹配、DeepSeek 污染、S3 属性异常、CloudFront 后公网内容未收敛，都会令发布步骤失败；策略文件不会在轨道内容完成验证前上传。
