@@ -39,12 +39,11 @@ case "$PREFERRED_PRERELEASE" in
 esac
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"; WORKSPACE_ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$WORKSPACE_ROOT/out/make}"; METADATA_ROOT="${METADATA_ROOT:-$WORKSPACE_ROOT/dist}"; METADATA_VERIFIER="${METADATA_VERIFIER:-$SCRIPT_DIR/verify-update-metadata.cjs}"
+YAML_HELPER="${YAML_HELPER:-$SCRIPT_DIR/internal-updater-yaml.cjs}"
 RELEASE_BUCKET="${RELEASE_BUCKET:-aoe-desktop-releases}"; RELEASE_BASE_URL="${RELEASE_BASE_URL:-https://release.aoe.chat}"; CLOUDFRONT_DISTRIBUTION_ID="${CLOUDFRONT_DISTRIBUTION_ID:-EOFLQQ0A8KCX1}"; PREFIX="internal/$TRACK"
-for file in "$METADATA_ROOT/latest-mac.yml" "$METADATA_ROOT/latest.yml" "$METADATA_VERIFIER"; do require_file "$file"; done
-read_metadata_artifacts() { node - "$1" <<'NODE'
-const fs=require('node:fs'),path=require('node:path'),yaml=require('js-yaml'); const value=yaml.load(fs.readFileSync(process.argv[2],'utf8'));
-if(!value||!Array.isArray(value.files)) throw new Error('metadata files 必须是数组'); for(const item of value.files){const name=String(item?.url||'');if(!name||path.basename(name)!==name)throw new Error(`非法 metadata 制品名：${name}`);console.log(name)}
-NODE
+for file in "$METADATA_ROOT/latest-mac.yml" "$METADATA_ROOT/latest.yml" "$METADATA_VERIFIER" "$YAML_HELPER"; do require_file "$file"; done
+read_metadata_artifacts() {
+  node "$YAML_HELPER" list-artifacts "$1"
 }
 mapfile -t mac_artifacts < <(read_metadata_artifacts "$METADATA_ROOT/latest-mac.yml"); mapfile -t win_artifacts < <(read_metadata_artifacts "$METADATA_ROOT/latest.yml"); artifact_names=("${mac_artifacts[@]}" "${win_artifacts[@]}")
 arm64_zip=false; windows_exe=false
@@ -60,8 +59,6 @@ invalidate(){ local response id;response=$(aws cloudfront create-invalidation --
 curl_common=(--fail --silent --show-error --location --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 15 --max-time 120 --header "Cache-Control: no-cache");published=$(mktemp -d)
 for name in latest-mac.yml latest.yml;do curl "${curl_common[@]}" --output "$published/$name" "$RELEASE_BASE_URL/$PREFIX/$name";done;verify_metadata "$published"
 for name in "${artifact_names[@]}";do headers=$(mktemp);curl "${curl_common[@]}" --head --dump-header "$headers" --output /dev/null "$RELEASE_BASE_URL/$PREFIX/$name";remote=$(awk 'BEGIN{IGNORECASE=1}/^content-length:/{v=$2;gsub("\r","",v)}END{print v}' "$headers");local_size=$(wc -c<"$ARTIFACT_DIR/$name"|tr -d ' ');[ "$remote" = "$local_size" ]||fail "CDN artifact size mismatch: $name";done
-if [ "$PREFERRED_PRERELEASE" != unchanged ];then channel=$(mktemp);printf 'schemaVersion: 1\npreferredPrerelease: %s\n' "$PREFERRED_PRERELEASE">"$channel";aws s3 cp "$channel" "s3://$RELEASE_BUCKET/internal/channel.yml" --no-progress --checksum-algorithm SHA256 --content-type application/yaml --cache-control no-cache,no-store,must-revalidate;verify_s3 "$channel" internal/channel.yml no-cache,no-store,must-revalidate application/yaml;invalidate /internal/channel.yml;remote_channel=$(mktemp);curl "${curl_common[@]}" --output "$remote_channel" "$RELEASE_BASE_URL/internal/channel.yml";node - "$remote_channel" "$PREFERRED_PRERELEASE" <<'NODE'
-const fs=require('node:fs'),yaml=require('js-yaml'),v=yaml.load(fs.readFileSync(process.argv[2],'utf8'));if(v?.schemaVersion!==1||v?.preferredPrerelease!==process.argv[3]||Object.keys(v).length!==2)throw new Error('公网 channel.yml 不符合受控 schema');
-NODE
+if [ "$PREFERRED_PRERELEASE" != unchanged ];then channel=$(mktemp);printf 'schemaVersion: 1\npreferredPrerelease: %s\n' "$PREFERRED_PRERELEASE">"$channel";aws s3 cp "$channel" "s3://$RELEASE_BUCKET/internal/channel.yml" --no-progress --checksum-algorithm SHA256 --content-type application/yaml --cache-control no-cache,no-store,must-revalidate;verify_s3 "$channel" internal/channel.yml no-cache,no-store,must-revalidate application/yaml;invalidate /internal/channel.yml;remote_channel=$(mktemp);curl "${curl_common[@]}" --output "$remote_channel" "$RELEASE_BASE_URL/internal/channel.yml";node "$YAML_HELPER" verify-channel "$remote_channel" "$PREFERRED_PRERELEASE"
 fi
 echo "✅ Floatboat internal $TRACK updater 已发布并验证；preferredPrerelease=$PREFERRED_PRERELEASE"
