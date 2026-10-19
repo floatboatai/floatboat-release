@@ -54,8 +54,8 @@ test('DeepSeek-only 生成和验证元数据时不会生成 Floatboat latest 文
   const windowsMetadataStep = readNamedStep(workflow, 'Generate Windows Update Metadata');
   const verifyStep = readNamedStep(workflow, 'Verify generated update metadata');
 
-  assert.match(macMetadataStep, /if \[ "\$DESKTOP_VARIANT" = "all" \]; then[\s\S]*FLOATBOAT_VERSION/);
-  assert.match(windowsMetadataStep, /if \[ "\$DESKTOP_VARIANT" = "all" \]; then[\s\S]*Floatboat-Setup/);
+  assert.match(macMetadataStep, /if \[ "\$DESKTOP_VARIANT" != "deepseek-agent" \]; then[\s\S]*FLOATBOAT_VERSION/);
+  assert.match(windowsMetadataStep, /if \[ "\$DESKTOP_VARIANT" != "deepseek-agent" \]; then[\s\S]*Floatboat-Setup/);
   assert.match(verifyStep, /DeepSeek-only publishing must not generate Floatboat updater metadata/);
 });
 
@@ -123,15 +123,46 @@ test('Nightly release-profile 完整应用发布 internal/nightly，定时任务
   assert.match(publishStep, /publish-internal-updater\.sh/);
 });
 
-test('RC 仅在 release 双变体及完整 macOS Windows 构建时发布 internal/rc', () => {
+test('RC 仅在 release Floatboat 及完整 macOS Windows 构建时发布 internal/rc', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const publishStep = readNamedStep(workflow, 'Publish and verify internal RC updater');
   assert.match(workflow, /internal_preferred_prerelease:[\s\S]*default: "unchanged"[\s\S]*- "nightly"[\s\S]*- "rc"/);
   assert.match(publishStep, /inputs\.is_rc == true/);
   assert.match(publishStep, /inputs\.build_profile == 'release'/);
-  assert.match(publishStep, /desktop_variant == 'all'/);
+  assert.match(publishStep, /desktop_variant == 'floatboat'/);
   assert.match(publishStep, /contains\(inputs\.platforms, 'macos'\)/);
   assert.match(publishStep, /contains\(inputs\.platforms, 'windows'\)/);
   assert.match(publishStep, /TRACK: rc/);
   assert.match(publishStep, /PREFERRED_PRERELEASE: \$\{\{ inputs\.internal_preferred_prerelease \}\}/);
+});
+
+
+test('Nightly 只构建 Floatboat macOS arm64 与 Windows x64 应用包', () => {
+  const workflow = fs.readFileSync(nightlyWorkflowPath, 'utf8');
+  const macJob = workflow.slice(workflow.indexOf('  build-macos-arm64:'), workflow.indexOf('  build-macos-x64:'));
+  const windowsJob = workflow.slice(workflow.indexOf('  build-windows:'), workflow.indexOf('  build-test-launcher-macos-arm64:'));
+  const verifyStep = readNamedStep(workflow, 'Verify complete Desktop artifact set');
+
+  assert.doesNotMatch(macJob, /deepseek-agent|Floatboat DeepSeek Agent/);
+  assert.doesNotMatch(windowsJob, /deepseek-agent|Floatboat DeepSeek Agent/);
+  assert.match(workflow, /PACKAGE_SET="app"/);
+  assert.match(workflow, /platforms=macos,windows/);
+  assert.match(verifyStep, /expected 2/);
+  assert.doesNotMatch(verifyStep, /DEEPSEEK|DeepSeek/);
+  assert.match(workflow, /build-macos-x64:[\s\S]*if: \$\{\{ false \}\}/);
+});
+
+test('RC 强制 Floatboat app 范围并只接受 macOS arm64 与 Windows x64', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const scopeStep = readNamedStep(workflow, 'Resolve release scope');
+  const packageStep = readNamedStep(workflow, 'Resolve package set');
+  const publishStep = readNamedStep(workflow, 'Publish and verify internal RC updater');
+  const macX64Job = workflow.slice(workflow.indexOf('  build-macos-x64:'), workflow.indexOf('  build-windows:'));
+
+  assert.match(scopeStep, /RC publishing requires desktop_variant=floatboat/);
+  assert.match(scopeStep, /RC publishing requires exactly macos,windows/);
+  assert.match(packageStep, /RC publishing requires package_set=app/);
+  assert.match(macX64Job, /inputs\.is_rc == false/);
+  assert.match(publishStep, /desktop_variant == 'floatboat'/);
+  assert.doesNotMatch(publishStep, /desktop_variant == 'all'/);
 });

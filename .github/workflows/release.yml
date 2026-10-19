@@ -142,6 +142,11 @@ jobs:
         run: |
           set -euo pipefail
 
+          if [ "$INPUT_IS_RC" = "true" ]; then
+            [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::RC publishing requires desktop_variant=floatboat"; exit 1; }
+            [ "$INPUT_PLATFORMS" = "macos,windows" ] || { echo "::error::RC publishing requires exactly macos,windows"; exit 1; }
+          fi
+
           case "$INPUT_DESKTOP_VARIANT" in
             floatboat)
               release_tag="v${INPUT_VERSION}"
@@ -215,6 +220,10 @@ jobs:
           fi
           if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ] && [ "$package_set" != "app" ]; then
             echo "::error::DeepSeek-only publishing requires package_set=app"
+            exit 1
+          fi
+          if [ "${{ inputs.is_rc }}" = "true" ] && [ "$package_set" != "app" ]; then
+            echo "::error::RC publishing requires package_set=app"
             exit 1
           fi
           echo "package_set=$package_set" >> "$GITHUB_OUTPUT"
@@ -2432,7 +2441,7 @@ jobs:
           }
 
           echo "🔎 Verifying Desktop release set for ${DESKTOP_VARIANT}"
-          if [ "$DESKTOP_VARIANT" = "all" ]; then
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
             require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
             if [ "$INCLUDE_MACOS_X64" = "true" ]; then
               require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
@@ -2444,14 +2453,16 @@ jobs:
             fi
           fi
 
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
-          if [ "$INCLUDE_MACOS_X64" = "true" ]; then
-            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
-          fi
-          require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
-          if [ "$INCLUDE_MACOS_X64" = "true" ]; then
-            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
+          if [ "$DESKTOP_VARIANT" != "floatboat" ]; then
+            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
+            fi
+            require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
+            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
+            fi
           fi
 
           # Linux 是可选平台：只有 dispatch 明确带上 linux 时才要求 .deb 存在。
@@ -2478,13 +2489,10 @@ jobs:
           main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
           updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
           if [ "$DESKTOP_VARIANT" = "all" ]; then
-            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
-              expected_main=6
-              expected_zip=4
-            else
-              expected_main=4
-              expected_zip=2
-            fi
+            expected_main=6
+            expected_zip=4
+          elif [ "$DESKTOP_VARIANT" = "floatboat" ]; then
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then expected_main=3; expected_zip=2; else expected_main=2; expected_zip=1; fi
           else
             expected_main=3
             expected_zip=2
@@ -2501,14 +2509,16 @@ jobs:
             echo ""
             echo "| Variant | Platform | Arch | App version | Main installer |"
             echo "| --- | --- | --- | --- | --- |"
-            if [ "$DESKTOP_VARIANT" = "all" ]; then
+            if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
               echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
               [ "$INCLUDE_MACOS_X64" != "true" ] || echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
               echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
             fi
-            echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
-            [ "$INCLUDE_MACOS_X64" != "true" ] || echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
-            echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
+            if [ "$DESKTOP_VARIANT" != "floatboat" ]; then
+              echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
+              [ "$INCLUDE_MACOS_X64" != "true" ] || echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
+              echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
+            fi
             if [ "$LINUX_REQUESTED" = "true" ]; then
               for deb_arch in amd64 arm64; do
                 if [ "$DESKTOP_VARIANT" = "all" ]; then
@@ -2532,7 +2542,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
-          if [ "$DESKTOP_VARIANT" = "all" ]; then
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
             ./scripts/generate-latest-yml.sh --platform mac --release-version "$FLOATBOAT_VERSION"
           fi
           if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
@@ -2552,7 +2562,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
-          if [ "$DESKTOP_VARIANT" = "all" ]; then
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
             ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
           fi
           if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
@@ -2608,7 +2618,7 @@ jobs:
             node release-tooling/.github/scripts/verify-update-metadata.cjs "$@" "${release_note_args[@]}"
           }
 
-          if [ "$DESKTOP_VARIANT" = "all" ]; then
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
             mac_metadata_args=(
               --metadata dist/latest-mac.yml
               --artifact-dir out/make
@@ -2874,7 +2884,7 @@ jobs:
           fi
 
       - name: Configure AWS credentials for internal RC updater
-        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -2882,7 +2892,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Publish and verify internal RC updater
-        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
         shell: bash
         env:
           TRACK: rc

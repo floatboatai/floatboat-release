@@ -97,7 +97,6 @@ jobs:
       package_set: ${{ steps.version.outputs.package_set }}
       promote_merged_bugs: ${{ steps.version.outputs.promote_merged_bugs }}
       floatboat_version: ${{ steps.desktop_versions.outputs.floatboat_version }}
-      deepseek_version: ${{ steps.desktop_versions.outputs.deepseek_version }}
       prev_tag: ${{ steps.changelog.outputs.prev_tag }}
       changelog_file: ${{ steps.changelog.outputs.changelog_file }}
 
@@ -135,7 +134,7 @@ jobs:
           set -euo pipefail
           DATE=$(date -u +%Y%m%d)
           BUILD_PROFILE="release"
-          PACKAGE_SET="auto"
+          PACKAGE_SET="app"
           if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
             BUILD_PROFILE="${{ github.event.inputs.build_profile || 'release' }}"
             PACKAGE_SET="${{ github.event.inputs.package_set || 'auto' }}"
@@ -144,8 +143,11 @@ jobs:
             PROMOTE_MERGED_BUGS="true"
           fi
           if [ "$PACKAGE_SET" = "auto" ]; then
-            # Nightly 无论 release 还是 test profile 都需要 launcher 包，auto 一律解析为 all
-            PACKAGE_SET="all"
+            PACKAGE_SET="app"
+          fi
+          if [ "$PACKAGE_SET" != "app" ]; then
+            echo "::error::Nightly publishing only supports package_set=app"
+            exit 1
           fi
 
           LATEST_RELEASE_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
@@ -200,13 +202,8 @@ jobs:
           }
 
           const floatboatVersion = deriveDesktopVariantVersion(inputVersion, 'floatboat');
-          const deepseekVersion = deriveDesktopVariantVersion(inputVersion, 'deepseek-agent');
-          fs.appendFileSync(
-            process.env.GITHUB_OUTPUT,
-            `floatboat_version=${floatboatVersion}\ndeepseek_version=${deepseekVersion}\n`,
-          );
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `floatboat_version=${floatboatVersion}\n`);
           console.log(`Floatboat nightly version: ${floatboatVersion}`);
-          console.log(`DeepSeek nightly version: ${deepseekVersion}`);
           NODE
 
       - name: Read config
@@ -290,10 +287,6 @@ jobs:
             display_name: Floatboat
             artifact_base: Floatboat
             app_name: Floatboat
-          - variant: deepseek-agent
-            display_name: Floatboat DeepSeek Agent
-            artifact_base: Floatboat-DeepSeek-Agent
-            app_name: Floatboat DeepSeek Agent
 
     steps:
       - name: Checkout source repo
@@ -323,7 +316,7 @@ jobs:
 
       - name: Inject variant version
         env:
-          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
@@ -425,7 +418,7 @@ jobs:
       - name: Collect arm64 artifacts
         shell: bash
         env:
-          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           ARTIFACT_BASE: ${{ matrix.artifact_base }}
         run: |
           set -euo pipefail
@@ -466,10 +459,6 @@ jobs:
             display_name: Floatboat
             artifact_base: Floatboat
             app_name: Floatboat
-          - variant: deepseek-agent
-            display_name: Floatboat DeepSeek Agent
-            artifact_base: Floatboat-DeepSeek-Agent
-            app_name: Floatboat DeepSeek Agent
 
     steps:
       - name: Checkout source repo
@@ -499,7 +488,7 @@ jobs:
 
       - name: Inject variant version
         env:
-          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
@@ -601,7 +590,7 @@ jobs:
       - name: Collect x64 artifacts
         shell: bash
         env:
-          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           ARTIFACT_BASE: ${{ matrix.artifact_base }}
         run: |
           set -euo pipefail
@@ -640,9 +629,6 @@ jobs:
           - variant: floatboat
             display_name: Floatboat
             artifact_base: Floatboat
-          - variant: deepseek-agent
-            display_name: Floatboat DeepSeek Agent
-            artifact_base: Floatboat-DeepSeek-Agent
 
     steps:
       - name: Checkout source repo
@@ -673,7 +659,7 @@ jobs:
       - name: Inject variant version
         shell: bash
         env:
-          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
         run: |
           node <<'NODE'
           const fs = require('node:fs');
@@ -753,7 +739,7 @@ jobs:
       - name: Collect production Windows artifact
         shell: bash
         env:
-          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           ARTIFACT_BASE: ${{ matrix.artifact_base }}
         run: |
           set -euo pipefail
@@ -773,7 +759,7 @@ jobs:
         if: needs.prepare.outputs.build_profile == 'release'
         shell: pwsh
         env:
-          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           ARTIFACT_BASE: ${{ matrix.artifact_base }}
         run: |
           $installer = "dist/windows/$env:ARTIFACT_BASE-Setup-$env:VERSION-x64.exe"
@@ -1249,7 +1235,6 @@ jobs:
         shell: bash
         env:
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
-          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -1266,15 +1251,12 @@ jobs:
 
           require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
           require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "Floatboat Windows x64 installer"
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
-          require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
           require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.zip" "Floatboat macOS arm64 updater ZIP"
-          require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
 
           main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
           updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
-          if [ "$main_installer_count" -ne 4 ] || [ "$updater_zip_count" -ne 2 ]; then
-            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected 4), mac_zip=$updater_zip_count (expected 2)"
+          if [ "$main_installer_count" -ne 2 ] || [ "$updater_zip_count" -ne 1 ]; then
+            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected 2), mac_zip=$updater_zip_count (expected 1)"
             exit 1
           fi
 
@@ -1287,8 +1269,6 @@ jobs:
             echo "| --- | --- | --- | --- | --- |"
             echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
             echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
-            echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
-            echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate macOS Update Metadata
@@ -1299,7 +1279,6 @@ jobs:
           set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
           ./scripts/generate-latest-yml.sh --platform mac --release-version "$FLOATBOAT_VERSION"
-          echo "ℹ️ DeepSeek Agent nightly metadata intentionally skipped; manual-download artifacts only."
 
       - name: Generate Windows Update Metadata
         if: needs.prepare.outputs.package_set != 'launcher'
@@ -1309,7 +1288,6 @@ jobs:
           set -euo pipefail
           chmod +x scripts/generate-latest-yml.sh
           ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
-          echo "ℹ️ DeepSeek Agent nightly metadata intentionally skipped; manual-download artifacts only."
 
       - name: Configure AWS credentials for internal updater
         if: needs.prepare.outputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
@@ -1600,7 +1578,6 @@ jobs:
 
           version = "${{ needs.prepare.outputs.version }}"
           floatboat_version = "${{ needs.prepare.outputs.floatboat_version }}"
-          deepseek_version = "${{ needs.prepare.outputs.deepseek_version }}"
           package_set = "${{ needs.prepare.outputs.package_set }}"
           prev_tag = "${{ needs.prepare.outputs.prev_tag }}"
           macos_arm64 = "${{ needs.build-macos-arm64.result }}" or "skipped"
@@ -1623,12 +1600,9 @@ jobs:
           main_installer_names = [
               f"Floatboat-{floatboat_version}-arm64.dmg",
               f"Floatboat-Setup-{floatboat_version}-x64.exe",
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
-              f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
           ]
           updater_zip_names = [
               f"Floatboat-{floatboat_version}-arm64.zip",
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip",
           ]
           launcher_names = [
               f"floatboat-test-launcher-{version}-macos-arm64.zip",
@@ -1656,7 +1630,6 @@ jobs:
 
           包类型：{package_set}
           Floatboat 版本：{floatboat_version}
-          DeepSeek Agent 版本：{deepseek_version}
 
           构建结果：
             macOS arm64：{icon(macos_arm64)} {macos_arm64}
@@ -1664,7 +1637,7 @@ jobs:
             Windows x64：{icon(windows)} {windows}
             上传：       {icon(upload)} {upload}
 
-          主安装包下载（Nightly 共 4 个；macOS x64 桌面包已停用）：
+          主安装包下载（Nightly 共 2 个：macOS arm64 + Windows x64）：
           {main_installer_links}
 
           macOS updater ZIP：
@@ -1672,8 +1645,6 @@ jobs:
 
           测试录制 launcher：
           {launcher_links}
-
-          DeepSeek Agent Nightly 只提供手动下载，不写入自动更新 feed。
 
           🔒 Nightly release note 仅内部发送到飞书机器人，不写入公开 GitHub Release 页面。
 
