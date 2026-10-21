@@ -29,14 +29,6 @@ case "$TRACK" in
     fail "TRACK must be nightly or rc"
     ;;
 esac
-PREFERRED_PRERELEASE="${PREFERRED_PRERELEASE:-unchanged}"
-case "$PREFERRED_PRERELEASE" in
-  unchanged) ;;
-  nightly | rc)
-    [ "$PREFERRED_PRERELEASE" = "$TRACK" ] || fail "PREFERRED_PRERELEASE 非 unchanged 时必须与 TRACK 一致"
-    ;;
-  *) fail "PREFERRED_PRERELEASE must be unchanged, nightly, or rc" ;;
-esac
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"; WORKSPACE_ROOT="${GITHUB_WORKSPACE:-$(pwd)}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$WORKSPACE_ROOT/out/make}"; METADATA_ROOT="${METADATA_ROOT:-$WORKSPACE_ROOT/dist}"; METADATA_VERIFIER="${METADATA_VERIFIER:-$SCRIPT_DIR/verify-update-metadata.cjs}"
 YAML_HELPER="${YAML_HELPER:-$SCRIPT_DIR/internal-updater-yaml.cjs}"
@@ -59,6 +51,12 @@ invalidate(){ local response id;response=$(aws cloudfront create-invalidation --
 curl_common=(--fail --silent --show-error --location --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 15 --max-time 120 --header "Cache-Control: no-cache");published=$(mktemp -d)
 for name in latest-mac.yml latest.yml;do curl "${curl_common[@]}" --output "$published/$name" "$RELEASE_BASE_URL/$PREFIX/$name";done;verify_metadata "$published"
 for name in "${artifact_names[@]}";do headers=$(mktemp);curl "${curl_common[@]}" --head --dump-header "$headers" --output /dev/null "$RELEASE_BASE_URL/$PREFIX/$name";remote=$(awk 'BEGIN{IGNORECASE=1}/^content-length:/{v=$2;gsub("\r","",v)}END{print v}' "$headers");local_size=$(wc -c<"$ARTIFACT_DIR/$name"|tr -d ' ');[ "$remote" = "$local_size" ]||fail "CDN artifact size mismatch: $name";done
-if [ "$PREFERRED_PRERELEASE" != unchanged ];then channel=$(mktemp);printf 'schemaVersion: 1\npreferredPrerelease: %s\n' "$PREFERRED_PRERELEASE">"$channel";aws s3 cp "$channel" "s3://$RELEASE_BUCKET/internal/channel.yml" --no-progress --checksum-algorithm SHA256 --content-type application/yaml --cache-control no-cache,no-store,must-revalidate;verify_s3 "$channel" internal/channel.yml no-cache,no-store,must-revalidate application/yaml;invalidate /internal/channel.yml;remote_channel=$(mktemp);curl "${curl_common[@]}" --output "$remote_channel" "$RELEASE_BASE_URL/internal/channel.yml";node "$YAML_HELPER" verify-channel "$remote_channel" "$PREFERRED_PRERELEASE"
-fi
-echo "✅ Floatboat internal $TRACK updater 已发布并验证；preferredPrerelease=$PREFERRED_PRERELEASE"
+channel=$(mktemp)
+printf 'schemaVersion: 1\npreferredPrerelease: %s\n' "$TRACK" > "$channel"
+aws s3 cp "$channel" "s3://$RELEASE_BUCKET/internal/channel.yml" --no-progress --checksum-algorithm SHA256 --content-type application/yaml --cache-control no-cache,no-store,must-revalidate
+verify_s3 "$channel" internal/channel.yml no-cache,no-store,must-revalidate application/yaml
+invalidate /internal/channel.yml
+remote_channel=$(mktemp)
+curl "${curl_common[@]}" --output "$remote_channel" "$RELEASE_BASE_URL/internal/channel.yml"
+node "$YAML_HELPER" verify-channel "$remote_channel" "$TRACK"
+echo "✅ Floatboat internal $TRACK updater 已发布并验证；preferredPrerelease=$TRACK"

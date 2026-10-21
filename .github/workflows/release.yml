@@ -83,15 +83,6 @@ on:
           - "app"
           - "launcher"
           - "all"
-      internal_preferred_prerelease:
-        description: "Internal updater preferred prerelease track"
-        required: false
-        default: "unchanged"
-        type: choice
-        options:
-          - "unchanged"
-          - "nightly"
-          - "rc"
       promote_merged_bugs:
         description: "Promote merged dev bug PRs to acceptance after app packaging succeeds"
         required: false
@@ -2897,7 +2888,6 @@ jobs:
         env:
           TRACK: rc
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
-          PREFERRED_PRERELEASE: ${{ inputs.internal_preferred_prerelease }}
         run: bash release-tooling/.github/scripts/publish-internal-updater.sh
 
       # ===========================================
