@@ -31,13 +31,63 @@ const fs=require('fs'),path=require('path'); const a=process.argv.slice(2), root
 if(a[0]==='s3'&&a[1]==='cp'){const u=new URL(a[3]),d=path.join(root,u.hostname,u.pathname.slice(1));fs.mkdirSync(path.dirname(d),{recursive:true});fs.copyFileSync(a[2],d);fs.writeFileSync(d+'.meta',JSON.stringify({CacheControl:o('--cache-control'),ContentType:o('--content-type')||'application/octet-stream'}));process.exit(0)}
 if(a[0]==='s3api'&&a[1]==='head-object'){const d=path.join(root,o('--bucket'),o('--key')),m=JSON.parse(fs.readFileSync(d+'.meta'));process.stdout.write(JSON.stringify({ContentLength:fs.statSync(d).size,ETag:'"etag"',...m}));process.exit(0)}
 if(a[0]==='cloudfront'&&a[1]==='create-invalidation'){process.stdout.write(JSON.stringify({Invalidation:{Id:'INV',Status:'InProgress'}}));process.exit(0)} if(a[0]==='cloudfront'&&a[1]==='wait')process.exit(0); process.exit(2);`);
-  executable(path.join(bin,'curl'), `#!/usr/bin/env node
-const fs=require('fs'),path=require('path');const a=process.argv.slice(2),o=n=>{const i=a.indexOf(n);return i<0?'':a[i+1]},u=new URL([...a].reverse().find(x=>/^https?:/.test(x))),s=path.join(process.env.MOCK_S3_ROOT,'aoe-desktop-releases',u.pathname.slice(1));fs.appendFileSync(process.env.MOCK_LOG,'curl '+a.join(' ')+'\\n');if(!fs.existsSync(s))process.exit(22);if(a.includes('--head')){fs.writeFileSync(o('--dump-header'),'HTTP/2 200\\r\\ncontent-length: '+fs.statSync(s).size+'\\r\\n\\r\\n')}else{const d=o('--output');fs.mkdirSync(path.dirname(d),{recursive:true});fs.copyFileSync(s,d)}`);
+  executable(path.join(bin, 'curl'), `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const args = process.argv.slice(2);
+const option = (name) => {
+  const index = args.indexOf(name);
+  return index < 0 ? '' : args[index + 1];
+};
+const urlText = [...args].reverse().find((value) => /^https?:/.test(value));
+const url = new URL(urlText);
+const source = path.join(process.env.MOCK_S3_ROOT, 'aoe-desktop-releases', url.pathname.slice(1));
+fs.appendFileSync(process.env.MOCK_LOG, 'curl ' + args.join(' ') + '\\n');
+const failureFile = process.env.MOCK_CURL_FAILURE_FILE;
+if (failureFile && fs.existsSync(failureFile)) {
+  const remaining = Number(fs.readFileSync(failureFile, 'utf8'));
+  if (remaining > 0) {
+    fs.writeFileSync(failureFile, String(remaining - 1));
+    process.stderr.write('curl: (6) Could not resolve host: release.aoe.chat\\n');
+    process.exit(6);
+  }
+}
+if (!fs.existsSync(source)) process.exit(22);
+if (args.includes('--head')) {
+  fs.writeFileSync(option('--dump-header'), 'HTTP/2 200\\r\\ncontent-length: ' + fs.statSync(source).size + '\\r\\n\\r\\n');
+} else {
+  const destination = option('--output');
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.copyFileSync(source, destination);
+}
+`);
   return {root,workspace,artifacts,dist,bin,store,log,version,deep};
 }
 function run(f, extra={}) { return spawnSync('bash',[scriptPath],{cwd:f.workspace,encoding:'utf8',env:{...process.env,PATH:`${f.bin}:${process.env.PATH}`,GITHUB_WORKSPACE:f.workspace,TRACK:'nightly',FLOATBOAT_VERSION:f.version,MOCK_S3_ROOT:f.store,MOCK_LOG:f.log,...extra}}); }
 test('nightly 可按 metadata 实际集合发布 arm64 mac 与 Windows，且排除 DeepSeek',t=>{const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));const r=run(f);assert.equal(r.status,0,`${r.stdout}\n${r.stderr}`);const prefix=path.join(f.store,'aoe-desktop-releases/internal/nightly');assert.ok(fs.existsSync(path.join(prefix,`Floatboat-${f.version}-arm64.zip`)));assert.ok(fs.existsSync(path.join(prefix,`Floatboat-Setup-${f.version}-x64.exe`)));assert.equal(fs.existsSync(path.join(prefix,f.deep)),false);assert.deepEqual(yaml.load(fs.readFileSync(path.join(f.store,'aoe-desktop-releases/internal/channel.yml'),'utf8')),{schemaVersion:1,preferredPrerelease:'nightly'});const calls=fs.readFileSync(f.log,'utf8');assert.ok(calls.indexOf('-arm64.zip s3://') < calls.indexOf('latest-mac.yml s3://'));});
 test('RC 完整发布后自动接管 channel.yml 并公网回读',t=>{const f=fixture(true, '1.2.4-rc.3');t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));const r=run(f,{TRACK:'rc',FLOATBOAT_VERSION:f.version});assert.equal(r.status,0,`${r.stdout}\n${r.stderr}`);const channel=path.join(f.store,'aoe-desktop-releases/internal/channel.yml');assert.deepEqual(yaml.load(fs.readFileSync(channel,'utf8')),{schemaVersion:1,preferredPrerelease:'rc'});const calls=fs.readFileSync(f.log,'utf8');assert.ok(calls.indexOf('release.aoe.chat/internal/rc/latest.yml') < calls.indexOf(' s3://aoe-desktop-releases/internal/channel.yml'));assert.match(calls,/curl .*https:\/\/release\.aoe\.chat\/internal\/channel\.yml/);});
+test('CDN DNS 瞬时失败后外层有界重试收敛，才更新 channel.yml', (t) => {
+  const f = fixture(false, '1.2.4-rc.3');
+  t.after(() => fs.rmSync(f.root, { recursive: true, force: true }));
+  const failureFile = path.join(f.root, 'curl-failures');
+  fs.writeFileSync(failureFile, '3');
+
+  const result = run(f, {
+    TRACK: 'rc',
+    FLOATBOAT_VERSION: f.version,
+    MOCK_CURL_FAILURE_FILE: failureFile,
+    CDN_VERIFY_DELAY_SECONDS: '0',
+  });
+
+  assert.equal(result.status, 0, `${result.stdout}
+${result.stderr}`);
+  assert.match(result.stdout, /CDN verification converged/);
+  assert.deepEqual(yaml.load(fs.readFileSync(path.join(f.store, 'aoe-desktop-releases/internal/channel.yml'), 'utf8')), {
+    schemaVersion: 1,
+    preferredPrerelease: 'rc',
+  });
+});
+
 test('metadata 引用 DeepSeek 时在上传前失败',t=>{const f=fixture();t.after(()=>fs.rmSync(f.root,{recursive:true,force:true}));fs.writeFileSync(path.join(f.dist,'latest-mac.yml'),yaml.dump(metadata(f.artifacts,f.version,[f.deep])));const r=run(f);assert.notEqual(r.status,0);assert.match(r.stdout+r.stderr,/DeepSeek/);assert.equal(fs.readFileSync(f.log,'utf8'),'');});
 
 

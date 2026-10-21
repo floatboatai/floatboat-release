@@ -48,9 +48,28 @@ for name in "${artifact_names[@]}";do aws s3 cp "$ARTIFACT_DIR/$name" "s3://$REL
 for name in "${artifact_names[@]}";do verify_s3 "$ARTIFACT_DIR/$name" "$PREFIX/$name" public,max-age=31536000,immutable;done
 for name in latest-mac.yml latest.yml;do aws s3 cp "$METADATA_ROOT/$name" "s3://$RELEASE_BUCKET/$PREFIX/$name" --no-progress --checksum-algorithm SHA256 --content-type application/yaml --cache-control no-cache,no-store,must-revalidate;verify_s3 "$METADATA_ROOT/$name" "$PREFIX/$name" no-cache,no-store,must-revalidate application/yaml;done
 invalidate(){ local response id;response=$(aws cloudfront create-invalidation --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --paths "$@" --output json);id=$(jq -r .Invalidation.Id<<<"$response");aws cloudfront wait invalidation-completed --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" --id "$id"||echo '::warning::CloudFront waiter unavailable; CDN verification remains authoritative';};invalidate "/$PREFIX/*"
-curl_common=(--fail --silent --show-error --location --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 15 --max-time 120 --header "Cache-Control: no-cache");published=$(mktemp -d)
-for name in latest-mac.yml latest.yml;do curl "${curl_common[@]}" --output "$published/$name" "$RELEASE_BASE_URL/$PREFIX/$name";done;verify_metadata "$published"
-for name in "${artifact_names[@]}";do headers=$(mktemp);curl "${curl_common[@]}" --head --dump-header "$headers" --output /dev/null "$RELEASE_BASE_URL/$PREFIX/$name";remote=$(awk 'BEGIN{IGNORECASE=1}/^content-length:/{v=$2;gsub("\r","",v)}END{print v}' "$headers");local_size=$(wc -c<"$ARTIFACT_DIR/$name"|tr -d ' ');[ "$remote" = "$local_size" ]||fail "CDN artifact size mismatch: $name";done
+curl_common=(--fail --silent --show-error --location --retry 6 --retry-all-errors --retry-delay 5 --connect-timeout 15 --max-time 120 --header "Cache-Control: no-cache"); CDN_VERIFY_ATTEMPTS="${CDN_VERIFY_ATTEMPTS:-6}"; CDN_VERIFY_DELAY_SECONDS="${CDN_VERIFY_DELAY_SECONDS:-10}"; published=$(mktemp -d)
+cdn_verified=false
+for attempt in $(seq 1 "$CDN_VERIFY_ATTEMPTS"); do
+  rm -rf "$published"; mkdir -p "$published"
+  if for name in latest-mac.yml latest.yml; do curl "${curl_common[@]}" --output "$published/$name" "$RELEASE_BASE_URL/$PREFIX/$name"; done && verify_metadata "$published"; then
+    artifacts_verified=true
+    for name in "${artifact_names[@]}"; do
+      headers=$(mktemp)
+      curl "${curl_common[@]}" --head --dump-header "$headers" --output /dev/null "$RELEASE_BASE_URL/$PREFIX/$name" || { artifacts_verified=false; break; }
+      remote=$(awk 'BEGIN{IGNORECASE=1}/^content-length:/{v=$2;gsub("\r","",v)}END{print v}' "$headers")
+      local_size=$(wc -c < "$ARTIFACT_DIR/$name" | tr -d ' ')
+      [ "$remote" = "$local_size" ] || { artifacts_verified=false; break; }
+    done
+    if [ "$artifacts_verified" = true ]; then
+      cdn_verified=true
+      echo "✅ CDN verification converged on attempt $attempt"
+      break
+    fi
+  fi
+  if [ "$attempt" -lt "$CDN_VERIFY_ATTEMPTS" ]; then sleep "$CDN_VERIFY_DELAY_SECONDS"; fi
+done
+[ "$cdn_verified" = true ] || fail "CDN verification did not converge after $CDN_VERIFY_ATTEMPTS attempts"
 channel=$(mktemp)
 printf 'schemaVersion: 1\npreferredPrerelease: %s\n' "$TRACK" > "$channel"
 aws s3 cp "$channel" "s3://$RELEASE_BUCKET/internal/channel.yml" --no-progress --checksum-algorithm SHA256 --content-type application/yaml --cache-control no-cache,no-store,must-revalidate

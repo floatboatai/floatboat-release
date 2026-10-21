@@ -3137,9 +3137,11 @@ jobs:
           range_hint = f"  (since {prev_tag})" if prev_tag else ""
           release_tag = "${{ needs.prepare.outputs.release_tag }}"
           release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
+          has_floatboat = desktop_variant in ("all", "floatboat")
+          has_deepseek = desktop_variant in ("all", "deepseek-agent")
           main_installer_names = []
           updater_zip_names = []
-          if desktop_variant == "all":
+          if has_floatboat:
               main_installer_names.extend([
                   f"Floatboat-{floatboat_version}-arm64.dmg",
                   f"Floatboat-Setup-{floatboat_version}-x64.exe",
@@ -3148,22 +3150,23 @@ jobs:
               if not is_rc:
                   main_installer_names.append(f"Floatboat-{floatboat_version}-x64.dmg")
                   updater_zip_names.append(f"Floatboat-{floatboat_version}-x64.zip")
-          main_installer_names.extend([
-              f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
-              f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
-          ])
-          if not is_rc:
-              main_installer_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg")
+          if has_deepseek:
+              main_installer_names.extend([
+                  f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
+                  f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
+              ])
+              updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip")
+              if not is_rc:
+                  main_installer_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg")
+                  updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip")
           # Linux .deb 只提供手动下载，不写 updater metadata，因此单独列出而不混入主安装包清单。
           linux_deb_names = []
           if linux_requested:
               for deb_arch in ("amd64", "arm64"):
-                  if desktop_variant == "all":
+                  if has_floatboat:
                       linux_deb_names.append(f"Floatboat-{floatboat_version}-{deb_arch}.deb")
-                  linux_deb_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-{deb_arch}.deb")
-          updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip")
-          if not is_rc:
-              updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip")
+                  if has_deepseek:
+                      linux_deb_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-{deb_arch}.deb")
           launcher_names = [
               f"floatboat-test-launcher-{version}-macos-arm64.zip",
               f"floatboat-test-launcher-{version}-macos-x64.zip",
@@ -3190,12 +3193,16 @@ jobs:
               else "_本次未构建。_"
           )
 
+          floatboat_version_line = f"Floatboat 版本：{floatboat_version}" if has_floatboat else "Floatboat：未构建、未发布、未更新 feed"
+          deepseek_version_line = f"DeepSeek Agent 版本：{deepseek_version}" if has_deepseek else "DeepSeek Agent：未构建、未发布、未更新 feed"
+          deepseek_feed_note = "DeepSeek Agent RC/test 只提供手动下载，不写入自动更新 feed。" if has_deepseek and (is_rc or build_profile != "release") else ""
+
           header = f"""{emoji} AOE Desktop {release_type} v{version}
 
           包类型：{package_set}
           发行范围：{desktop_variant}
-          {f'Floatboat 版本：{floatboat_version}' if desktop_variant == 'all' else 'Floatboat：未构建、未发布、未更新 feed'}
-          DeepSeek Agent 版本：{deepseek_version}
+          {floatboat_version_line}
+          {deepseek_version_line}
 
           构建结果：
             macOS arm64：{icon(macos_arm64)} {macos_arm64}
@@ -3216,7 +3223,7 @@ jobs:
           测试录制 launcher：
           {launcher_links}
 
-          DeepSeek Agent RC/test 只提供手动下载，不写入自动更新 feed。
+          {deepseek_feed_note}
           Linux .deb 不进入任何自动更新 feed：客户端自动更新仅在 macOS / Windows 启用。
 
           🔒 Release note 仅内部发送到飞书机器人，不写入公开 GitHub Release 页面。

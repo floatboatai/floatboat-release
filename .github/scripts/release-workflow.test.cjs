@@ -166,3 +166,15 @@ test('RC 强制 Floatboat app 范围并只接受 macOS arm64 与 Windows x64', (
   assert.match(publishStep, /desktop_variant == 'floatboat'/);
   assert.doesNotMatch(publishStep, /desktop_variant == 'all'/);
 });
+
+test('Floatboat-only 飞书通知只列 Floatboat 制品并隐藏 DeepSeek 版本', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const notifyStep = readNamedStep(workflow, 'Send Feishu notification');
+
+  assert.match(notifyStep, /has_floatboat = desktop_variant in \("all", "floatboat"\)/);
+  assert.match(notifyStep, /has_deepseek = desktop_variant in \("all", "deepseek-agent"\)/);
+  assert.match(notifyStep, /if has_floatboat:[\s\S]*Floatboat-\{floatboat_version\}-arm64\.dmg/);
+  assert.match(notifyStep, /if has_deepseek:[\s\S]*Floatboat-DeepSeek-Agent-\{deepseek_version\}-arm64\.dmg/);
+  assert.match(notifyStep, /floatboat_version_line/);
+  assert.match(notifyStep, /deepseek_version_line/);
+});
