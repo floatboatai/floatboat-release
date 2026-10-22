@@ -100,6 +100,19 @@ test('正式通用 Linux deb 会随 stable 制品上传 S3', () => {
   assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && inputs\.linux_package == 'deb' \}\}/);
 });
 
+test('正式通用 Linux deb 会同步到官网 UOS fallback 下载地址', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const websiteStep = readNamedStep(workflow, 'Sync Floatboat website installer URLs');
+
+  assert.match(websiteStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && inputs\.linux_package == 'deb' \}\}/);
+  assert.match(websiteStep, /Floatboat-\$\{VERSION\}-amd64\.deb/);
+  assert.match(websiteStep, /Floatboat-\$\{VERSION\}-arm64\.deb/);
+  assert.match(websiteStep, /DOWNLOAD_UOS_AMD64_INSTALLER_URL: \$linux_amd64/);
+  assert.match(websiteStep, /DOWNLOAD_UOS_ARM64_INSTALLER_URL: \$linux_arm64/);
+  assert.match(websiteStep, /\.data\.DOWNLOAD_UOS_AMD64_INSTALLER_URL == \$linux_amd64/);
+  assert.match(websiteStep, /\.data\.DOWNLOAD_UOS_ARM64_INSTALLER_URL == \$linux_arm64/);
+});
+
 test('正式 UOS deb 会上传 S3 并同步后端 UOS 下载地址', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const uosStep = readNamedStep(workflow, 'Publish UOS packages and sync installer URLs');
