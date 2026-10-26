@@ -25,6 +25,16 @@
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
 
+## macOS 签名后运行门禁
+
+Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使用源码仓库的
+`scripts/packaging/packaged-workbench-runtime.mjs` 检查最终包内 Node 的 JIT 热循环、SQLite 读写备份，
+并编译内置工作台模板。`node --version`、架构和签名校验不能替代实际脚本执行。
+探针不修改签名包、不安装依赖；失败会阻止该平台上传制品。
+
+此门禁依赖选定源码 ref 中的探针脚本：源码仓库修复应先合入，再启用本仓库步骤。
+缺少探针的历史 ref 会明确失败，不静默跳过；重建旧版本时需先将签名修复和探针带入专用源码分支。
+
 ## 内部自动更新轨道
 
 内部 Floatboat updater 使用独立前缀，不影响正式版 stable feed：
