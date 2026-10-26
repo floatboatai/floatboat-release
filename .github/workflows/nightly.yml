@@ -406,6 +406,12 @@ jobs:
           xcrun stapler validate "$APP_PATH"
           spctl --assess --type execute --verbose=4 "$APP_PATH"
 
+      - name: Verify packaged Node and workbench (arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/packaging/packaged-workbench-runtime.mjs "$PWD/out/${{ matrix.app_name }}-darwin-arm64/${{ matrix.app_name }}.app/Contents/Resources" arm64
+
       - name: Collect arm64 artifacts
         shell: bash
         env:
@@ -577,6 +583,12 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           xcrun stapler validate "$APP_PATH"
           spctl --assess --type execute --verbose=4 "$APP_PATH"
+
+      - name: Verify packaged Node and workbench (x64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/packaging/packaged-workbench-runtime.mjs "$PWD/out/${{ matrix.app_name }}-darwin-x64/${{ matrix.app_name }}.app/Contents/Resources" x64
 
       - name: Collect x64 artifacts
         shell: bash
