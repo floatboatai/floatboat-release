@@ -367,6 +367,21 @@ jobs:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
+      - name: Checkout release tooling for bundled sources
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Seed bundled tool sources
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+        run: |
+          node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
+          rm -rf release-tooling
+
       - name: Build ${{ matrix.display_name }} arm64
         run: |
           set -euo pipefail
@@ -545,6 +560,21 @@ jobs:
           p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
           p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
 
+      - name: Checkout release tooling for bundled sources
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Seed bundled tool sources
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+        run: |
+          node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
+          rm -rf release-tooling
+
       - name: Build ${{ matrix.display_name }} x64
         run: |
           set -euo pipefail
@@ -695,6 +725,21 @@ jobs:
             xz
           pacboy: toolchain:p
           path-type: inherit
+
+      - name: Checkout release tooling for bundled sources
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Seed bundled tool sources
+        shell: msys2 {0}
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+        run: |
+          node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
+          rm -rf release-tooling
 
       - name: Build bundled FFmpeg (Windows x64)
         shell: msys2 {0}
