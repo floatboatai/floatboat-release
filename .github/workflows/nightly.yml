@@ -1352,13 +1352,6 @@ jobs:
           draft: false
           prerelease: true
           fail_on_unmatched_files: false
-          files: |
-            out/make/*.dmg
-            out/make/*.zip
-            out/make/*.exe
-            dist/launchers/*.zip
-            dist/latest-mac.yml
-            dist/latest.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -1597,8 +1590,18 @@ jobs:
           def icon(s):
               return {"success": "✅", "failure": "❌", "cancelled": "⏹️", "skipped": "⏭️"}.get(s, "❓")
 
-          release_tag = f"nightly-{version}"
-          release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
+          # Only release-profile Nightly packages are published by the internal
+          # updater; GitHub Release is metadata-only.
+          release_base_url = (
+              "https://release.aoe.chat/internal/nightly"
+              if "${{ needs.prepare.outputs.build_profile }}" == "release"
+              else None
+          )
+
+          def artifact_links(names):
+              if not release_base_url:
+                  return "_本次构建未发布到 CDN。_"
+              return "\n".join(f"- {name}: {release_base_url}/{name}" for name in names)
           main_installer_names = [
               f"Floatboat-{floatboat_version}-arm64.dmg",
               f"Floatboat-Setup-{floatboat_version}-x64.exe",
@@ -1612,17 +1615,17 @@ jobs:
               f"floatboat-test-launcher-{version}-win-x64.zip",
           ]
           main_installer_links = (
-              "\n".join(f"- {name}: {release_base_url}/{name}" for name in main_installer_names)
+              artifact_links(main_installer_names)
               if package_set != "launcher"
               else "_本次未构建 Desktop 应用安装包。_"
           )
           updater_zip_links = (
-              "\n".join(f"- {name}: {release_base_url}/{name}" for name in updater_zip_names)
+              artifact_links(updater_zip_names)
               if package_set != "launcher"
               else "_本次未构建。_"
           )
           launcher_links = (
-              "\n".join(f"- {name}: {release_base_url}/{name}" for name in launcher_names)
+              "_测试 launcher 未发布到 CDN。_"
               if package_set != "app"
               else "_本次未构建。_"
           )

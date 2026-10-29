@@ -2682,15 +2682,6 @@ jobs:
           draft: false
           prerelease: ${{ inputs.is_rc || inputs.build_profile != 'release' }}
           fail_on_unmatched_files: false
-          files: |
-            out/make/*.dmg
-            out/make/*.zip
-            out/make/*.exe
-            out/make/*.deb
-            dist/launchers/*.zip
-            dist/latest-mac.yml
-            dist/latest.yml
-            dist/deepseek-agent/*.yml
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -3185,8 +3176,25 @@ jobs:
           emoji = "🏠" if build_profile == "internal-test" else ("🧪" if build_profile == "test" else ("🚧" if is_rc else "🎉"))
           release_type = "内网测试版本" if build_profile == "internal-test" else ("测试版本" if build_profile == "test" else ("RC 预发布" if is_rc else "正式发布"))
           range_hint = f"  (since {prev_tag})" if prev_tag else ""
-          release_tag = "${{ needs.prepare.outputs.release_tag }}"
-          release_base_url = f"https://github.com/floatboatai/floatboat-release/releases/download/{release_tag}"
+          # Production artifacts are published to release.aoe.chat.
+          # RC uses internal/rc; stable release uses the CDN root.
+          release_base_url = (
+              "https://release.aoe.chat/internal/rc"
+              if is_rc
+              else "https://release.aoe.chat"
+          ) if build_profile == "release" else None
+
+          def artifact_url(name):
+              if not release_base_url:
+                  return None
+              base_url = release_base_url
+              if name.startswith("Floatboat-DeepSeek-Agent-"):
+                  base_url = f"{base_url}/deepseek-agent"
+              return f"{base_url}/{name}"
+
+          def artifact_links(names):
+              links = [f"- {name}: {artifact_url(name)}" for name in names if artifact_url(name)]
+              return "\n".join(links) if links else "_本次构建未发布到 CDN。_"
           has_floatboat = desktop_variant in ("all", "floatboat")
           has_deepseek = desktop_variant in ("all", "deepseek-agent")
           main_installer_names = []
@@ -3223,22 +3231,22 @@ jobs:
               f"floatboat-test-launcher-{version}-win-x64.zip",
           ]
           main_installer_links = (
-              "\n".join(f"- {name}: {release_base_url}/{name}" for name in main_installer_names)
+              artifact_links(main_installer_names)
               if package_set != "launcher"
               else "_本次未构建 Desktop 应用安装包。_"
           )
           updater_zip_links = (
-              "\n".join(f"- {name}: {release_base_url}/{name}" for name in updater_zip_names)
+              artifact_links(updater_zip_names)
               if package_set != "launcher"
               else "_本次未构建。_"
           )
           launcher_links = (
-              "\n".join(f"- {name}: {release_base_url}/{name}" for name in launcher_names)
+              "_测试 launcher 未发布到 CDN。_"
               if package_set != "app"
               else "_本次未构建。_"
           )
           linux_deb_links = (
-              "\n".join(f"- {name}: {release_base_url}/{name}" for name in linux_deb_names)
+              artifact_links(linux_deb_names)
               if linux_deb_names and package_set != "launcher"
               else "_本次未构建。_"
           )
