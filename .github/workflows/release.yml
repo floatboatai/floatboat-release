@@ -1477,7 +1477,9 @@ jobs:
           NODE
 
       - name: Build and package ${{ matrix.display_name }} (Linux ${{ matrix.arch }})
-        run: pnpm run forge:make -- --platform=linux --arch=${{ matrix.arch }} --targets=@electron-forge/maker-deb
+        # pnpm 会把 `--` 原样传给脚本，forge 随后忽略全部参数并跑 zip/deb/rpm 三个 maker；
+        # --targets 还必须写 maker 名（deb）而不是包名，否则 MakerDeb 配置被静默丢弃。
+        run: pnpm run forge:make:linux:deb --platform linux --arch ${{ matrix.arch }}
         env:
           # Vite 打包 renderer/worker 目标会超过 Node 默认 ~4GB heap 上限并 FATAL OOM，
           # 与 macOS job 用同一个上限；缺这行会在 floatboatWorker 之后的阶段构建失败。

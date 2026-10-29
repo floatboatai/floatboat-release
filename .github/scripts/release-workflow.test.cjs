@@ -93,6 +93,14 @@ test('macOS 发布打包会在外部签名或公证瞬时失败时进行三轮�
   }
 });
 
+test('通用 Linux 只用 deb maker 打包，且不向 pnpm 脚本透传 --', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const step = readNamedStep(workflow, 'Build and package ${{ matrix.display_name }} (Linux ${{ matrix.arch }})');
+  assert.match(step, /run: pnpm run forge:make:linux:deb --platform linux --arch \$\{\{ matrix\.arch \}\}\n/);
+  assert.doesNotMatch(step, /run: pnpm run [^\n]* -- /);
+  assert.doesNotMatch(step, /@electron-forge\/maker-/);
+});
+
 test('正式通用 Linux deb 会随 stable 制品上传 S3', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const publishStep = readNamedStep(workflow, 'Publish and verify stable updater feeds');
