@@ -7,8 +7,8 @@ const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 
-// 源码仓库从这个提交开始把固定源码包入库；更早的 ref（如 v0.6.2）只会去上游下载，需要这里兜底。
-const VENDORED_SOURCE_COMMIT = '76ec800043280bff4801e84e39b75a91082b9539';
+// 源码仓库 dev 上的入库提交（PR #2626）；更早的 ref（如 v0.6.2）只会去上游下载，需要这里兜底。
+const VENDORED_SOURCE_COMMIT = 'c3564cbc32ca8605d9bcd5933f5e045841fbf380';
 const VENDORED_SOURCE_DIRECTORY = 'vendor/bundled-tool-sources';
 const PINNED_SOURCE_MODULES = [
   ['scripts/bundle-ffmpeg.mjs', 'FFMPEG_SOURCE'],

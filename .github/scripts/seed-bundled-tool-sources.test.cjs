@@ -31,6 +31,10 @@ function response(status, body = Buffer.alloc(0)) {
   return { ok: status >= 200 && status < 300, status, arrayBuffer: async () => body };
 }
 
+test('固定的源码仓库提交是完整 SHA，不能是分支名或空值', () => {
+  assert.match(VENDORED_SOURCE_COMMIT, /^[0-9a-f]{40}$/);
+});
+
 test('源码仓库固定提交不可用时回退上游，并按打包脚本的缓存命名写入', async () => {
   const root = createSourceRoot();
   const calls = [];
