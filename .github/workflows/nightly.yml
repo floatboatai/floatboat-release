@@ -12,7 +12,7 @@ on:
         default: 'dev'
         type: string
       platforms:
-        description: 'Platforms to build'
+        description: 'Platforms (macos-x64,linux downloads installers only)'
         required: false
         default: 'macos,windows'
         type: choice
@@ -20,6 +20,7 @@ on:
           - 'macos,windows'
           - 'macos'
           - 'windows'
+          - 'macos-x64,linux'
       build_profile:
         description: 'Build profile (test injects TEST_BUILD_ENV_FILE into .env)'
         required: false
@@ -84,6 +85,7 @@ jobs:
       source_sha: ${{ steps.source.outputs.sha }}
       source_tag: ${{ steps.version.outputs.source_tag }}
       platforms: ${{ steps.config.outputs.platforms }}
+      manual_only: ${{ steps.config.outputs.manual_only }}
       build_profile: ${{ steps.version.outputs.build_profile }}
       package_set: ${{ steps.version.outputs.package_set }}
       promote_merged_bugs: ${{ steps.version.outputs.promote_merged_bugs }}
@@ -199,12 +201,26 @@ jobs:
 
       - name: Read config
         id: config
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+          BUILD_PROFILE: ${{ steps.version.outputs.build_profile }}
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "platforms=${{ github.event.inputs.platforms || 'macos,windows' }}" >> $GITHUB_OUTPUT
-          else
-            echo "platforms=macos,windows" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          platforms=macos,windows
+          if [ "$EVENT_NAME" = workflow_dispatch ]; then
+            platforms="${INPUT_PLATFORMS:-macos,windows}"
           fi
+          case "$platforms" in
+            macos,windows|macos|windows) manual_only=false ;;
+            macos-x64,linux)
+              [ "$BUILD_PROFILE" = release ] || { echo "::error::Manual installers require build_profile=release"; exit 1; }
+              manual_only=true
+              ;;
+            *) echo "::error::Unsupported nightly platforms: $platforms"; exit 1 ;;
+          esac
+          echo "platforms=$platforms" >> "$GITHUB_OUTPUT"
+          echo "manual_only=$manual_only" >> "$GITHUB_OUTPUT"
 
       - name: Generate internal nightly release note
         id: changelog
@@ -269,7 +285,7 @@ jobs:
     name: Build ${{ matrix.display_name }} macOS (arm64)
     needs: prepare
     runs-on: macos-latest
-    if: needs.prepare.outputs.package_set != 'launcher' && contains(needs.prepare.outputs.platforms, 'macos')
+    if: needs.prepare.outputs.package_set != 'launcher' && (needs.prepare.outputs.platforms == 'macos' || needs.prepare.outputs.platforms == 'macos,windows')
     strategy:
       fail-fast: false
       matrix:
@@ -460,9 +476,9 @@ jobs:
   build-macos-x64:
     name: Build ${{ matrix.display_name }} macOS (x64)
     needs: prepare
-    # Desktop macOS x64 packages are intentionally disabled for nightly builds.
+    # Intel 安装包只由显式手动选择触发，定时 Nightly 保持现有平台集合。
     runs-on: macos-26-intel
-    if: ${{ false }}
+    if: needs.prepare.outputs.manual_only == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -647,6 +663,162 @@ jobs:
           path: |
             dist/macos-x64/*.dmg
             dist/macos-x64/*.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  build-linux:
+    name: Build Floatboat Linux (${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    if: needs.prepare.outputs.manual_only == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            debArch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            debArch: arm64
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject variant version into package.json
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ Floatboat package.json version set to $VERSION"
+
+      - name: Install Linux packaging toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          # MakerDeb 依赖 dpkg/fakeroot；ubuntu-latest 默认镜像不保证 fakeroot 存在。
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fakeroot dpkg binutils
+          dpkg --version | head -1
+          fakeroot --version
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and package Floatboat (Linux ${{ matrix.arch }})
+        # pnpm 会把 `--` 原样传给脚本，forge 随后忽略全部参数并跑 zip/deb/rpm 三个 maker；
+        # --targets 还必须写 maker 名（deb）而不是包名，否则 MakerDeb 配置被静默丢弃。
+        run: pnpm run forge:make:linux:deb --platform linux --arch ${{ matrix.arch }}
+        env:
+          # Vite 打包 renderer/worker 目标会超过 Node 默认 ~4GB heap 上限并 FATAL OOM，
+          # 与 macOS job 用同一个上限；缺这行会在 floatboatWorker 之后的阶段构建失败。
+          NODE_OPTIONS: --max-old-space-size=8192
+          BUILD_OBFUSCATE: "true"
+
+      - name: Collect production Linux artifact
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: Floatboat
+          DEB_ARCH: ${{ matrix.debArch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/linux
+          # MakerDeb 的文件名由 package.json name/version + Debian 架构决定，与 macOS/Windows 的
+          # ARTIFACT_BASE 命名不同；这里只断言"恰好一个 .deb"，再统一改名为发布资产名。
+          # out/make 缺失说明打包步骤本身没产出（例如构建 OOM）；先明确报出来，
+          # 否则 find 的 "No such file or directory" 会盖住真正的失败原因。
+          if [ ! -d out/make ]; then
+            echo "::error::out/make does not exist — packaging did not produce any artifact"
+            exit 1
+          fi
+          count=$(find out/make -type f -name '*.deb' | wc -l | tr -d ' ')
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one .deb, found $count"
+            find out/make -type f -print || true
+            exit 1
+          fi
+          BUILT_DEB=$(find out/make -type f -name '*.deb' -print -quit)
+          RELEASE_NAME="${ARTIFACT_BASE}-${VERSION}-${DEB_ARCH}.deb"
+          cp "$BUILT_DEB" "dist/linux/${RELEASE_NAME}"
+          echo "✅ Floatboat Linux artifact: ${RELEASE_NAME} (built as $(basename "$BUILT_DEB"))"
+
+      - name: Verify Debian package metadata
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: Floatboat
+          DEB_ARCH: ${{ matrix.debArch }}
+        run: |
+          set -euo pipefail
+          DEB="dist/linux/${ARTIFACT_BASE}-${VERSION}-${DEB_ARCH}.deb"
+          # 结构损坏的 .deb 在用户机上才报错代价太高，打包后立即校验可安装性元数据。
+          dpkg-deb --info "$DEB"
+          pkg_version=$(dpkg-deb --field "$DEB" Version)
+          [ "$pkg_version" = "$VERSION" ] || { echo "::error::Debian version mismatch: $pkg_version"; exit 1; }
+          pkg_arch=$(dpkg-deb --field "$DEB" Architecture)
+          if [ "$pkg_arch" != "$DEB_ARCH" ]; then
+            echo "::error::Unexpected Debian architecture: $pkg_arch (expected $DEB_ARCH)"
+            exit 1
+          fi
+          if ! dpkg-deb --contents "$DEB" | grep '\.desktop$' > /dev/null; then
+            echo "::error::Debian package is missing a .desktop entry"
+            exit 1
+          fi
+          # 错架构的二进制在用户机上才会暴露；直接读主可执行文件的 ELF 头确认与包架构一致。
+          # 主二进制固定在 ./usr/lib/<pkg>/<pkg>（即 usr/bin 下符号链接的目标），
+          # 不能取"第一个可执行文件"——那会命中 chrome_crashpad_handler 之类的附属程序。
+          PKG_NAME=$(dpkg-deb --field "$DEB" Package)
+          MAIN_BIN="usr/lib/${PKG_NAME}/${PKG_NAME}"
+          if ! command -v readelf >/dev/null 2>&1; then
+            echo "::error::readelf is required for ELF architecture verification"
+            exit 1
+          fi
+          extract_dir=$(mktemp -d)
+          dpkg-deb --fsys-tarfile "$DEB" > "${extract_dir}/fsys.tar"
+          if tar -xf "${extract_dir}/fsys.tar" -C "$extract_dir" "./${MAIN_BIN}" 2>/dev/null; then
+            elf_arch=$(readelf -h "${extract_dir}/${MAIN_BIN}" | awk -F: '/Machine/ {gsub(/^[ \t]+/, "", $2); print $2}')
+            echo "Main binary (${MAIN_BIN}) ELF machine: ${elf_arch}"
+            case "$DEB_ARCH:$elf_arch" in
+              amd64:*X86-64*) ;;
+              arm64:*AArch64*) ;;
+              *)
+                echo "::error::ELF architecture mismatch: package=$DEB_ARCH binary=$elf_arch"
+                exit 1
+                ;;
+            esac
+          else
+            echo "::error::Main binary not found in package: ./${MAIN_BIN}"
+            exit 1
+          fi
+          rm -rf "$extract_dir"
+          echo "✅ Debian package metadata verified: $(basename "$DEB") ($pkg_arch, ${elf_arch})"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-desktop-linux-${{ matrix.arch }}-floatboat
+          path: |
+            dist/linux/*.deb
           retention-days: 7
           if-no-files-found: error
 
@@ -1188,12 +1360,71 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+  manual-installers:
+    name: Verify selected Nightly installers
+    needs: [prepare, build-macos-x64, build-linux]
+    runs-on: ubuntu-latest
+    if: always() && needs.prepare.result == 'success' && needs.prepare.outputs.manual_only == 'true' && needs.build-macos-x64.result == 'success' && needs.build-linux.result == 'success'
+    steps:
+      - name: Checkout release verification tooling
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Download selected installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nightly-desktop-*
+          path: installers/
+          merge-multiple: true
+
+      - name: Verify selected installer set
+        env:
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: node .github/scripts/verify-nightly-manual-artifacts.cjs installers build-manifest.json
+
+      - name: Upload source and checksum manifest
+        id: manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-installer-manifest
+          path: build-manifest.json
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Write download summary
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          {
+            echo "### Nightly manual installers: $VERSION"
+            echo ""
+            echo "Source commit: $SOURCE_SHA"
+            echo ""
+            echo "Download the three nightly-desktop artifacts and nightly-installer-manifest from this run (retained for 7 days)."
+            echo ""
+            echo "| Platform | Installer |"
+            echo "| --- | --- |"
+            echo "| macOS Intel | Floatboat-$VERSION-x64.dmg |"
+            echo "| Linux amd64 | Floatboat-$VERSION-amd64.deb |"
+            echo "| Linux arm64 | Floatboat-$VERSION-arm64.deb |"
+            echo ""
+            echo "The macOS artifact also includes a ZIP. This manual build does not publish updater feeds, tags, website links or notifications."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   upload:
     name: Publish Nightly
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
     runs-on: ubuntu-latest
     if: |
       always() &&
+      needs.prepare.result == 'success' &&
+      needs.prepare.outputs.manual_only == 'false' &&
       (
         (
           needs.prepare.outputs.package_set == 'launcher' &&
@@ -1596,7 +1827,7 @@ jobs:
     name: Nightly Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, upload]
     runs-on: ubuntu-latest
-    if: always() && needs.prepare.result != 'skipped'
+    if: always() && needs.prepare.result != 'skipped' && !(github.event_name == 'workflow_dispatch' && inputs.platforms == 'macos-x64,linux')
 
     steps:
       - name: Download internal nightly release note

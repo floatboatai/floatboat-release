@@ -158,7 +158,7 @@ test('RC 仅在 release Floatboat 及完整 macOS Windows 构建时发布 intern
 });
 
 
-test('Nightly 只构建 Floatboat macOS arm64 与 Windows x64 应用包', () => {
+test('Nightly 默认只构建 Floatboat macOS arm64 与 Windows x64，x64 仅显式手动启用', () => {
   const workflow = fs.readFileSync(nightlyWorkflowPath, 'utf8');
   const macJob = workflow.slice(workflow.indexOf('  build-macos-arm64:'), workflow.indexOf('  build-macos-x64:'));
   const windowsJob = workflow.slice(workflow.indexOf('  build-windows:'), workflow.indexOf('  build-test-launcher-macos-arm64:'));
@@ -170,7 +170,8 @@ test('Nightly 只构建 Floatboat macOS arm64 与 Windows x64 应用包', () => 
   assert.match(workflow, /platforms=macos,windows/);
   assert.match(verifyStep, /expected 2/);
   assert.doesNotMatch(verifyStep, /DEEPSEEK|DeepSeek/);
-  assert.match(workflow, /build-macos-x64:[\s\S]*if: \$\{\{ false \}\}/);
+  const macX64Job = workflow.slice(workflow.indexOf('  build-macos-x64:'), workflow.indexOf('  build-windows:'));
+  assert.match(macX64Job, /if: .*needs\.prepare\.outputs\.manual_only == 'true'/);
 });
 
 test('RC 强制 Floatboat app 范围并只接受 macOS arm64 与 Windows x64', () => {

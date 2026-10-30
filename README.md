@@ -16,7 +16,7 @@
 - `release.yml` 默认仍通过 `desktop_variant=all` 构建双变体六包。
 - 仅在 DeepSeek 正式版灰度或自动更新验收时，可使用 `desktop_variant=deepseek-agent`：流水线只构建三个 DeepSeek 主安装包和两个 macOS updater ZIP，使用独立 `deepseek-vX.Y.Z` tag，只发布 `deepseek-agent/` S3 前缀，不更新 Floatboat feed、制品或网站下载地址。
 - DeepSeek-only 仅允许 `is_rc=false`、`build_profile=release`、`package_set=app` 和 macOS + Windows 完整平台组合，避免把部分制品误标成正式发布。
-- `nightly.yml` 与 RC 发布只构建 Floatboat：macOS arm64、Windows x64 两个主安装包及 macOS arm64 updater ZIP；不构建 DeepSeek Agent、macOS x64 或 test launcher。
+- `nightly.yml` 的定时/默认发布与 RC 只构建 Floatboat：macOS arm64、Windows x64 两个主安装包及 macOS arm64 updater ZIP；不构建 DeepSeek Agent 或 test launcher。Nightly 另支持下述手动 Linux + macOS x64 安装包。
 - 正式 stable 发布仍要求两个变体的 macOS arm64、macOS x64、Windows x64 全部成功；Nightly/RC 则要求 Floatboat macOS arm64 与 Windows x64 同时成功，缺少任一平台都不创建 Release 或写内部 feed。
 - 正式版分别生成 Floatboat 与 DeepSeek Agent 自动更新元数据。DeepSeek RC 与 Nightly 只提供手动下载，不写入自动更新 feed。
 - Floatboat 正式制品与 `latest*.yml` 上传到 S3 根路径；DeepSeek 正式制品与 `deepseek-agent*.yml` 上传到 `deepseek-agent/` 前缀。
@@ -24,6 +24,18 @@
   核对对象；CloudFront 失效完成后还会从公网回读两个 feed 及 HEAD 全部十个更新制品，任一不一致都会阻止发布任务成功。
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
+
+## 手动 Nightly：Linux 与 macOS Intel
+
+在 `main` 的 `Nightly Build` 选择 `platforms=macos-x64,linux`、`build_profile=release`、
+`package_set=app`、`promote_merged_bugs=false`，`ref` 指定已推送的源码提交（默认 `dev`）。
+该组合原生构建 macOS x64 DMG/ZIP，以及 Linux amd64、arm64 DEB；macOS 保留签名、公证和包内运行门禁，
+Linux 校验包内版本、架构、桌面入口和主程序 ELF 架构。
+
+全部构建成功后，`Verify selected Nightly installers` 校验四个文件的完整集合，生成
+`nightly-installer-manifest`，其中记录源码 SHA、版本、大小和每个文件的 SHA256。
+从 Actions 运行页面下载三个 `nightly-desktop-*` 附件及清单，附件保留 7 天。
+此组合只交付手动安装包，不创建 Release/tag，不写自动更新 feed、官网地址或飞书通知；定时 Nightly 仍沿用现有发布流程。
 
 ## macOS 签名后运行门禁
 
