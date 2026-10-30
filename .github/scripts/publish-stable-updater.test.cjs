@@ -165,17 +165,12 @@ function createFixture() {
     `Floatboat-${floatboatVersion}-amd64.deb`,
     `Floatboat-${floatboatVersion}-arm64.deb`,
   ];
-  const deepseekLinuxArtifacts = [
-    `Floatboat-DeepSeek-Agent-${deepseekVersion}-amd64.deb`,
-    `Floatboat-DeepSeek-Agent-${deepseekVersion}-arm64.deb`,
-  ];
   const allArtifacts = [
     ...floatboatMacArtifacts,
     floatboatWindowsArtifact,
     ...floatboatLinuxArtifacts,
     ...deepseekMacArtifacts,
     deepseekWindowsArtifact,
-    ...deepseekLinuxArtifacts,
   ];
   for (const artifactName of allArtifacts) {
     fs.writeFileSync(path.join(artifactDirectory, artifactName), `content:${artifactName}`);
@@ -337,7 +332,7 @@ test('依次发布十个制品和四份元数据，并完成 CDN 回读', (conte
   assert.match(calls.join('\n'), /aws cloudfront wait invalidation-completed/);
 });
 
-test('启用 Linux DEB 时先上传四个 deb，并通过 S3 与 CDN 校验', (context) => {
+test('启用 Linux DEB 时只上传 Floatboat amd64 与 arm64，并通过 S3 与 CDN 校验', (context) => {
   const fixture = createFixture();
   context.after(() => fs.rmSync(fixture.root, { recursive: true, force: true }));
 
@@ -348,15 +343,14 @@ test('启用 Linux DEB 时先上传四个 deb，并通过 S3 与 CDN 校验', (c
   for (const objectPath of [
     `Floatboat-${fixture.floatboatVersion}-amd64.deb`,
     `Floatboat-${fixture.floatboatVersion}-arm64.deb`,
-    path.join('deepseek-agent', `Floatboat-DeepSeek-Agent-${fixture.deepseekVersion}-amd64.deb`),
-    path.join('deepseek-agent', `Floatboat-DeepSeek-Agent-${fixture.deepseekVersion}-arm64.deb`),
   ]) {
     assert.ok(fs.existsSync(path.join(releaseRoot, objectPath)), `缺少 Linux S3 对象：${objectPath}`);
   }
 
   const calls = fs.readFileSync(fixture.callLog, 'utf8');
-  assert.equal((calls.match(/\.deb s3:\/\/aoe-desktop-releases\//g) || []).length, 4);
-  assert.equal((calls.match(/--head[^\n]+\.deb/g) || []).length, 4);
+  assert.equal((calls.match(/\.deb s3:\/\/aoe-desktop-releases\//g) || []).length, 2);
+  assert.equal((calls.match(/--head[^\n]+\.deb/g) || []).length, 2);
+  assert.doesNotMatch(calls, /Floatboat-DeepSeek-Agent-.*\.deb/);
 });
 
 test('DeepSeek-only 只发布独立前缀下的五个制品和两份元数据', (context) => {
