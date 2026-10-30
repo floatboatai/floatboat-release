@@ -120,16 +120,6 @@ append_deepseek_release() {
     "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip"
     "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
   )
-  if [ "$LINUX_DEB_ENABLED" = "true" ]; then
-    artifact_files+=(
-      "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-amd64.deb"
-      "${ARTIFACT_DIR}/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.deb"
-    )
-    artifact_keys+=(
-      "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-amd64.deb"
-      "deepseek-agent/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.deb"
-    )
-  fi
   metadata_files+=(
     "${METADATA_ROOT}/deepseek-agent/deepseek-agent-mac.yml"
     "${METADATA_ROOT}/deepseek-agent/deepseek-agent.yml"

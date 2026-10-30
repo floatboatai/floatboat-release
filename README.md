@@ -25,6 +25,19 @@
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
 
+## Linux 双通道打包
+
+当 `release.yml` 的 `platforms` 包含 `linux` 时，`linux_package` 默认使用 `deb-and-uos`，分别构建四个 Floatboat 安装包：
+
+| 包类型 | amd64 | arm64 | 用途 |
+| --- | --- | --- | --- |
+| 普通 Linux DEB | `Floatboat-<version>-amd64.deb` | `Floatboat-<version>-arm64.deb` | 通用 Debian 系发行与手动下载 |
+| UOS 送审 DEB | `Floatboat-<version>-amd64.deb` | `Floatboat-<version>-arm64.deb` | 统信应用商店送审，固定使用 `control.tar.gz` 与 `data.tar.gz` |
+
+两套包使用独立的 Actions artifact 名称；正式完整发布时，普通 Linux 包进入 CDN 根路径，UOS 送审包进入 `/uos/` 路径并单独更新官网 UOS 下载地址。仅运行 Linux 平台的正式 release-profile 时，普通包保留为 Actions artifact，UOS 包在普通与 UOS 两组双架构构建都成功后发布。
+
+Linux 仅构建 Floatboat，不构建 Floatboat DeepSeek Agent。未在 `platforms` 中选择 `linux` 时，现有 macOS 与 Windows 流程不受影响。
+
 ## macOS 签名后运行门禁
 
 Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使用源码仓库的
