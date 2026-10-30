@@ -130,13 +130,27 @@ jobs:
           INPUT_IS_RC: ${{ inputs.is_rc }}
           INPUT_BUILD_PROFILE: ${{ inputs.build_profile }}
           INPUT_PLATFORMS: ${{ inputs.platforms }}
+          INPUT_LINUX_PACKAGE: ${{ inputs.linux_package }}
           INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
         run: |
           set -euo pipefail
 
           if [ "$INPUT_IS_RC" = "true" ]; then
             [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::RC publishing requires desktop_variant=floatboat"; exit 1; }
-            [ "$INPUT_PLATFORMS" = "macos,windows" ] || { echo "::error::RC publishing requires exactly macos,windows"; exit 1; }
+            case "$INPUT_PLATFORMS" in
+              "macos,windows") ;;
+              "linux")
+                [ "$INPUT_LINUX_PACKAGE" = "deb-and-uos" ] || {
+                  echo "::error::Linux-only RC artifact validation requires linux_package=deb-and-uos"
+                  exit 1
+                }
+                echo "::notice::Linux-only RC builds Actions artifacts without publishing CDN or installer URLs."
+                ;;
+              *)
+                echo "::error::RC publishing requires exactly macos,windows; Linux artifact validation requires exactly linux with linux_package=deb-and-uos"
+                exit 1
+                ;;
+            esac
           fi
 
           case "$INPUT_DESKTOP_VARIANT" in
