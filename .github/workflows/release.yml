@@ -135,7 +135,11 @@ jobs:
 
           if [ "$INPUT_IS_RC" = "true" ]; then
             [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::RC publishing requires desktop_variant=floatboat"; exit 1; }
-            [ "$INPUT_PLATFORMS" = "macos,windows" ] || { echo "::error::RC publishing requires exactly macos,windows"; exit 1; }
+            # Windows 定向验收只保留签名安装器 artifact；完整发布仍由 upload 的双平台门禁保护。
+            case "$INPUT_PLATFORMS" in
+              "macos,windows" | "windows") ;;
+              *) echo "::error::RC builds require macos,windows or windows"; exit 1 ;;
+            esac
           fi
 
           case "$INPUT_DESKTOP_VARIANT" in
@@ -3141,7 +3145,7 @@ jobs:
     name: Release Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload]
     runs-on: ubuntu-latest
-    if: always() && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
+    if: always() && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux') && !(inputs.is_rc == true && inputs.platforms == 'windows')
 
     steps:
       - name: Download changelog

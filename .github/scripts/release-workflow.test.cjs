@@ -173,7 +173,7 @@ test('Nightly 只构建 Floatboat macOS arm64 与 Windows x64 应用包', () => 
   assert.match(workflow, /build-macos-x64:[\s\S]*if: \$\{\{ false \}\}/);
 });
 
-test('RC 强制 Floatboat app 范围并只接受 macOS arm64 与 Windows x64', () => {
+test('RC 强制 Floatboat app 范围并允许 Windows x64 定向验收', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const scopeStep = readNamedStep(workflow, 'Resolve release scope');
   const packageStep = readNamedStep(workflow, 'Resolve package set');
@@ -181,11 +181,13 @@ test('RC 强制 Floatboat app 范围并只接受 macOS arm64 与 Windows x64', (
   const macX64Job = workflow.slice(workflow.indexOf('  build-macos-x64:'), workflow.indexOf('  build-windows:'));
 
   assert.match(scopeStep, /RC publishing requires desktop_variant=floatboat/);
-  assert.match(scopeStep, /RC publishing requires exactly macos,windows/);
+  assert.match(scopeStep, /"macos,windows" \| "windows"\) ;;/);
+  assert.match(scopeStep, /RC builds require macos,windows or windows/);
   assert.match(packageStep, /RC publishing requires package_set=app/);
   assert.match(macX64Job, /inputs\.is_rc == false/);
   assert.match(publishStep, /desktop_variant == 'floatboat'/);
   assert.doesNotMatch(publishStep, /desktop_variant == 'all'/);
+  assert.match(workflow, /notify:[\s\S]*if: always\(\)[^\n]*!\(inputs\.is_rc == true && inputs\.platforms == 'windows'\)/);
 });
 
 test('Floatboat-only 飞书通知只列 Floatboat 制品并隐藏 DeepSeek 版本', () => {

@@ -18,6 +18,7 @@
 - DeepSeek-only 仅允许 `is_rc=false`、`build_profile=release`、`package_set=app` 和 macOS + Windows 完整平台组合，避免把部分制品误标成正式发布。
 - `nightly.yml` 与 RC 发布只构建 Floatboat：macOS arm64、Windows x64 两个主安装包及 macOS arm64 updater ZIP；不构建 DeepSeek Agent、macOS x64 或 test launcher。
 - 正式 stable 发布仍要求两个变体的 macOS arm64、macOS x64、Windows x64 全部成功；Nightly/RC 则要求 Floatboat macOS arm64 与 Windows x64 同时成功，缺少任一平台都不创建 Release 或写内部 feed。
+- RC 定向 Windows 验收可传 `platforms=windows`、`desktop_variant=floatboat`、`package_set=app`、`build_profile=release`；只构建并验证签名 Windows x64 安装器，保留 3 天 Actions artifact，不创建 GitHub Release、不更新 feed，也不发送飞书发布通知。
 - 正式版分别生成 Floatboat 与 DeepSeek Agent 自动更新元数据。DeepSeek RC 与 Nightly 只提供手动下载，不写入自动更新 feed。
 - Floatboat 正式制品与 `latest*.yml` 上传到 S3 根路径；DeepSeek 正式制品与 `deepseek-agent*.yml` 上传到 `deepseek-agent/` 前缀。
 - 正式版发布会先校验四份 updater 元数据中的版本、文件集合、大小和 SHA512，再上传并通过 S3 `head-object`
