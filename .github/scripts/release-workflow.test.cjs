@@ -38,7 +38,7 @@ test('只有正式 release 会发布并验证选定范围的 stable feed', () =>
   assert.match(publishStep, /DESKTOP_VARIANT: \$\{\{ needs\.prepare\.outputs\.desktop_variant \}\}/);
   assert.match(publishStep, /FLOATBOAT_VERSION: \$\{\{ needs\.prepare\.outputs\.floatboat_version \}\}/);
   assert.match(publishStep, /DEEPSEEK_VERSION: \$\{\{ needs\.prepare\.outputs\.deepseek_version \}\}/);
-  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && inputs\.linux_package == 'deb' \}\}/);
+  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && \(inputs\.linux_package == 'deb' \|\| inputs\.linux_package == 'deb-and-uos'\) \}\}/);
   assert.match(publishStep, /bash release-tooling\/\.github\/scripts\/publish-stable-updater\.sh/);
 });
 
@@ -52,6 +52,8 @@ test('DeepSeek-only 使用独立矩阵与 release tag，并跳过 Floatboat 网�
   assert.match(scopeStep, /release_tag="deepseek-v\$\{INPUT_VERSION\}"/);
   assert.match(scopeStep, /desktop_matrix='\{"include":\[\{"variant":"deepseek-agent"/);
   assert.match(scopeStep, /DeepSeek-only publishing is restricted to official release-profile builds/);
+  assert.match(scopeStep, /"macos,windows"\) ;;/);
+  assert.match(scopeStep, /DeepSeek-only official publishing does not support Linux/);
   assert.match(workflow, /matrix: \$\{\{ fromJSON\(needs\.prepare\.outputs\.desktop_matrix\) \}\}/);
   assert.match(websiteStep, /needs\.prepare\.outputs\.desktop_variant == 'all'/);
   assert.match(githubReleaseStep, /tag_name: \$\{\{ needs\.prepare\.outputs\.release_tag \}\}/);
@@ -102,44 +104,84 @@ test('macOS 发布打包会在外部签名或公证瞬时失败时进行三轮�
   }
 });
 
-test('通用 Linux 只用 deb maker 打包，且不向 pnpm 脚本透传 --', () => {
+test('通用 Linux 固定只构建 Floatboat amd64 与 arm64', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
-  const step = readNamedStep(workflow, 'Build and package ${{ matrix.display_name }} (Linux ${{ matrix.arch }})');
-  assert.match(step, /run: pnpm run forge:make:linux:deb --platform linux --arch \$\{\{ matrix\.arch \}\}\n/);
-  assert.doesNotMatch(step, /run: pnpm run [^\n]* -- /);
-  assert.doesNotMatch(step, /@electron-forge\/maker-/);
+  const scopeStep = readNamedStep(workflow, 'Resolve release scope');
+  const job = readNamedJob(workflow, 'build-linux');
+  const buildStep = readNamedStep(job, 'Build and package Floatboat (Linux ${{ matrix.arch }})');
+  const matrixMatch = /linux_matrix='([^']+)'/.exec(scopeStep);
+
+  assert.ok(matrixMatch, 'Resolve release scope 必须声明独立的 Floatboat Linux matrix');
+  assert.deepEqual(JSON.parse(matrixMatch[1]).include, [
+    { variant: 'floatboat', display_name: 'Floatboat', artifact_base: 'Floatboat', app_name: 'Floatboat', arch: 'x64', debArch: 'amd64', runner: 'ubuntu-latest' },
+    { variant: 'floatboat', display_name: 'Floatboat', artifact_base: 'Floatboat', app_name: 'Floatboat', arch: 'arm64', debArch: 'arm64', runner: 'ubuntu-24.04-arm' },
+  ]);
+  assert.match(job, /needs\.prepare\.outputs\.desktop_variant != 'deepseek-agent'/);
+  assert.match(job, /inputs\.linux_package == 'deb-and-uos'/);
+  assert.doesNotMatch(job, /Floatboat-DeepSeek|deepseek_version|matrix\.variant ==/);
+  assert.match(buildStep, /run: pnpm run forge:make:linux:deb --platform linux --arch \$\{\{ matrix\.arch \}\}\n/);
+  assert.doesNotMatch(buildStep, /run: pnpm run [^\n]* -- /);
+  assert.doesNotMatch(buildStep, /@electron-forge\/maker-/);
 });
 
-test('正式通用 Linux deb 会随 stable 制品上传 S3', () => {
+test('正式通用 Linux 双架构 deb 会随 stable 制品上传 S3', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const publishStep = readNamedStep(workflow, 'Publish and verify stable updater feeds');
 
-  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && inputs\.linux_package == 'deb' \}\}/);
+  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && \(inputs\.linux_package == 'deb' \|\| inputs\.linux_package == 'deb-and-uos'\) \}\}/);
 });
 
-test('正式通用 Linux deb 会同步到官网 UOS fallback 下载地址', () => {
+test('通用 Linux 不覆盖官网 UOS 专包下载地址', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const websiteStep = readNamedStep(workflow, 'Sync Floatboat website installer URLs');
 
-  assert.match(websiteStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && inputs\.linux_package == 'deb' \}\}/);
-  assert.match(websiteStep, /Floatboat-\$\{VERSION\}-amd64\.deb/);
-  assert.match(websiteStep, /Floatboat-\$\{VERSION\}-arm64\.deb/);
-  assert.match(websiteStep, /DOWNLOAD_UOS_AMD64_INSTALLER_URL: \$linux_amd64/);
-  assert.match(websiteStep, /DOWNLOAD_UOS_ARM64_INSTALLER_URL: \$linux_arm64/);
-  assert.match(websiteStep, /\.data\.DOWNLOAD_UOS_AMD64_INSTALLER_URL == \$linux_amd64/);
-  assert.match(websiteStep, /\.data\.DOWNLOAD_UOS_ARM64_INSTALLER_URL == \$linux_arm64/);
+  assert.doesNotMatch(websiteStep, /LINUX_DEB_ENABLED|DOWNLOAD_UOS_|Floatboat-\$\{VERSION\}-(?:amd64|arm64)\.deb/);
 });
 
-test('正式 UOS deb 会上传 S3 并同步后端 UOS 下载地址', () => {
+test('UOS 双架构送审包独立构建、强制 gzip 并同步专用下载地址', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const job = readNamedJob(workflow, 'build-linux-uos');
+  const verifyStep = readNamedStep(job, 'Verify UOS package metadata and layout');
+  const uploadStep = readNamedStep(job, 'Upload UOS artifacts');
+  const publishJob = readNamedJob(workflow, 'publish-linux-uos');
   const uosStep = readNamedStep(workflow, 'Publish UOS packages and sync installer URLs');
 
-  assert.match(workflow, /publish-linux-uos:[\s\S]*inputs\.linux_package == 'uos-floatboat'/);
+  assert.match(workflow, /linux_package:[\s\S]*default: "deb-and-uos"[\s\S]*- "deb-and-uos"/);
+  assert.match(job, /inputs\.linux_package == 'deb-and-uos'/);
+  assert.match(job, /inputs\.desktop_variant != 'deepseek-agent'/);
+  assert.match(job, /- arch: x64[\s\S]*debArch: amd64[\s\S]*- arch: arm64[\s\S]*debArch: arm64/);
+  assert.match(verifyStep, /expected_members=\$'debian-binary\\ncontrol\.tar\.gz\\ndata\.tar\.gz'/);
+  assert.match(uploadStep, /name: uos-linux-\$\{\{ matrix\.arch \}\}/);
+  assert.match(publishJob, /needs: \[prepare, build-linux, build-linux-uos, upload\]/);
+  assert.match(publishJob, /always\(\)/);
+  assert.match(publishJob, /inputs\.linux_package == 'deb-and-uos'/);
+  assert.match(publishJob, /needs\.upload\.result == 'success'/);
+  assert.match(publishJob, /inputs\.platforms == 'linux'/);
+  assert.match(publishJob, /needs\.build-linux\.result == 'success'/);
+  assert.match(publishJob, /pattern: uos-linux-\*/);
   assert.match(uosStep, /s3:\/\/\$\{RELEASE_BUCKET\}\/\$\{key\}/);
   assert.match(uosStep, /DOWNLOAD_UOS_AMD64_INSTALLER_URL: \$amd64/);
   assert.match(uosStep, /DOWNLOAD_UOS_ARM64_INSTALLER_URL: \$arm64/);
   assert.match(uosStep, /\.data\.DOWNLOAD_UOS_AMD64_INSTALLER_URL == \$amd64/);
   assert.match(uosStep, /\.data\.DOWNLOAD_UOS_ARM64_INSTALLER_URL == \$arm64/);
+});
+
+test('制品汇总只接收两个普通 Floatboat deb，并把 UOS 作为独立门禁', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const uploadJob = readNamedJob(workflow, 'upload');
+  const verifyStep = readNamedStep(uploadJob, 'Verify required artifacts');
+  const notifyStep = readNamedStep(workflow, 'Send Feishu notification');
+
+  assert.match(uploadJob, /needs\.build-linux\.result == 'success'/);
+  assert.match(uploadJob, /needs\.build-linux-uos\.result == 'success'/);
+  assert.match(verifyStep, /Floatboat-\$\{FLOATBOAT_VERSION\}-\$\{deb_arch\}\.deb/);
+  assert.match(verifyStep, /expected_deb=2/);
+  assert.doesNotMatch(verifyStep, /Floatboat-DeepSeek-Agent-\$\{DEEPSEEK_VERSION\}-\$\{deb_arch\}\.deb/);
+  assert.doesNotMatch(notifyStep, /Floatboat-DeepSeek-Agent-\{deepseek_version\}-\{deb_arch\}\.deb/);
+  assert.match(workflow, /notify:[\s\S]*needs: \[[^\]]*publish-linux-uos[^\]]*\]/);
+  assert.match(notifyStep, /UOS 下载地址发布：\{icon\(uos_publish\)\} \{uos_publish\}/);
+  assert.match(notifyStep, /linux_deb_names[\s\S]*upload == "success"/);
+  assert.match(notifyStep, /uos_deb_names[\s\S]*uos_publish == "success"/);
 });
 
 test('Nightly release-profile 完整应用发布 internal/nightly 并自动接管轨道', () => {
@@ -182,7 +224,7 @@ test('Nightly 只构建 Floatboat macOS arm64 与 Windows x64 应用包', () => 
   assert.match(workflow, /build-macos-x64:[\s\S]*if: \$\{\{ false \}\}/);
 });
 
-test('RC 强制 Floatboat app 范围并只接受 macOS arm64 与 Windows x64', () => {
+test('RC 强制 Floatboat app 范围，并允许 Linux 双包只产 Actions 制品', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const scopeStep = readNamedStep(workflow, 'Resolve release scope');
   const packageStep = readNamedStep(workflow, 'Resolve package set');
@@ -190,11 +232,14 @@ test('RC 强制 Floatboat app 范围并只接受 macOS arm64 与 Windows x64', (
   const macX64Job = workflow.slice(workflow.indexOf('  build-macos-x64:'), workflow.indexOf('  build-windows:'));
 
   assert.match(scopeStep, /RC publishing requires desktop_variant=floatboat/);
-  assert.match(scopeStep, /RC publishing requires exactly macos,windows/);
+  assert.match(scopeStep, /"macos,windows"\) ;;/);
+  assert.match(scopeStep, /"linux"\)[\s\S]*INPUT_LINUX_PACKAGE[\s\S]*deb-and-uos/);
+  assert.match(scopeStep, /Linux-only RC builds Actions artifacts without publishing CDN or installer URLs/);
   assert.match(packageStep, /RC publishing requires package_set=app/);
   assert.match(macX64Job, /inputs\.is_rc == false/);
   assert.match(publishStep, /desktop_variant == 'floatboat'/);
   assert.doesNotMatch(publishStep, /desktop_variant == 'all'/);
+  assert.match(workflow, /publish-linux-uos:[\s\S]*inputs\.is_rc == false/);
 });
 
 test('Floatboat-only 飞书通知只列 Floatboat 制品并隐藏 DeepSeek 版本', () => {
