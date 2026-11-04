@@ -54,10 +54,14 @@ LangString FLOATBOAT_UPGRADE_ENV_RESTORE_FAILED 2052 "安装器无法恢复临�
 ; 不让旧卸载器递归遍历自己的临时目录；已注册目录和本次目标都需排除。
 !macro FloatboatCheckUpgradeTempOutside Directory
   ${If} "${Directory}" != ""
-    ClearErrors
-    GetFullPathName $8 "${Directory}"
-    ${If} ${Errors}
-      StrCpy $FloatboatUpgradeTempError 87
+    ; NSIS 的同名指令要求末级目录存在；升级目标在首次迁移时可能尚未创建。
+    System::Call 'kernel32::GetFullPathNameW(w "${Directory}", i ${NSIS_MAX_STRLEN}, w .r8, p 0) i.r0 ?e'
+    Pop $2
+    ${If} $0 == 0
+      StrCpy $FloatboatUpgradeTempError $2
+      Goto floatboat_upgrade_temp_failed
+    ${ElseIf} $0 >= ${NSIS_MAX_STRLEN}
+      StrCpy $FloatboatUpgradeTempError 206
       Goto floatboat_upgrade_temp_failed
     ${EndIf}
     System::Call 'shlwapi::PathIsPrefixW(w r8, w r5) i.r0'
