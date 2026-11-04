@@ -17,6 +17,7 @@ $script:Checks = [Collections.Generic.List[object]]::new()
 $script:ReportResults = @{}
 $taskName = "fbqa-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
 $InstallDirectory = 'C:\Program Files\Floatboat'
+$DefaultTemp = [IO.Path]::GetTempPath()
 $ShortTemp = if ($Scenario -eq 'apostrophe-temp') { "C:\Floatboat's QA\$taskName-temp" } else { "C:\$taskName-temp" }
 $LongTemp = Join-Path $ShortTemp ('segment-' + ('x' * 70))
 $LongTemp = Join-Path $LongTemp ('segment-' + ('y' * 70))
@@ -233,11 +234,11 @@ public static class InstallerDiagnosticWindows {
     if ($signature.Status -ne 'Valid') { throw "Invalid Authenticode signature: $path ($($signature.Status))" }
     [ordered]@{ path = $path; size = $file.Length; sha256 = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash; signatureStatus = [string]$signature.Status; signer = $signature.SignerCertificate.Subject; productVersion = $file.VersionInfo.ProductVersion; fileVersion = $file.VersionInfo.FileVersion }
   }
-  Write-Json (Join-Path $OutputDirectory 'environment.json') @{ scenario = $Scenario; installDirectory = $InstallDirectory; shortTemp = $ShortTemp; longTemp = $LongTemp; os = [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString(); drives = @(Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID, DriveType, FileSystem, Size, FreeSpace); longPathsEnabled = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem').LongPathsEnabled; installers = @($installerInfo) }
+  Write-Json (Join-Path $OutputDirectory 'environment.json') @{ scenario = $Scenario; installDirectory = $InstallDirectory; defaultTemp = $DefaultTemp; shortTemp = $ShortTemp; longTemp = $LongTemp; os = [Environment]::OSVersion.VersionString; powershell = $PSVersionTable.PSVersion.ToString(); drives = @(Get-CimInstance Win32_LogicalDisk | Select-Object DeviceID, DriveType, FileSystem, Size, FreeSpace); longPathsEnabled = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem').LongPathsEnabled; installers = @($installerInfo) }
   Require-Passed (Invoke-Installer '01-rc4-clean' $InstallerRC4 '0.6.3-rc.4' $ShortTemp)
   Save-Diagnostics '02-unlocked-control'
   $controlReport = $script:ReportResults['02-unlocked-control']
-  $controlFailures = if ($controlReport) { @($controlReport.installations | ForEach-Object { $_.failures }) } else { @() }
+  $controlFailures = @(if ($controlReport) { $controlReport.installations | ForEach-Object { $_.failures } })
   Add-Check 'report-unlocked-control' ($controlReport -and @($controlReport.installations).Count -eq 1 -and $controlFailures.Count -eq 0 -and @($controlReport.installations | Where-Object { -not $_.probeSummary.complete }).Count -eq 0) @{ failureCount = $controlFailures.Count }
 
   if ($Scenario -eq 'external-lock') {
@@ -264,7 +265,7 @@ try {
     if (-not (Test-Path -LiteralPath $readyFile)) { throw 'External lock process did not acquire the intended file.' }
     Save-Diagnostics '03-external-lock-held'
     $lockReport = $script:ReportResults['03-external-lock-held']
-    $matchingLock = if ($lockReport) { @($lockReport.installations | ForEach-Object { $_.failures } | Where-Object { $_.path -eq $lockedFile -and $_.win32ErrorCode -eq 32 }) } else { @() }
+    $matchingLock = @(if ($lockReport) { $lockReport.installations | ForEach-Object { $_.failures } | Where-Object { $_.path -eq $lockedFile -and $_.win32ErrorCode -eq 32 } })
     Add-Check 'report-identifies-external-file-lock' ($matchingLock.Count -gt 0) @{ matches = $matchingLock }
     $lockedResult = Invoke-Installer '04-rc4-to-rc5-external-lock' $InstallerRC5 '0.6.3-rc.5' $ShortTemp
     # 刻画结果不预设必须失败；若安装器处理成功，同样保留实际证据。
@@ -273,7 +274,7 @@ try {
     if (-not $lockProcess.WaitForExit(10000)) { throw 'Owned lock process failed to release its handle.' }
     Save-Diagnostics '05-external-lock-released'
     $releasedReport = $script:ReportResults['05-external-lock-released']
-    $remainingLock = if ($releasedReport) { @($releasedReport.installations | ForEach-Object { $_.failures } | Where-Object { $_.path -eq $lockedFile -and $_.win32ErrorCode -eq 32 }) } else { @() }
+    $remainingLock = @(if ($releasedReport) { $releasedReport.installations | ForEach-Object { $_.failures } | Where-Object { $_.path -eq $lockedFile -and $_.win32ErrorCode -eq 32 } })
     Add-Check 'report-clears-released-file-lock' ($releasedReport -and $remainingLock.Count -eq 0) @{ remainingLocks = $remainingLock.Count }
     Require-Passed (Invoke-Installer '06-rc5-retry-without-lock' $InstallerRC5 '0.6.3-rc.5' $ShortTemp)
   } elseif ($Scenario -eq 'long-temp') {
@@ -284,6 +285,19 @@ try {
     $longResult = Invoke-Installer '03-rc4-to-rc5-long-temp' $InstallerRC5 '0.6.3-rc.5' $LongTemp
     Add-Check 'long-temp-result-recorded' (-not $longResult.timedOut) @{ exitCode = $longResult.exitCode; upgradePassed = $longResult.passed }
     Require-Passed (Invoke-Installer '04-rc5-retry-short-temp' $InstallerRC5 '0.6.3-rc.5' $ShortTemp)
+  } elseif ($Scenario -eq 'baseline') {
+    $comparisons = @(
+      @{ label = '03-rc4-same-version-default-temp'; installer = $InstallerRC4; version = '0.6.3-rc.4' },
+      @{ label = '04-rc4-to-rc5-default-temp'; installer = $InstallerRC5; version = '0.6.3-rc.5' },
+      @{ label = '05-rc5-same-version-default-temp'; installer = $InstallerRC5; version = '0.6.3-rc.5' }
+    )
+    foreach ($comparison in $comparisons) {
+      $result = Invoke-Installer $comparison.label $comparison.installer $comparison.version $DefaultTemp
+      Add-Check ($comparison.label + '-recorded') (-not $result.timedOut) @{ exitCode = $result.exitCode; upgradePassed = $result.passed }
+      if (-not $result.passed) {
+        Require-Passed (Invoke-Installer ($comparison.label + '-short-temp-retry') $comparison.installer $comparison.version $ShortTemp)
+      }
+    }
   } else {
     Require-Passed (Invoke-Installer '03-rc4-same-version' $InstallerRC4 '0.6.3-rc.4' $ShortTemp)
     Require-Passed (Invoke-Installer '04-rc4-to-rc5' $InstallerRC5 '0.6.3-rc.5' $ShortTemp)
