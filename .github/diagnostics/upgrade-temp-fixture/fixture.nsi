@@ -8,16 +8,24 @@ SilentInstall silent
 !define INSTALL_MODE_PER_ALL_USERS
 !define INSTALL_REGISTRY_KEY "${FIXTURE_INSTALL_KEY}"
 !define UNINSTALL_REGISTRY_KEY "${FIXTURE_UNINSTALL_KEY}"
-!include "${FIXTURE_HELPER}"
-LoadLanguageFile "${NSISDIR}\Contrib\Language files\English.nlf"
-LoadLanguageFile "${NSISDIR}\Contrib\Language files\SimpChinese.nlf"
 
 Var FixtureMode
 Var FixtureOutput
 Var FixtureChildScript
 Var FixtureLog
+!ifdef FIXTURE_INSTRUMENTED
+Var FixtureTraceLog
+!endif
 Var FixtureCreatedPath
 Var FixtureFailure
+
+!macro FixtureTrace Phase
+  FileWriteUTF16LE $FixtureTraceLog "phase=${Phase}; error=$FloatboatUpgradeTempError; path=$FloatboatUpgradeTempPath; active=$FloatboatUpgradeTempActive; r0=$0; r1=$1; r2=$2; r3=$3; r4=$4; r5=$5; r6=$6; r7=$7; r8=$8; r9=$9$\r$\n"
+!macroend
+
+!include "${FIXTURE_HELPER}"
+LoadLanguageFile "${NSISDIR}\Contrib\Language files\English.nlf"
+LoadLanguageFile "${NSISDIR}\Contrib\Language files\SimpChinese.nlf"
 
 !macro FixtureSetRegisters
   StrCpy $0 "fixture-register-0"
@@ -75,6 +83,13 @@ Section
     SetErrorLevel 100
     Quit
   ${EndIf}
+  !ifdef FIXTURE_INSTRUMENTED
+    FileOpen $FixtureTraceLog "$FixtureOutput\trace.txt" w
+    ${If} ${Errors}
+      SetErrorLevel 102
+      Quit
+    ${EndIf}
+  !endif
   FileWriteUTF16LE $FixtureLog "mode=$FixtureMode$\r$\n"
   !insertmacro FixtureWriteEnvironment "TMP" "original_tmp"
   !insertmacro FixtureWriteEnvironment "TEMP" "original_temp"

@@ -1,7 +1,8 @@
 param(
   [Parameter(Mandatory = $true)][string] $HelperPath,
   [Parameter(Mandatory = $true)][string] $NsisRoot,
-  [Parameter(Mandatory = $true)][string] $OutputDirectory
+  [Parameter(Mandatory = $true)][string] $OutputDirectory,
+  [switch] $InstrumentHelper
 )
 $ErrorActionPreference = 'Stop'
 $helper = (Resolve-Path -LiteralPath $HelperPath).Path
@@ -44,12 +45,27 @@ try {
   [Environment]::SetEnvironmentVariable('NSISDIR', $nsis, 'Process')
   $compiler = Join-Path $nsis 'makensis.exe'
   if (-not (Test-Path -LiteralPath $compiler)) { $compiler = Join-Path $nsis 'Bin\makensis.exe' }
+  $compiledHelper = $helper
+  if ($InstrumentHelper) {
+    $instrumentedLines = New-Object 'System.Collections.Generic.List[string]'
+    $lineNumber = 0
+    foreach ($line in [IO.File]::ReadAllLines($helper)) {
+      $lineNumber++
+      $instrumentedLines.Add($line)
+      if ($line -match '^\s*System::Call ' -or $line -match '^\s*floatboat_upgrade_temp_(failed|restore_done):') {
+        $instrumentedLines.Add('!insertmacro FixtureTrace "after-source-line-' + $lineNumber + '"')
+      }
+    }
+    $compiledHelper = Join-Path $outputRoot 'instrumented-helper.nsh'
+    [IO.File]::WriteAllLines($compiledHelper, $instrumentedLines.ToArray(), (New-Object Text.UTF8Encoding($false)))
+  }
   $arguments = @(
     '/WX', '/INPUTCHARSET', 'UTF8', '/V3',
-    "/DFIXTURE_OUT=$fixtureExecutable", "/DFIXTURE_HELPER=$helper",
+    "/DFIXTURE_OUT=$fixtureExecutable", "/DFIXTURE_HELPER=$compiledHelper",
     "/DFIXTURE_INSTALL_KEY=$installKey", "/DFIXTURE_UNINSTALL_KEY=$uninstallKey",
     (Join-Path $PSScriptRoot 'fixture.nsi')
   )
+  if ($InstrumentHelper) { $arguments = @('/DFIXTURE_INSTRUMENTED') + $arguments }
   $compileLog = & $compiler @arguments 2>&1
   $compileExit = $LASTEXITCODE
   $compileLog | Out-String | Set-Content -LiteralPath (Join-Path $outputRoot 'compile.log') -Encoding UTF8
@@ -165,6 +181,7 @@ finally {
   }
   [ordered]@{
     helperSha256 = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash
+    instrumented = [bool]$InstrumentHelper
     runFailure = $runFailure
     cases = @($results.ToArray())
     cleanupFailures = @($cleanupFailures.ToArray())

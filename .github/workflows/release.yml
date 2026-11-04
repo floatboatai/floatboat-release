@@ -14,6 +14,11 @@ on:
         type: boolean
         required: false
         default: false
+      instrument_helper:
+        description: "Diagnostic tracing of the candidate helper (not acceptance)"
+        type: boolean
+        required: false
+        default: false
       regression_scope:
         description: "Full installer matrix or focused default-TEMP baseline"
         type: choice
@@ -112,11 +117,14 @@ jobs:
       - name: Compile and exercise candidate helper in Windows PowerShell 5.1
         shell: powershell
         timeout-minutes: 8
+        env:
+          FLOATBOAT_FIXTURE_INSTRUMENT: ${{ inputs.instrument_helper }}
         run: |
           & ./.github/diagnostics/upgrade-temp-fixture/run-fixture.ps1 `
             -HelperPath "$env:GITHUB_WORKSPACE/.github/diagnostics/upgrade-temp-fixture/installer-upgrade-temp.nsh" `
             -NsisRoot $env:FLOATBOAT_FIXTURE_NSIS_ROOT `
-            -OutputDirectory "$env:GITHUB_WORKSPACE/evidence/upgrade-temp-helper"
+            -OutputDirectory "$env:GITHUB_WORKSPACE/evidence/upgrade-temp-helper" `
+            -InstrumentHelper:($env:FLOATBOAT_FIXTURE_INSTRUMENT -eq 'true')
 
       - name: Upload helper fixture evidence
         if: always()
