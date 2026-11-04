@@ -29,3 +29,9 @@
 这些结果只证明隔离 VM 中的实际表现，不能替代用户 Windows 电脑上的现场验证；防病毒、权限、磁盘和历史注册状态可能不同。尚未触发工作流时不得宣称任何 Windows 场景已通过。
 
 NSIS 参数真源：https://nsis.sourceforge.io/Docs/Chapter3.html#installerusagecommon
+
+## 独立 NSIS helper 候选验证
+
+`fixture_only=true` 只运行独立 Windows job，优先于其它入口；不下载或安装 Floatboat。使用 Electron Builder 锁定的 NSIS 3.0.4.1 官方归档并核对 SHA512，在临时 GUID 注册键和目录下编译/执行 `upgrade-temp-fixture`，检查无旧注册时不动作、环境恢复、TMP/TEMP 各自缺失、子进程继承、私有 ACL、栈/寄存器和非空目录保留。候选 helper 未接入产品。
+
+本次 helper SHA256：`71e0349fb92d065cfcd5944b226bab8c08ea2a2a11b8f0baaa084d1816c441b3`。完整原件与测试结果由独立 job 记录，不改变已经运行的 baseline。

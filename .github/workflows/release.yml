@@ -9,6 +9,11 @@ on:
         required: false
         default: false
 
+      fixture_only:
+        description: "Only compile and exercise the candidate NSIS TEMP helper"
+        type: boolean
+        required: false
+        default: false
       regression_scope:
         description: "Full installer matrix or focused default-TEMP baseline"
         type: choice
@@ -22,6 +27,7 @@ permissions:
 
 jobs:
   installer-regression:
+    if: inputs.fixture_only != true
     name: Installer regression (${{ matrix.scenario }})
     runs-on: windows-2022
     timeout-minutes: 55
@@ -75,6 +81,48 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-installer-regression-${{ matrix.scenario }}
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
+
+  upgrade-temp-fixture:
+    if: inputs.fixture_only == true
+    name: Candidate NSIS upgrade TEMP helper
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout isolated diagnostic tooling
+        uses: actions/checkout@v4
+
+      - name: Download and verify pinned NSIS
+        shell: pwsh
+        timeout-minutes: 4
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'nsis-3.0.4.1.7z'
+          $nsisRoot = Join-Path $env:RUNNER_TEMP 'floatboat-nsis-3.0.4.1'
+          Invoke-WebRequest -Uri 'https://github.com/electron-userland/electron-builder-binaries/releases/download/nsis-3.0.4.1/nsis-3.0.4.1.7z' -OutFile $archive
+          $stream = [IO.File]::OpenRead($archive)
+          $sha = [Security.Cryptography.SHA512]::Create()
+          try { $digest = [Convert]::ToBase64String($sha.ComputeHash($stream)) } finally { $stream.Dispose(); $sha.Dispose() }
+          if ($digest -ne 'VKMiizYdmNdJOWpRGz4trl4lD++BvYP2irAXpMilheUP0pc93iKlWAoP843Vlraj8YG19CVn0j+dCo/hURz9+Q==') { throw 'NSIS archive checksum mismatch' }
+          & 7z x $archive "-o$nsisRoot" -y
+          if ($LASTEXITCODE -ne 0) { throw 'NSIS extraction failed' }
+          "FLOATBOAT_FIXTURE_NSIS_ROOT=$nsisRoot" | Add-Content -LiteralPath $env:GITHUB_ENV
+
+      - name: Compile and exercise candidate helper in Windows PowerShell 5.1
+        shell: powershell
+        timeout-minutes: 8
+        run: |
+          & ./.github/diagnostics/upgrade-temp-fixture/run-fixture.ps1 `
+            -HelperPath "$env:GITHUB_WORKSPACE/.github/diagnostics/upgrade-temp-fixture/installer-upgrade-temp.nsh" `
+            -NsisRoot $env:FLOATBOAT_FIXTURE_NSIS_ROOT `
+            -OutputDirectory "$env:GITHUB_WORKSPACE/evidence/upgrade-temp-helper"
+
+      - name: Upload helper fixture evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-upgrade-temp-helper-fixture
           path: evidence/
           retention-days: 7
           if-no-files-found: error
