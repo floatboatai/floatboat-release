@@ -2,6 +2,12 @@ name: Windows installer regression (RC4 to RC5)
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnostics_only:
+        description: "Only validate the diagnostic report on one Windows runner"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -15,12 +21,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [baseline, long-temp, external-lock, apostrophe-temp]
+        scenario: ${{ fromJSON(inputs.diagnostics_only && '["selftest"]' || '["baseline","long-temp","external-lock","apostrophe-temp"]') }}
     steps:
       - name: Checkout isolated diagnostic tooling
         uses: actions/checkout@v4
 
-      - name: Verify diagnostic report with known Windows file lock
+      - name: Verify diagnostic report file locks and output junctions
         shell: pwsh
         timeout-minutes: 5
         run: |
@@ -29,6 +35,7 @@ jobs:
             -OutputDirectory "$env:GITHUB_WORKSPACE/evidence/${{ matrix.scenario }}/report-selftest"
 
       - name: Download signed RC4 installer
+        if: inputs.diagnostics_only != true
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
@@ -37,6 +44,7 @@ jobs:
           path: installers/rc4
 
       - name: Download signed RC5 installer
+        if: inputs.diagnostics_only != true
         uses: actions/download-artifact@v4
         with:
           github-token: ${{ github.token }}
@@ -45,6 +53,7 @@ jobs:
           path: installers/rc5
 
       - name: Exercise real signed installers
+        if: inputs.diagnostics_only != true
         shell: pwsh
         run: |
           & ./.github/diagnostics/windows-installer-regression.ps1 `

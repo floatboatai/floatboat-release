@@ -11,6 +11,7 @@ OutputDirectory 是报告父目录；每次创建独立子目录，默认使用�
 仅读取匹配产品的卸载项、安装目录元数据和进程 PID/路径；不读取文件正文、命令行或完整环境。
 只写报告及 Add-Type 所需的临时编译文件；不删除/移动文件、不杀进程、不修改注册表。
 CreateFileW 官方契约：https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
+最终路径契约：https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
 #>
 [CmdletBinding()]
 param(
@@ -169,22 +170,13 @@ foreach ($candidate in $candidates) {
     } catch { $notes.Add("跳过安装目录 '$($candidate.path)'：$($_.Exception.Message)") }
 }
 
-if (!$OutputDirectory) { throw '桌面目录不可用，请通过 -OutputDirectory 指定报告父目录。' }
-$outputParent = Get-LocalAbsolutePath $OutputDirectory
-if ($outputParent.Length -le 3) { throw '请勿把报告父目录设为盘符根目录。' }
-Assert-NoReparseAncestor $outputParent
-foreach ($installation in $installations) {
-    if (Test-WithinDirectory $outputParent $installation.directory) { throw '报告目录必须位于安装目录之外。' }
-}
-$reportDirectory = Join-Path $outputParent ('floatboat-installer-report-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
-[void][IO.Directory]::CreateDirectory($reportDirectory)
-$temporaryDirectory = [IO.Path]::GetTempPath()
-
 # DELETE 只声明请求的访问权；OPEN_EXISTING 不创建文件，也绝不设置 DELETE_ON_CLOSE。
 # BACKUP_SEMANTICS 允许打开目录；OPEN_REPARSE_POINT 避免对末级链接目标进行探测。
 if (-not ('FloatboatInstallerDiagnostics.NativeProbe' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
+using System.ComponentModel;
+using System.Text;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 namespace FloatboatInstallerDiagnostics {
@@ -192,6 +184,25 @@ namespace FloatboatInstallerDiagnostics {
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
         private static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
             IntPtr security, uint creation, uint flags, IntPtr template);
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+        private static extern uint GetFinalPathNameByHandleW(SafeFileHandle handle,
+            StringBuilder path, uint capacity, uint flags);
+        public static string ResolveDirectory(string name) {
+            using (SafeFileHandle handle = CreateFileW(name, 0, 7,
+                IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+                if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+                StringBuilder path = new StringBuilder(512);
+                uint length = GetFinalPathNameByHandleW(handle, path, (uint)path.Capacity, 0);
+                if (length == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+                if (length >= path.Capacity) {
+                    path = new StringBuilder(checked((int)length + 1));
+                    length = GetFinalPathNameByHandleW(handle, path, (uint)path.Capacity, 0);
+                    if (length == 0) throw new Win32Exception(Marshal.GetLastWin32Error());
+                    if (length >= path.Capacity) throw new Win32Exception(122);
+                }
+                return path.ToString();
+            }
+        }
         public static int ProbeDeleteAccess(string name) {
             using (SafeFileHandle handle = CreateFileW(name, 0x00010000, 0x00000007,
                 IntPtr.Zero, 3, 0x02200000, IntPtr.Zero)) {
@@ -202,6 +213,36 @@ namespace FloatboatInstallerDiagnostics {
 }
 '@
 }
+
+# 报告父目录是明确选定的写入位置，允许其重定向；只解析一次已有祖先，不枚举链接目标。
+# 最终路径仍须为本地盘符路径，并在解析后重新检查安装目录边界。
+function Resolve-ReportParent([string]$RequestedPath) {
+    $cursor = $RequestedPath
+    $missingSegments = New-Object 'System.Collections.Generic.Stack[string]'
+    while (![IO.Directory]::Exists($cursor)) {
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if (!$parent -or $parent -eq $cursor) { throw '报告父目录不存在或无法访问。' }
+        $missingSegments.Push([IO.Path]::GetFileName($cursor))
+        $cursor = $parent
+    }
+    $resolved = [FloatboatInstallerDiagnostics.NativeProbe]::ResolveDirectory($cursor)
+    if ($resolved.StartsWith('\\?\', [StringComparison]::Ordinal)) { $resolved = $resolved.Substring(4) }
+    $resolved = Get-LocalAbsolutePath $resolved
+    while ($missingSegments.Count -gt 0) { $resolved = [IO.Path]::Combine($resolved + '\', $missingSegments.Pop()) }
+    return $resolved
+}
+
+if (!$OutputDirectory) { throw '桌面目录不可用，请通过 -OutputDirectory 指定报告父目录。' }
+$requestedOutputParent = Get-LocalAbsolutePath $OutputDirectory
+if ($requestedOutputParent.Length -le 3) { throw '请勿把报告父目录设为盘符根目录。' }
+$outputParent = Resolve-ReportParent $requestedOutputParent
+if ($outputParent.Length -le 3) { throw '请勿把报告父目录设为盘符根目录。' }
+foreach ($installation in $installations) {
+    if (Test-WithinDirectory $outputParent $installation.directory) { throw '报告目录必须位于安装目录之外。' }
+}
+$reportDirectory = Join-Path $outputParent ('floatboat-installer-report-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+[void][IO.Directory]::CreateDirectory($reportDirectory)
+$temporaryDirectory = [IO.Path]::GetTempPath()
 
 # 只投影 PID 与可执行文件路径；外部程序持有的句柄不会出现在这份安装目录进程列表中。
 $processQuery = [ordered]@{ status = 'pending'; durationMs = 0; errorType = $null; errorCode = $null }
@@ -302,6 +343,7 @@ $report = [ordered]@{
     windowsVersion = [Environment]::OSVersion.VersionString; powerShellVersion = $PSVersionTable.PSVersion.ToString()
     is64BitOperatingSystem = [Environment]::Is64BitOperatingSystem; elevated = $elevated
     temporaryDirectory = $temporaryDirectory; temporaryDisk = Get-DiskSummary $temporaryDirectory
+    outputPathResolution = @{ requestedParent = $requestedOutputParent; resolvedParent = $outputParent; reportDirectory = $reportDirectory }
     processQuery = [pscustomobject]$processQuery
     limits = @{ maxEntries = $MaxEntries; maxFailures = $MaxFailures; maxSeconds = $MaxSeconds; maxDepth = 60 }
     registryEntries = @($registryEntries.ToArray()); installations = @($installations.ToArray()); notes = @($notes.ToArray())
@@ -316,6 +358,8 @@ $report = [ordered]@{
 $lines = New-Object 'System.Collections.Generic.List[string]'
 $lines.Add('Floatboat Windows 覆盖安装诊断（只读）')
 $lines.Add("生成时间：$($report.completedAt)；管理员上下文：$elevated")
+$lines.Add("报告父目录（指定）：$requestedOutputParent")
+$lines.Add("报告父目录（实际）：$outputParent")
 $lines.Add("TEMP：$temporaryDirectory；可用字节：$($report.temporaryDisk.availableBytes)")
 $lines.Add("匹配卸载项：$($registryEntries.Count)；实际扫描安装目录：$($installations.Count)")
 $lines.Add("进程查询状态：$($processQuery.status)；耗时：$($processQuery.durationMs) ms；错误类型：$($processQuery.errorType)；错误码（HRESULT）：$($processQuery.errorCode)")
