@@ -1,0 +1,3518 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_ref:
+        description: "Git ref to build (release tag, nightly tag, branch, or commit SHA)"
+        required: true
+        type: string
+      version:
+        description: "Version string (e.g., 0.2.2-rc.1)"
+        required: true
+        type: string
+      platforms:
+        description: "Platforms to build"
+        required: false
+        default: "macos,windows"
+        type: choice
+        options:
+          - "macos,windows"
+          - "macos,windows,linux"
+          - "macos"
+          - "windows"
+          - "linux"
+      linux_package:
+        description: "Linux package set"
+        required: false
+        default: "deb-and-uos"
+        type: choice
+        options:
+          - "deb"
+          - "uos-floatboat"
+          - "deb-and-uos"
+      desktop_variant:
+        description: "Desktop variants to publish"
+        required: false
+        default: "all"
+        type: choice
+        options:
+          - "all"
+          - "floatboat"
+          - "deepseek-agent"
+      is_rc:
+        description: "Is this a Release Candidate?"
+        required: false
+        default: true
+        type: boolean
+      notify_only:
+        description: "Only send the internal Feishu release note; skip build/upload/GitHub Release mutation"
+        required: false
+        default: false
+        type: boolean
+      release_notes_en:
+        description: "Public English release notes (required only for official stable release-profile app publishing)"
+        required: false
+        default: ""
+        type: string
+      release_notes_zh_cn:
+        description: "公开的简体中文更新日志（仅 official stable release-profile app 发布必填）"
+        required: false
+        default: ""
+        type: string
+      skip_release_notes:
+        description: "Explicitly publish an official stable release without public release notes"
+        required: false
+        default: false
+        type: boolean
+      build_profile:
+        description: "Build profile (test injects TEST_BUILD_ENV_FILE; internal-test injects LAN test .env)"
+        required: false
+        default: "release"
+        type: choice
+        options:
+          - "release"
+          - "test"
+          - "internal-test"
+      package_set:
+        description: "Package set to build (auto: DeepSeek-only/non-release=app, full release=all)"
+        required: false
+        default: "auto"
+        type: choice
+        options:
+          - "auto"
+          - "app"
+          - "launcher"
+          - "all"
+      promote_merged_bugs:
+        description: "Promote merged dev bug PRs to acceptance after app packaging succeeds"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  # ===========================================
+  # Prepare
+  # ===========================================
+  prepare:
+    name: Prepare Release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ inputs.version }}
+      is_rc: ${{ inputs.is_rc }}
+      platforms: ${{ inputs.platforms }}
+      build_profile: ${{ inputs.build_profile }}
+      package_set: ${{ steps.package_set.outputs.package_set }}
+      desktop_variant: ${{ steps.release_scope.outputs.desktop_variant }}
+      desktop_matrix: ${{ steps.release_scope.outputs.desktop_matrix }}
+      linux_matrix: ${{ steps.release_scope.outputs.linux_matrix }}
+      release_tag: ${{ steps.release_scope.outputs.release_tag }}
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      source_release_tag: ${{ steps.source.outputs.release_tag }}
+      floatboat_version: ${{ steps.desktop_versions.outputs.floatboat_version }}
+      deepseek_version: ${{ steps.desktop_versions.outputs.deepseek_version }}
+      changelog_file: ${{ steps.changelog.outputs.changelog_file }}
+      prev_tag: ${{ steps.changelog.outputs.prev_tag }}
+      release_notes_enabled: ${{ steps.release_notes.outputs.enabled }}
+      release_notes_sha256: ${{ steps.release_notes.outputs.payload_sha256 }}
+
+    steps:
+      - name: Resolve release scope
+        id: release_scope
+        shell: bash
+        env:
+          INPUT_DESKTOP_VARIANT: ${{ inputs.desktop_variant }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_IS_RC: ${{ inputs.is_rc }}
+          INPUT_BUILD_PROFILE: ${{ inputs.build_profile }}
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+          INPUT_LINUX_PACKAGE: ${{ inputs.linux_package }}
+          INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
+        run: |
+          set -euo pipefail
+
+          if [ "$INPUT_IS_RC" = "true" ]; then
+            [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::RC publishing requires desktop_variant=floatboat"; exit 1; }
+            case "$INPUT_PLATFORMS" in
+              "macos,windows") ;;
+              "linux")
+                [ "$INPUT_LINUX_PACKAGE" = "deb-and-uos" ] || {
+                  echo "::error::Linux-only RC artifact validation requires linux_package=deb-and-uos"
+                  exit 1
+                }
+                echo "::notice::Linux-only RC builds Actions artifacts without publishing CDN or installer URLs."
+                ;;
+              *)
+                echo "::error::RC publishing requires exactly macos,windows; Linux artifact validation requires exactly linux with linux_package=deb-and-uos"
+                exit 1
+                ;;
+            esac
+          fi
+
+          case "$INPUT_DESKTOP_VARIANT" in
+            floatboat)
+              release_tag="v${INPUT_VERSION}"
+              desktop_matrix='{"include":[{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat"}]}'
+              ;;
+            all)
+              release_tag="v${INPUT_VERSION}"
+              desktop_matrix='{"include":[{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat"},{"variant":"deepseek-agent","display_name":"Floatboat DeepSeek Agent","artifact_base":"Floatboat-DeepSeek-Agent","app_name":"Floatboat DeepSeek Agent"}]}'
+              ;;
+            deepseek-agent)
+              if [ "$INPUT_IS_RC" != "false" ] || [ "$INPUT_BUILD_PROFILE" != "release" ]; then
+                echo "::error::DeepSeek-only publishing is restricted to official release-profile builds"
+                exit 1
+              fi
+              # DeepSeek Agent 只发布 macOS / Windows；Linux 统一由 Floatboat 提供。
+              case "$INPUT_PLATFORMS" in
+                "macos,windows") ;;
+                *)
+                  echo "::error::DeepSeek-only official publishing does not support Linux; use exactly macos,windows"
+                  exit 1
+                  ;;
+              esac
+              if [ "$INPUT_PROMOTE_MERGED_BUGS" = "true" ]; then
+                echo "::error::DeepSeek-only publishing must not promote the shared Floatboat bug queue"
+                exit 1
+              fi
+              release_tag="deepseek-v${INPUT_VERSION}"
+              desktop_matrix='{"include":[{"variant":"deepseek-agent","display_name":"Floatboat DeepSeek Agent","artifact_base":"Floatboat-DeepSeek-Agent","app_name":"Floatboat DeepSeek Agent"}]}'
+              ;;
+            *)
+              echo "::error::Unsupported desktop_variant: ${INPUT_DESKTOP_VARIANT}"
+              exit 1
+              ;;
+          esac
+
+          # Linux 只发行 Floatboat，固定同时构建 amd64 与 arm64；DeepSeek Agent 不进入 Linux 矩阵。
+          # arm64 使用 GitHub 公共 arm64 runner 原生构建，避免原生模块交叉编译。
+          linux_matrix='{"include":[{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat","arch":"x64","debArch":"amd64","runner":"ubuntu-latest"},{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat","arch":"arm64","debArch":"arm64","runner":"ubuntu-24.04-arm"}]}'
+
+          echo "desktop_variant=${INPUT_DESKTOP_VARIANT}" >> "$GITHUB_OUTPUT"
+          echo "desktop_matrix=${desktop_matrix}" >> "$GITHUB_OUTPUT"
+          echo "linux_matrix=${linux_matrix}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "🎯 Desktop release scope: ${INPUT_DESKTOP_VARIANT} (${release_tag})"
+          echo "🐧 Linux matrix: ${linux_matrix}"
+
+      - name: Resolve package set
+        id: package_set
+        shell: bash
+        run: |
+          package_set="${{ inputs.package_set }}"
+          if [ "$package_set" = "auto" ]; then
+            if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ]; then
+              package_set="app"
+            elif [ "${{ inputs.build_profile }}" != "release" ]; then
+              package_set="app"
+            else
+              package_set="all"
+            fi
+          fi
+          if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ] && [ "$package_set" != "app" ]; then
+            echo "::error::DeepSeek-only publishing requires package_set=app"
+            exit 1
+          fi
+          if [ "${{ inputs.is_rc }}" = "true" ] && [ "$package_set" != "app" ]; then
+            echo "::error::RC publishing requires package_set=app"
+            exit 1
+          fi
+          echo "package_set=$package_set" >> "$GITHUB_OUTPUT"
+          echo "📦 Package set: $package_set"
+
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ inputs.repo_ref }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+          fetch-depth: 0
+
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+
+      - name: Resolve Desktop variant versions
+        id: desktop_versions
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const {
+            deriveDesktopVariantVersion,
+            parseDesktopReleaseVersion,
+          } = require('./scripts/packaging/releaseVariant.cjs');
+
+          const inputVersion = String(process.env.INPUT_VERSION || '').trim();
+          const parsedVersion = parseDesktopReleaseVersion(inputVersion);
+          if (parsedVersion.variant !== 'floatboat') {
+            throw new Error(`发布 version 必须使用 Floatboat 基础版本，收到：${inputVersion}`);
+          }
+
+          const floatboatVersion = deriveDesktopVariantVersion(inputVersion, 'floatboat');
+          const deepseekVersion = deriveDesktopVariantVersion(inputVersion, 'deepseek-agent');
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `floatboat_version=${floatboatVersion}\ndeepseek_version=${deepseekVersion}\n`,
+          );
+          console.log(`Floatboat version: ${floatboatVersion}`);
+          console.log(`DeepSeek version: ${deepseekVersion}`);
+          NODE
+
+      - name: Generate canonical release notes payload
+        id: release_notes
+        shell: bash
+        env:
+          RELEASE_NOTES_EN: ${{ inputs.release_notes_en }}
+          RELEASE_NOTES_ZH_CN: ${{ inputs.release_notes_zh_cn }}
+          SKIP_RELEASE_NOTES: ${{ inputs.skip_release_notes }}
+          BASE_VERSION: ${{ inputs.version }}
+          IS_RC: ${{ inputs.is_rc }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          NOTIFY_ONLY: ${{ inputs.notify_only }}
+          PACKAGE_SET: ${{ steps.package_set.outputs.package_set }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/release-notes
+          is_stable_app_release=false
+          if [ "$NOTIFY_ONLY" = "false" ] && [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ] && [ "$PACKAGE_SET" != "launcher" ]; then
+            is_stable_app_release=true
+          fi
+
+          if [ "$is_stable_app_release" = "true" ] && [ "$SKIP_RELEASE_NOTES" = "true" ]; then
+            if [ -n "${RELEASE_NOTES_EN//[[:space:]]/}" ] || [ -n "${RELEASE_NOTES_ZH_CN//[[:space:]]/}" ]; then
+              echo "::error::skip_release_notes=true cannot be combined with release note content"
+              exit 1
+            fi
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "payload_sha256=" >> "$GITHUB_OUTPUT"
+            echo "::warning::Official stable release will be published without public release notes (explicit override)."
+          elif [ "$is_stable_app_release" = "true" ]; then
+            node release-tooling/.github/scripts/release-notes-envelope.cjs generate \
+              --base-version "$BASE_VERSION" \
+              --payload-output /tmp/release-notes/payload.json \
+              --manifest-output /tmp/release-notes/manifest.json
+            payload_sha256=$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('/tmp/release-notes/manifest.json', 'utf8')).payloadSha256)")
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "payload_sha256=$payload_sha256" >> "$GITHUB_OUTPUT"
+            echo "✅ Stable release notes payload prepared for public updater metadata."
+          else
+            if [ "$SKIP_RELEASE_NOTES" = "true" ]; then
+              echo "::notice::skip_release_notes is ignored outside official stable release-profile app publishing."
+            fi
+            if [ -n "${RELEASE_NOTES_EN//[[:space:]]/}" ] || [ -n "${RELEASE_NOTES_ZH_CN//[[:space:]]/}" ]; then
+              echo "::notice::Release note inputs are ignored outside official stable release-profile app publishing."
+            fi
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "payload_sha256=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload canonical release notes payload
+        if: steps.release_notes.outputs.enabled == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: stable-release-notes
+          path: /tmp/release-notes/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Resolve source release tag
+        id: source
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_IS_RC: ${{ inputs.is_rc }}
+          INPUT_REPO_REF: ${{ inputs.repo_ref }}
+          RELEASE_TAG: ${{ steps.release_scope.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          SOURCE_SHA=$(git rev-parse HEAD)
+
+          echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "🔒 Source commit: ${SOURCE_SHA}"
+
+          if [ "$INPUT_IS_RC" != "false" ]; then
+            echo "🔖 RC build keeps source ref ${INPUT_REPO_REF}; no official source tag is created."
+            exit 0
+          fi
+
+          remote_ref=$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}" "refs/tags/${RELEASE_TAG}^{}" || true)
+          if [ -n "$remote_ref" ]; then
+            remote_sha=$(printf '%s\n' "$remote_ref" | awk -v tag="refs/tags/${RELEASE_TAG}^{}" '$2 == tag { print $1; found=1 } END { if (!found) exit 1 }' || true)
+            if [ -z "$remote_sha" ]; then
+              remote_sha=$(printf '%s\n' "$remote_ref" | awk -v tag="refs/tags/${RELEASE_TAG}" '$2 == tag { print $1; exit }')
+            fi
+
+            if [ "$remote_sha" != "$SOURCE_SHA" ]; then
+              echo "::error::Source release tag ${RELEASE_TAG} already points to ${remote_sha}, expected ${SOURCE_SHA}"
+              exit 1
+            fi
+
+            if git rev-parse -q --verify "refs/tags/${RELEASE_TAG}" >/dev/null; then
+              local_sha=$(git rev-parse "${RELEASE_TAG}^{commit}")
+              if [ "$local_sha" != "$SOURCE_SHA" ]; then
+                echo "::error::Local source release tag ${RELEASE_TAG} points to ${local_sha}, expected ${SOURCE_SHA}"
+                exit 1
+              fi
+            else
+              git fetch --no-tags origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+            fi
+
+            echo "✅ Source release tag ${RELEASE_TAG} already points to ${SOURCE_SHA}; using it."
+            exit 0
+          fi
+
+          if [[ "$INPUT_REPO_REF" != nightly-* ]]; then
+            echo "::error::Official releases from an untagged source must use a nightly-* repo_ref or pre-create ${RELEASE_TAG} in the source repo."
+            exit 1
+          fi
+
+          git config user.name "floatboat-release[bot]"
+          git config user.email "floatboat-release[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "$SOURCE_SHA" -m "Release ${RELEASE_TAG} from ${INPUT_REPO_REF}"
+          git push origin "refs/tags/${RELEASE_TAG}"
+          echo "✅ Created source release tag ${RELEASE_TAG} from ${INPUT_REPO_REF} -> ${SOURCE_SHA}"
+
+      - name: Inject version into package.json
+        env:
+          VERSION: ${{ steps.release_scope.outputs.desktop_variant == 'deepseek-agent' && steps.desktop_versions.outputs.deepseek_version || steps.desktop_versions.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ package.json version set to $VERSION"
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          set -e
+          VERSION="${{ inputs.version }}"
+          IS_RC="${{ inputs.is_rc }}"
+          DESKTOP_VARIANT="${{ steps.release_scope.outputs.desktop_variant }}"
+          CURRENT_TAG="${{ steps.release_scope.outputs.release_tag }}"
+
+          echo "🔍 Finding previous tag for ${CURRENT_TAG} (is_rc=${IS_RC})"
+
+          if [ "$IS_RC" == "true" ]; then
+            # Extract base version (e.g., 0.4.1 from 0.4.1-rc.12)
+            BASE_VERSION=$(echo "$VERSION" | sed 's/-rc\.[0-9]*$//')
+            # Find previous RC for this base version
+            PREV_TAG=$(git tag -l "v${BASE_VERSION}-rc.*" --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -1)
+            if [ -z "$PREV_TAG" ]; then
+              # First RC: compare to previous official release
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+              echo "  → First RC for ${BASE_VERSION}, comparing to previous release: ${PREV_TAG:-none}"
+            else
+              echo "  → Previous RC: ${PREV_TAG}"
+            fi
+          else
+            # Official release: find previous official release
+            if [ "$DESKTOP_VARIANT" = "deepseek-agent" ]; then
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^deepseek-v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${CURRENT_TAG}$" | head -1)
+            else
+              PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -v "^${CURRENT_TAG}$" | head -1)
+            fi
+            echo "  → Previous release: ${PREV_TAG:-none}"
+          fi
+
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG_FILE="changelog-initial-${CURRENT_TAG}.md"
+          else
+            CHANGELOG_FILE="changelog-${PREV_TAG}-${CURRENT_TAG}.md"
+          fi
+
+          echo "changelog_file=${CHANGELOG_FILE}" >> $GITHUB_OUTPUT
+          echo "prev_tag=${PREV_TAG}" >> $GITHUB_OUTPUT
+
+          # Generate changelog content
+          {
+            if [ "$IS_RC" == "true" ]; then
+              echo "# Release Candidate ${CURRENT_TAG}"
+            else
+              echo "# Release ${CURRENT_TAG}"
+            fi
+            echo ""
+
+            if [ -n "$PREV_TAG" ]; then
+              echo "**Changes since ${PREV_TAG}:**"
+              echo ""
+              CHANGES=$(git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200)
+              if [ -n "$CHANGES" ]; then
+                echo "$CHANGES"
+              else
+                echo "_无更新。_"
+              fi
+            else
+              echo "_This is the initial release — no previous tag found._"
+            fi
+
+            echo ""
+            echo "---"
+            echo "*Generated $(date -u '+%Y-%m-%d %H:%M UTC') · Internal release note for Feishu notification only.*"
+          } > "/tmp/${CHANGELOG_FILE}"
+
+          echo ""
+          echo "✅ Changelog: ${CHANGELOG_FILE}"
+          echo "--- Content preview ---"
+          head -30 "/tmp/${CHANGELOG_FILE}"
+          echo "---"
+
+      - name: Upload changelog artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-changelog
+          path: /tmp/changelog-*.md
+          retention-days: 7
+
+  # ===========================================
+  # macOS Build - arm64 (Apple Silicon)
+  # ===========================================
+  build-macos-arm64:
+    name: Build ${{ matrix.display_name }} macOS (arm64)
+    needs: prepare
+    runs-on: macos-26
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
+
+      - name: Inject variant version into package.json
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ ${{ matrix.display_name }} package.json version set to $VERSION"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check code signing availability
+        id: signing
+        shell: bash
+        env:
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD_PROFILE" = "release" ]; then
+            echo "::error::Release-profile macOS packaging requires: ${missing[*]}"
+            exit 1
+          fi
+          echo "::warning::macOS signing disabled for $BUILD_PROFILE profile; missing: ${missing[*]}"
+
+      - name: Import Code Signing Certificate
+        if: steps.signing.outputs.available == 'true'
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
+      - name: Checkout release tooling for bundled sources
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Seed bundled tool sources
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+        run: |
+          node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
+          rm -rf release-tooling
+
+      - name: Build and package ${{ matrix.display_name }} (arm64)
+        run: |
+          set -euo pipefail
+          rm -rf out
+          for attempt in 1 2 3; do
+            set +e
+            pnpm run forge:make:arm64
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit "$exit_code"
+            fi
+            echo "::warning::${{ matrix.display_name }} macOS arm64 packaging attempt ${attempt}/3 failed; cleaning DMG mount state and retrying"
+            hdiutil detach "/Volumes/${{ matrix.app_name }}" -force || true
+            rm -rf out
+            sleep $((attempt * 20))
+          done
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          BUILD_OBFUSCATE: "true"
+          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Verify packaged internal-test ASR config
+        if: inputs.build_profile == 'internal-test'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packaged_env=$(find out -type f -name .env -print -quit)
+          if [ -z "$packaged_env" ]; then
+            echo "::error::Packaged .env was not found"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*AOE_INTERNAL_TEST_BUILD[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$packaged_env"; then
+            echo "::error::Packaged .env is missing the internal-test marker"
+            exit 1
+          fi
+          for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+            if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$packaged_env"; then
+              echo "::error::Packaged .env is missing a non-empty ${required_key}"
+              exit 1
+            fi
+          done
+          echo "✅ Packaged internal-test ASR config is complete."
+
+      - name: Verify packaged runtime architectures (arm64)
+        shell: bash
+        env:
+          APP_PATH: out/${{ matrix.app_name }}-darwin-arm64/${{ matrix.app_name }}.app
+          APP_EXECUTABLE_NAME: ${{ matrix.app_name }}
+          EXPECTED_MACH_ARCH: arm64
+        run: |
+          set -euo pipefail
+
+          verify_arch() {
+            local binary="$1"
+            local actual_arch
+            [ -f "$binary" ] || { echo "::error::Required binary not found: $binary"; exit 1; }
+            actual_arch=$(lipo -archs "$binary")
+            if [ "$actual_arch" != "$EXPECTED_MACH_ARCH" ]; then
+              echo "::error::Architecture mismatch: $binary is [$actual_arch], expected [$EXPECTED_MACH_ARCH]"
+              exit 1
+            fi
+            echo "✅ $binary: $actual_arch"
+          }
+
+          RESOURCES="$APP_PATH/Contents/Resources"
+          PYTHON="$RESOURCES/python/python/bin/python3"
+          UV="$RESOURCES/uv/uv"
+          NODE="$RESOURCES/nodejs/node"
+          verify_arch "$APP_PATH/Contents/MacOS/$APP_EXECUTABLE_NAME"
+          verify_arch "$PYTHON"
+          verify_arch "$UV"
+          verify_arch "$NODE"
+
+          libpython_count=0
+          while IFS= read -r libpython; do
+            verify_arch "$libpython"
+            libpython_count=$((libpython_count + 1))
+          done < <(find "$RESOURCES/python/python/lib" -type f -name 'libpython*.dylib' -print)
+          [ "$libpython_count" -gt 0 ] || { echo "::error::No bundled libpython dylib found"; exit 1; }
+
+          "$PYTHON" --version
+          "$UV" --version
+          "$NODE" --version
+
+      - name: Verify signed and notarized app (arm64)
+        if: steps.signing.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="out/${{ matrix.app_name }}-darwin-arm64/${{ matrix.app_name }}.app"
+          [ -d "$APP_PATH" ] || { echo "::error::Packaged app not found: $APP_PATH"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+
+      - name: Verify packaged Node and workbench (arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/packaging/packaged-workbench-runtime.mjs "$PWD/out/${{ matrix.app_name }}-darwin-arm64/${{ matrix.app_name }}.app/Contents/Resources" arm64
+
+      - name: Collect arm64 production artifacts
+        shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/macos-arm64
+
+          collect_exact() {
+            local expected_name="$1"
+            local count
+            local source_file
+            count=$(find out/make -type f -name "$expected_name" | wc -l | tr -d ' ')
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected exactly one $expected_name, found $count"
+              find out/make -type f -print || true
+              exit 1
+            fi
+            source_file=$(find out/make -type f -name "$expected_name" -print -quit)
+            cp "$source_file" dist/macos-arm64/
+          }
+
+          collect_exact "${ARTIFACT_BASE}-${VERSION}-arm64.dmg"
+          collect_exact "${ARTIFACT_BASE}-${VERSION}-arm64.zip"
+          echo "✅ ${{ matrix.display_name }} macOS arm64 artifacts:"
+          find dist/macos-arm64 -maxdepth 1 -type f -print | sort | sed 's#^#  - #'
+
+      - name: Upload arm64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-arm64-${{ matrix.variant }}
+          path: |
+            dist/macos-arm64/*
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # macOS Build - x64 (Intel)
+  # ===========================================
+  build-macos-x64:
+    name: Build ${{ matrix.display_name }} macOS (x64)
+    needs: prepare
+    # RC builds skip desktop macOS x64; official releases still build it on a native Intel runner.
+    runs-on: macos-26-intel
+    if: inputs.notify_only == false && inputs.is_rc == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'macos')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
+
+      - name: Inject variant version into package.json
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ ${{ matrix.display_name }} package.json version set to $VERSION"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check code signing availability
+        id: signing
+        shell: bash
+        env:
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "available=false" >> "$GITHUB_OUTPUT"
+          if [ "$BUILD_PROFILE" = "release" ]; then
+            echo "::error::Release-profile macOS packaging requires: ${missing[*]}"
+            exit 1
+          fi
+          echo "::warning::macOS signing disabled for $BUILD_PROFILE profile; missing: ${missing[*]}"
+
+      - name: Import Code Signing Certificate
+        if: steps.signing.outputs.available == 'true'
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
+      - name: Checkout release tooling for bundled sources
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Seed bundled tool sources
+        shell: bash
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+        run: |
+          node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
+          rm -rf release-tooling
+
+      - name: Build and package ${{ matrix.display_name }} (x64)
+        run: |
+          set -euo pipefail
+          rm -rf out
+          for attempt in 1 2 3; do
+            set +e
+            pnpm run forge:make:x64
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -eq 0 ]; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit "$exit_code"
+            fi
+            echo "::warning::${{ matrix.display_name }} macOS x64 packaging attempt ${attempt}/3 failed; cleaning DMG mount state and retrying"
+            hdiutil detach "/Volumes/${{ matrix.app_name }}" -force || true
+            rm -rf out
+            sleep $((attempt * 20))
+          done
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          BUILD_OBFUSCATE: "true"
+          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Verify packaged internal-test ASR config
+        if: inputs.build_profile == 'internal-test'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packaged_env=$(find out -type f -name .env -print -quit)
+          if [ -z "$packaged_env" ]; then
+            echo "::error::Packaged .env was not found"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*AOE_INTERNAL_TEST_BUILD[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$packaged_env"; then
+            echo "::error::Packaged .env is missing the internal-test marker"
+            exit 1
+          fi
+          for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+            if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$packaged_env"; then
+              echo "::error::Packaged .env is missing a non-empty ${required_key}"
+              exit 1
+            fi
+          done
+          echo "✅ Packaged internal-test ASR config is complete."
+
+      - name: Verify packaged runtime architectures (x64)
+        shell: bash
+        env:
+          APP_PATH: out/${{ matrix.app_name }}-darwin-x64/${{ matrix.app_name }}.app
+          APP_EXECUTABLE_NAME: ${{ matrix.app_name }}
+          EXPECTED_MACH_ARCH: x86_64
+        run: |
+          set -euo pipefail
+
+          verify_arch() {
+            local binary="$1"
+            local actual_arch
+            [ -f "$binary" ] || { echo "::error::Required binary not found: $binary"; exit 1; }
+            actual_arch=$(lipo -archs "$binary")
+            if [ "$actual_arch" != "$EXPECTED_MACH_ARCH" ]; then
+              echo "::error::Architecture mismatch: $binary is [$actual_arch], expected [$EXPECTED_MACH_ARCH]"
+              exit 1
+            fi
+            echo "✅ $binary: $actual_arch"
+          }
+
+          RESOURCES="$APP_PATH/Contents/Resources"
+          PYTHON="$RESOURCES/python/python/bin/python3"
+          UV="$RESOURCES/uv/uv"
+          NODE="$RESOURCES/nodejs/node"
+          verify_arch "$APP_PATH/Contents/MacOS/$APP_EXECUTABLE_NAME"
+          verify_arch "$PYTHON"
+          verify_arch "$UV"
+          verify_arch "$NODE"
+
+          libpython_count=0
+          while IFS= read -r libpython; do
+            verify_arch "$libpython"
+            libpython_count=$((libpython_count + 1))
+          done < <(find "$RESOURCES/python/python/lib" -type f -name 'libpython*.dylib' -print)
+          [ "$libpython_count" -gt 0 ] || { echo "::error::No bundled libpython dylib found"; exit 1; }
+
+          "$PYTHON" --version
+          "$UV" --version
+          "$NODE" --version
+
+      - name: Verify signed and notarized app (x64)
+        if: steps.signing.outputs.available == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="out/${{ matrix.app_name }}-darwin-x64/${{ matrix.app_name }}.app"
+          [ -d "$APP_PATH" ] || { echo "::error::Packaged app not found: $APP_PATH"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          xcrun stapler validate "$APP_PATH"
+          spctl --assess --type execute --verbose=4 "$APP_PATH"
+
+      - name: Verify packaged Node and workbench (x64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/packaging/packaged-workbench-runtime.mjs "$PWD/out/${{ matrix.app_name }}-darwin-x64/${{ matrix.app_name }}.app/Contents/Resources" x64
+
+      - name: Collect x64 production artifacts
+        shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/macos-x64
+
+          collect_exact() {
+            local expected_name="$1"
+            local count
+            local source_file
+            count=$(find out/make -type f -name "$expected_name" | wc -l | tr -d ' ')
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected exactly one $expected_name, found $count"
+              find out/make -type f -print || true
+              exit 1
+            fi
+            source_file=$(find out/make -type f -name "$expected_name" -print -quit)
+            cp "$source_file" dist/macos-x64/
+          }
+
+          collect_exact "${ARTIFACT_BASE}-${VERSION}-x64.dmg"
+          collect_exact "${ARTIFACT_BASE}-${VERSION}-x64.zip"
+          echo "✅ ${{ matrix.display_name }} macOS x64 artifacts:"
+          find dist/macos-x64 -maxdepth 1 -type f -print | sort | sed 's#^#  - #'
+
+      - name: Upload x64 artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-x64-${{ matrix.variant }}
+          path: |
+            dist/macos-x64/*
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Windows Build - x64
+  # ===========================================
+  build-windows:
+    name: Build ${{ matrix.display_name }} Windows (x64)
+    needs: prepare
+    runs-on: windows-latest
+    if: inputs.notify_only == false && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'windows')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.desktop_matrix) }}
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
+
+      - name: Inject variant version into package.json
+        shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ ${{ matrix.display_name }} package.json version set to $VERSION"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup FFmpeg build toolchain
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            diffutils
+            make
+            tar
+            xz
+          pacboy: toolchain:p
+          path-type: inherit
+
+      - name: Checkout release tooling for bundled sources
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Seed bundled tool sources
+        shell: msys2 {0}
+        env:
+          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+          SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+        run: |
+          node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
+          rm -rf release-tooling
+
+      - name: Build bundled FFmpeg (Windows x64)
+        shell: msys2 {0}
+        run: node scripts/build-windows-ffmpeg.mjs
+        env:
+          TARGET_PLATFORM: win32
+          TARGET_ARCH: x64
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
+
+      - name: Verify Racent signing configuration
+        if: inputs.build_profile == 'release'
+        shell: pwsh
+        env:
+          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
+        run: |
+          foreach ($name in @("SIGNTOOL_ACCESS_KEY", "SIGNTOOL_ACCESS_SECRET", "SIGNTOOL_CERT_CODE")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              Write-Error "$name is required for release-profile Windows signing."
+              exit 1
+            }
+          }
+          $tool = "build/signing/signtool-amd64.exe"
+          if (-not (Test-Path $tool)) {
+            Write-Error "$tool not found in source repo. Commit Racent signtool to aoe-desktop at $tool."
+            exit 1
+          }
+          $size = (Get-Item $tool).Length
+          if ($size -lt 100000) {
+            Write-Error "$tool looks too small ($size bytes). Likely a Git LFS pointer or corrupted file."
+            exit 1
+          }
+          Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
+
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
+      - name: Build and package ${{ matrix.display_name }} (Windows x64)
+        run: pnpm run forge:make
+        env:
+          BUILD_OBFUSCATE: "true"
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
+
+      - name: Verify packaged internal-test ASR config
+        if: inputs.build_profile == 'internal-test'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packaged_env=$(find out -type f -name .env -print -quit)
+          if [ -z "$packaged_env" ]; then
+            echo "::error::Packaged .env was not found"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*AOE_INTERNAL_TEST_BUILD[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$packaged_env"; then
+            echo "::error::Packaged .env is missing the internal-test marker"
+            exit 1
+          fi
+          for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+            if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$packaged_env"; then
+              echo "::error::Packaged .env is missing a non-empty ${required_key}"
+              exit 1
+            fi
+          done
+          echo "✅ Packaged internal-test ASR config is complete."
+
+      - name: Collect production Windows artifact
+        shell: bash
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/windows
+          expected_name="${ARTIFACT_BASE}-Setup-${VERSION}-x64.exe"
+          count=$(find out/make -type f -name "$expected_name" | wc -l | tr -d ' ')
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one $expected_name, found $count"
+            find out/make -type f -print || true
+            exit 1
+          fi
+          PROD_EXE=$(find out/make -type f -name "$expected_name" -print -quit)
+          cp "$PROD_EXE" "dist/windows/"
+          echo "✅ ${{ matrix.display_name }} Windows artifact: $(basename "$PROD_EXE")"
+
+      - name: Verify Windows Authenticode signature
+        if: inputs.build_profile == 'release'
+        shell: pwsh
+        env:
+          VERSION: ${{ matrix.variant == 'deepseek-agent' && needs.prepare.outputs.deepseek_version || needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: ${{ matrix.artifact_base }}
+        run: |
+          $installer = "dist/windows/$env:ARTIFACT_BASE-Setup-$env:VERSION-x64.exe"
+          if (-not (Test-Path $installer)) {
+            Write-Error "Installer not found: $installer"
+            exit 1
+          }
+          $signature = Get-AuthenticodeSignature $installer
+          if ($signature.Status -ne "Valid") {
+            Write-Error "Authenticode verification failed for $installer (status=$($signature.Status), message=$($signature.StatusMessage))"
+            exit 1
+          }
+          Write-Host "Authenticode signature valid: $installer"
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-x64-${{ matrix.variant }}
+          path: |
+            dist/windows/*.exe
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Desktop App - Linux x64 / arm64 (.deb)
+  # ===========================================
+  # Linux 与 macOS / Windows 在同一次 dispatch 内并行构建，产物汇总到同一个 Release。
+  # 只产出 .deb 供手动下载：客户端 UpdateManager 仅在 darwin/win32 启用自动更新，
+  # scripts/packaging/updateMetadata.cjs 不接受 linux 平台，因此不写 updater metadata；
+  # 正式版仍会把 .deb 上传 S3，供网站手动下载。
+  #
+  # arm64 在 GitHub 公共 ubuntu-24.04-arm runner 上**原生**构建，不做交叉编译：
+  # better-sqlite3 / lancedb / sharp 等原生模块交叉编译不可靠，且交叉产物无法在构建机上验证。
+  build-linux:
+    name: Build Floatboat Linux (${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    if: inputs.notify_only == false && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') && needs.prepare.outputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
+
+      - name: Inject Floatboat version into package.json
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+          echo "✅ Floatboat package.json version set to $VERSION"
+
+      - name: Install Linux packaging toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          # MakerDeb 依赖 dpkg/fakeroot；ubuntu-latest 默认镜像不保证 fakeroot 存在。
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fakeroot dpkg binutils
+          dpkg --version | head -1
+          fakeroot --version
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
+      - name: Build and package Floatboat (Linux ${{ matrix.arch }})
+        # pnpm 会把 `--` 原样传给脚本，forge 随后忽略全部参数并跑 zip/deb/rpm 三个 maker；
+        # --targets 还必须写 maker 名（deb）而不是包名，否则 MakerDeb 配置被静默丢弃。
+        run: pnpm run forge:make:linux:deb --platform linux --arch ${{ matrix.arch }}
+        env:
+          # Vite 打包 renderer/worker 目标会超过 Node 默认 ~4GB heap 上限并 FATAL OOM，
+          # 与 macOS job 用同一个上限；缺这行会在 floatboatWorker 之后的阶段构建失败。
+          NODE_OPTIONS: --max-old-space-size=8192
+          BUILD_OBFUSCATE: "true"
+
+      - name: Verify packaged internal-test ASR config
+        if: inputs.build_profile == 'internal-test'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packaged_env=$(find out -type f -name .env -print -quit)
+          if [ -z "$packaged_env" ]; then
+            echo "::error::Packaged .env was not found"
+            exit 1
+          fi
+          if ! grep -Eq '^[[:space:]]*AOE_INTERNAL_TEST_BUILD[[:space:]]*=[[:space:]]*true[[:space:]]*$' "$packaged_env"; then
+            echo "::error::Packaged .env is missing the internal-test marker"
+            exit 1
+          fi
+          for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+            if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" "$packaged_env"; then
+              echo "::error::Packaged .env is missing a non-empty ${required_key}"
+              exit 1
+            fi
+          done
+          echo "✅ Packaged internal-test ASR config is complete."
+
+      - name: Collect production Linux artifact
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: Floatboat
+          DEB_ARCH: ${{ matrix.debArch }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/linux
+          # MakerDeb 的文件名由 package.json name/version + Debian 架构决定，与 macOS/Windows 的
+          # ARTIFACT_BASE 命名不同；这里只断言"恰好一个 .deb"，再统一改名为发布资产名。
+          # out/make 缺失说明打包步骤本身没产出（例如构建 OOM）；先明确报出来，
+          # 否则 find 的 "No such file or directory" 会盖住真正的失败原因。
+          if [ ! -d out/make ]; then
+            echo "::error::out/make does not exist — packaging did not produce any artifact"
+            exit 1
+          fi
+          count=$(find out/make -type f -name '*.deb' | wc -l | tr -d ' ')
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one .deb, found $count"
+            find out/make -type f -print || true
+            exit 1
+          fi
+          BUILT_DEB=$(find out/make -type f -name '*.deb' -print -quit)
+          RELEASE_NAME="${ARTIFACT_BASE}-${VERSION}-${DEB_ARCH}.deb"
+          cp "$BUILT_DEB" "dist/linux/${RELEASE_NAME}"
+          echo "✅ Floatboat Linux artifact: ${RELEASE_NAME} (built as $(basename "$BUILT_DEB"))"
+
+      - name: Verify Debian package metadata
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          ARTIFACT_BASE: Floatboat
+          DEB_ARCH: ${{ matrix.debArch }}
+        run: |
+          set -euo pipefail
+          DEB="dist/linux/${ARTIFACT_BASE}-${VERSION}-${DEB_ARCH}.deb"
+          # 结构损坏的 .deb 在用户机上才报错代价太高，打包后立即校验可安装性元数据。
+          dpkg-deb --info "$DEB"
+          pkg_arch=$(dpkg-deb --field "$DEB" Architecture)
+          if [ "$pkg_arch" != "$DEB_ARCH" ]; then
+            echo "::error::Unexpected Debian architecture: $pkg_arch (expected $DEB_ARCH)"
+            exit 1
+          fi
+          if ! dpkg-deb --contents "$DEB" | grep -q '\.desktop$'; then
+            echo "::error::Debian package is missing a .desktop entry"
+            exit 1
+          fi
+          # 错架构的二进制在用户机上才会暴露；直接读主可执行文件的 ELF 头确认与包架构一致。
+          # 主二进制固定在 ./usr/lib/<pkg>/<pkg>（即 usr/bin 下符号链接的目标），
+          # 不能取"第一个可执行文件"——那会命中 chrome_crashpad_handler 之类的附属程序。
+          PKG_NAME=$(dpkg-deb --field "$DEB" Package)
+          MAIN_BIN="usr/lib/${PKG_NAME}/${PKG_NAME}"
+          if ! command -v readelf >/dev/null 2>&1; then
+            echo "::error::readelf is required for ELF architecture verification"
+            exit 1
+          fi
+          extract_dir=$(mktemp -d)
+          dpkg-deb --fsys-tarfile "$DEB" > "${extract_dir}/fsys.tar"
+          if tar -xf "${extract_dir}/fsys.tar" -C "$extract_dir" "./${MAIN_BIN}" 2>/dev/null; then
+            elf_arch=$(readelf -h "${extract_dir}/${MAIN_BIN}" | awk -F: '/Machine/ {gsub(/^[ \t]+/, "", $2); print $2}')
+            echo "Main binary (${MAIN_BIN}) ELF machine: ${elf_arch}"
+            case "$DEB_ARCH:$elf_arch" in
+              amd64:*X86-64*) ;;
+              arm64:*AArch64*) ;;
+              *)
+                echo "::error::ELF architecture mismatch: package=$DEB_ARCH binary=$elf_arch"
+                exit 1
+                ;;
+            esac
+          else
+            echo "::error::Main binary not found in package: ./${MAIN_BIN}"
+            exit 1
+          fi
+          rm -rf "$extract_dir"
+          echo "✅ Debian package metadata verified: $(basename "$DEB") ($pkg_arch, ${elf_arch})"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-${{ matrix.arch }}-floatboat
+          path: |
+            dist/linux/*.deb
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Floatboat UOS Linux (.deb, artifact only)
+  # ===========================================
+  # UOS 使用 /opt/apps/com.floatboat.desktop 布局，与通用 Debian 包并行保留。
+  # 该构建 job 只上传 Actions artifact；联合模式由 upload job 等待两套 Linux 包全部成功。
+  build-linux-uos:
+    name: Build Floatboat UOS Linux (${{ matrix.arch }})
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    if: inputs.notify_only == false && (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') && inputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            debArch: amd64
+            runner: ubuntu-latest
+            abiBuilderImage: quay.io/pypa/manylinux_2_28_x86_64@sha256:4131ddd7acb9c6c966af02fe7e71edc51e078c2d41f475966697676430bfa2ae
+          - arch: arm64
+            debArch: arm64
+            runner: ubuntu-24.04-arm
+            abiBuilderImage: quay.io/pypa/manylinux_2_28_aarch64@sha256:abd1230aa9e4058a74b89d27cd14ba18c0db036d7bfe6e6f219a29ea63c24eb6
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject Floatboat version into package.json
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.version = process.env.VERSION;
+          fs.writeFileSync('package.json', `${JSON.stringify(pkg, null, 2)}\n`);
+          NODE
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20.19.0"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Linux packaging toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends dpkg binutils
+
+      - name: Rebuild SQLite for UOS V20 ABI
+        shell: bash
+        env:
+          ARCH: ${{ matrix.arch }}
+          ABI_BUILDER_IMAGE: ${{ matrix.abiBuilderImage }}
+        run: |
+          set -euo pipefail
+          electron_version=$(node -p "require('./package.json').devDependencies.electron.replace(/^[\\^~>=<]+/, '')")
+          node_root=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+          module_path=node_modules/better-sqlite3-multiple-ciphers/build/Release/better_sqlite3.node
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            --volume "$PWD:/workspace" \
+            --volume "$node_root:/opt/node:ro" \
+            --workdir /workspace \
+            --env ARCH \
+            --env ELECTRON_VERSION="$electron_version" \
+            --env HOME=/tmp/uos-builder-home \
+            --env CC=/opt/rh/gcc-toolset-14/root/usr/bin/gcc \
+            --env CXX=/opt/rh/gcc-toolset-14/root/usr/bin/g++ \
+            --env PYTHON=/opt/python/cp311-cp311/bin/python \
+            --env npm_config_build_from_source=true \
+            "$ABI_BUILDER_IMAGE" \
+            /bin/bash -lc '
+              set -euo pipefail
+              export PATH="/opt/node/bin:/opt/rh/gcc-toolset-14/root/usr/bin:$PATH"
+              mkdir -p "$HOME"
+              /opt/node/bin/node node_modules/@electron/rebuild/lib/cli.js \
+                --force \
+                --build-from-source \
+                --disable-pre-gyp-copy \
+                --only better-sqlite3-multiple-ciphers \
+                --module-dir /workspace \
+                --arch "$ARCH" \
+                --version "$ELECTRON_VERSION"
+              rm -rf node_modules/better-sqlite3-multiple-ciphers/bin
+            '
+
+          test -f "$module_path"
+          if [ "$ARCH" = x64 ]; then expected_machine='Advanced Micro Devices X86-64'; else expected_machine='AArch64'; fi
+          readelf --file-header "$module_path" | grep -F "Machine:" | grep -F "$expected_machine"
+          readelf --version-info --wide "$module_path" | grep -E 'Name: (GLIBC|GLIBCXX|CXXABI|GCC|LIBATOMIC)_' | sort -u
+
+      - name: Clear bundled release notes
+        shell: bash
+        run: rm -rf resources/release-notes
+
+      - name: Download bundled release notes
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: resources/release-notes/
+
+      - name: Verify bundled release notes digest
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const crypto = require('node:crypto');
+          const payload = fs.readFileSync('resources/release-notes/payload.json');
+          const digest = crypto.createHash('sha256').update(payload).digest('hex');
+          if (digest !== process.env.RELEASE_NOTES_SHA256) throw new Error('Bundled release note digest mismatch');
+          NODE
+
+      - name: Build Floatboat UOS package
+        run: pnpm run forge:make:linux:uos
+        env:
+          ARCH: ${{ matrix.arch }}
+          NODE_OPTIONS: --max-old-space-size=8192
+          BUILD_OBFUSCATE: "true"
+
+      - name: Verify UOS package metadata and layout
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEB_ARCH: ${{ matrix.debArch }}
+        run: |
+          set -euo pipefail
+          DEB="out/make/uos/${DEB_ARCH}/Floatboat-${VERSION}-${DEB_ARCH}.deb"
+          [ -f "$DEB" ] || { echo "::error::UOS DEB not found: $DEB"; find out/make -type f -print || true; exit 1; }
+          members=$(ar t "$DEB")
+          expected_members=$'debian-binary\ncontrol.tar.gz\ndata.tar.gz'
+          if [ "$members" != "$expected_members" ]; then
+            echo "::error::UOS DEB must contain gzip-compressed control/data archives, found: $members"
+            exit 1
+          fi
+          [ "$(dpkg-deb --field "$DEB" Package)" = "com.floatboat.desktop" ]
+          [ "$(dpkg-deb --field "$DEB" Architecture)" = "$DEB_ARCH" ]
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/files/floatboat' >/dev/null
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/entries/applications/com.floatboat.desktop.desktop' >/dev/null
+          dpkg-deb --contents "$DEB" | grep -F '/opt/apps/com.floatboat.desktop/info' >/dev/null
+          AUDIT="out/make/uos/${DEB_ARCH}/Floatboat-${VERSION}-${DEB_ARCH}-dependency-audit.json"
+          [ -f "$AUDIT" ] || { echo "::error::UOS dependency audit not found: $AUDIT"; exit 1; }
+          extract_dir=$(mktemp -d)
+          trap 'rm -rf "$extract_dir"' EXIT
+          dpkg-deb --extract "$DEB" "$extract_dir"
+          PACKAGE_ROOT="$extract_dir/opt/apps/com.floatboat.desktop"
+          [ ! -e "$PACKAGE_ROOT/files/resources/app-update.yml" ]
+          [ -f "$PACKAGE_ROOT/files/resources/uos-app-store.json" ]
+          if [ "$DEB_ARCH" = amd64 ]; then expected_machine='Advanced Micro Devices X86-64'; else expected_machine='AArch64'; fi
+          readelf -h "$PACKAGE_ROOT/files/floatboat" | grep -F "$expected_machine" >/dev/null
+          PACKAGE_ROOT="$PACKAGE_ROOT" AUDIT="$AUDIT" DEB="$DEB" node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const assert = require('node:assert/strict');
+          const { execFileSync } = require('node:child_process');
+          const root = process.env.PACKAGE_ROOT;
+          const arch = process.env.DEB_ARCH;
+          const inputVersion = process.env.VERSION;
+          const match = /^(\d+\.\d+\.\d+)(?:\.(\d+)|-rc\.(\d+))?$/.exec(inputVersion);
+          assert.ok(match, `UOS 不支持的版本格式：${inputVersion}`);
+          const version = `${match[1]}.${match[2] ?? match[3] ?? '0'}`;
+          assert.match(version, /^\d+\.\d+\.\d+\.\d+$/);
+          const field = (name) => execFileSync('dpkg-deb', ['--field', process.env.DEB, name], { encoding: 'utf8' }).trim();
+          const readElf = (args) => execFileSync('readelf', args, {
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024 * 1024,
+          });
+          const info = JSON.parse(fs.readFileSync(path.join(root, 'info'), 'utf8'));
+          const marker = JSON.parse(fs.readFileSync(path.join(root, 'files/resources/uos-app-store.json'), 'utf8'));
+          const audit = JSON.parse(fs.readFileSync(process.env.AUDIT, 'utf8'));
+          const abiBaseline = 'UOS V20 (glibc 2.28 / GCC 8)';
+          const abiLimits = {
+            GLIBC: '2.28', GLIBCXX: '3.4.25', CXXABI: '1.3.11', GCC: '7.0.0', LIBATOMIC: '1.2',
+          };
+          const expectedElfMachine = arch === 'amd64' ? 'Advanced Micro Devices X86-64' : 'AArch64';
+          const compareVersions = (left, right) => {
+            const leftParts = left.split('.').map(Number);
+            const rightParts = right.split('.').map(Number);
+            for (let index = 0; index < Math.max(leftParts.length, rightParts.length); index += 1) {
+              const difference = (leftParts[index] || 0) - (rightParts[index] || 0);
+              if (difference !== 0) return difference;
+            }
+            return 0;
+          };
+          const incompatibleAbi = [];
+          const incompatibleArchitecture = [];
+          const forbiddenRuntimePaths = [];
+          const scanElfAbi = (directory) => {
+            for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+              const entryPath = path.join(directory, entry.name);
+              if (entry.isDirectory()) {
+                scanElfAbi(entryPath);
+                continue;
+              }
+              if (!entry.isFile()) continue;
+              const header = Buffer.alloc(4);
+              const handle = fs.openSync(entryPath, 'r');
+              try {
+                if (fs.readSync(handle, header, 0, 4, 0) !== 4 || !header.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) continue;
+              } finally {
+                fs.closeSync(handle);
+              }
+              const relativePath = path.relative(root, entryPath);
+              const fileHeader = readElf(['--file-header', '--wide', entryPath]);
+              const machine = /^\s*Machine:\s*(.+)$/m.exec(fileHeader)?.[1].trim();
+              if (machine !== expectedElfMachine) {
+                incompatibleArchitecture.push(relativePath);
+              }
+              const dynamicInfo = readElf(['--dynamic', '--wide', entryPath]);
+              for (const runtimePath of dynamicInfo.matchAll(/\((?:RPATH|RUNPATH)\).*?\[([^\]]+)\]/g)) {
+                for (const value of runtimePath[1].split(':')) {
+                  if (/^\/(?:opt\/(?:rh|python)|workspace)(?:\/|$)|^\/home\/runner\/work(?:\/|$)/.test(value)) {
+                    forbiddenRuntimePaths.push(`${relativePath}: ${value}`);
+                  }
+                }
+              }
+              const versionInfo = readElf(['--version-info', '--wide', entryPath]);
+              for (const requirement of versionInfo.matchAll(/\bName:\s+(GLIBCXX|GLIBC|CXXABI|GCC|LIBATOMIC)_([0-9]+(?:\.[0-9]+)+)\b/g)) {
+                if (compareVersions(requirement[2], abiLimits[requirement[1]]) > 0) {
+                  incompatibleAbi.push(`${relativePath}: ${requirement[1]}_${requirement[2]}`);
+                }
+              }
+            }
+          };
+          assert.equal(info.appid, 'com.floatboat.desktop');
+          assert.equal(info.version, version);
+          assert.equal(field('Version'), version);
+          assert.deepEqual(info.arch, [arch]);
+          assert.equal(typeof info.permissions, 'object');
+          assert.equal(marker.appid, info.appid);
+          assert.equal(audit.appid, info.appid);
+          assert.equal(audit.version, version);
+          assert.equal(audit.arch, arch);
+          assert.ok(Array.isArray(audit.neededLibraries) && audit.neededLibraries.length > 0);
+          assert.ok(Array.isArray(audit.depends) && audit.depends.length > 0);
+          assert.ok(audit.depends.every((dependency) => typeof dependency === 'string' && dependency.trim() === dependency && dependency.length > 0));
+          assert.equal(audit.abiCompatibility.baseline, abiBaseline);
+          assert.deepEqual(audit.abiCompatibility.limits, abiLimits);
+          assert.ok(Array.isArray(audit.abiCompatibility.maximumVersions));
+          scanElfAbi(path.join(root, 'files'));
+          assert.deepEqual(incompatibleAbi.sort(), [], `UOS V20 ABI 超出基线：${incompatibleAbi.sort().join(', ')}`);
+          assert.deepEqual(incompatibleArchitecture.sort(), [], `UOS ELF 架构不匹配：${incompatibleArchitecture.sort().join(', ')}`);
+          assert.deepEqual(forbiddenRuntimePaths.sort(), [], `UOS ELF 残留构建路径：${forbiddenRuntimePaths.sort().join(', ')}`);
+          const controlDepends = field('Depends');
+          assert.ok(controlDepends, 'UOS DEB 缺少 Depends');
+          assert.deepEqual(controlDepends.split(',').map((dependency) => dependency.trim()), audit.depends);
+          NODE
+          # 两个 job 均在对应原生 runner 上构建，且 Electron 主程序来自同一架构的
+          # Forge package；dpkg Architecture 字段与原生矩阵共同构成架构门禁。
+
+      - name: Upload UOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: uos-linux-${{ matrix.arch }}
+          path: |
+            out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}.deb
+            out/make/uos/${{ matrix.debArch }}/Floatboat-${{ needs.prepare.outputs.floatboat_version }}-${{ matrix.debArch }}-dependency-audit.json
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================
+  # Publish Floatboat UOS Linux (.deb)
+  # ===========================================
+  publish-linux-uos:
+    name: Publish Floatboat UOS Linux
+    needs: [prepare, build-linux, build-linux-uos, upload]
+    runs-on: ubuntu-latest
+    if: |
+      always() &&
+      inputs.notify_only == false &&
+      inputs.is_rc == false &&
+      inputs.build_profile == 'release' &&
+      (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') &&
+      inputs.desktop_variant != 'deepseek-agent' &&
+      needs.prepare.outputs.package_set != 'launcher' &&
+      contains(inputs.platforms, 'linux') &&
+      needs.build-linux-uos.result == 'success' &&
+      (
+        needs.upload.result == 'success' ||
+        (
+          inputs.platforms == 'linux' &&
+          (
+            inputs.linux_package == 'uos-floatboat' ||
+            needs.build-linux.result == 'success'
+          )
+        )
+      )
+    steps:
+      - name: Download UOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: uos-linux-*
+          path: artifacts/uos/
+          merge-multiple: true
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Publish UOS packages and sync installer URLs
+        env:
+          INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
+          INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
+          INSTALLER_DOWNLOAD_BASE_URL: ${{ vars.INSTALLER_DOWNLOAD_BASE_URL }}
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          RELEASE_BUCKET: aoe-desktop-releases
+          CLOUDFRONT_DISTRIBUTION_ID: EOFLQQ0A8KCX1
+        run: |
+          set -euo pipefail
+          for name in INSTALLER_URLS_API_TOKEN INSTALLER_URLS_API_BASE_URL INSTALLER_DOWNLOAD_BASE_URL; do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::${name} is required to publish UOS installers"
+              exit 1
+            fi
+          done
+
+          INSTALLER_URLS_API_URL="${INSTALLER_URLS_API_BASE_URL%/}/api/ops/installer-urls"
+          DOWNLOAD_BASE_URL="${INSTALLER_DOWNLOAD_BASE_URL%/}/uos"
+          declare -A package_urls
+          for arch in amd64 arm64; do
+            package="artifacts/uos/Floatboat-${VERSION}-${arch}.deb"
+            if [ ! -f "$package" ]; then
+              echo "::error::Missing Floatboat UOS ${arch} package: ${package}"
+              exit 1
+            fi
+            key="uos/$(basename "$package")"
+            aws s3 cp "$package" "s3://${RELEASE_BUCKET}/${key}" \
+              --no-progress \
+              --checksum-algorithm SHA256 \
+              --cache-control "public,max-age=31536000,immutable"
+            local_size=$(wc -c < "$package" | tr -d ' ')
+            remote_size=$(aws s3api head-object --bucket "$RELEASE_BUCKET" --key "$key" --query ContentLength --output text)
+            if [ "$remote_size" != "$local_size" ]; then
+              echo "::error::S3 object size mismatch for ${key}: local=${local_size}, remote=${remote_size}"
+              exit 1
+            fi
+            package_urls[$arch]="${DOWNLOAD_BASE_URL}/$(basename "$package")"
+          done
+
+          invalidation_id=$(aws cloudfront create-invalidation \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --paths '/uos/*' \
+            --query 'Invalidation.Id' \
+            --output text)
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
+            --id "$invalidation_id" || echo "::warning::CloudFront waiter unavailable; continuing with CDN checks"
+
+          for arch in amd64 arm64; do
+            expected_size=$(wc -c < "artifacts/uos/Floatboat-${VERSION}-${arch}.deb" | tr -d ' ')
+            remote_size=$(curl --fail --silent --show-error --location --retry 6 --retry-all-errors \
+              --head "${package_urls[$arch]}" | awk 'BEGIN { IGNORECASE=1 } /^content-length:/ { value=$2; gsub("\r", "", value) } END { print value }')
+            if [ "$remote_size" != "$expected_size" ]; then
+              echo "::error::CDN package size mismatch for ${arch}: local=${expected_size}, remote=${remote_size:-missing}"
+              exit 1
+            fi
+          done
+
+          payload=$(jq -n \
+            --arg amd64 "${package_urls[amd64]}" \
+            --arg arm64 "${package_urls[arm64]}" \
+            '{
+              DOWNLOAD_UOS_AMD64_INSTALLER_URL: $amd64,
+              DOWNLOAD_UOS_ARM64_INSTALLER_URL: $arm64
+            }')
+          curl --fail-with-body --silent --show-error -X PATCH "$INSTALLER_URLS_API_URL" \
+            -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "Cache-Control: no-cache" \
+            -d "$payload" \
+            -o /tmp/uos-installer-urls-update.json
+          jq -e \
+            --arg amd64 "${package_urls[amd64]}" \
+            --arg arm64 "${package_urls[arm64]}" \
+            '.code == 0
+              and .data.DOWNLOAD_UOS_AMD64_INSTALLER_URL == $amd64
+              and .data.DOWNLOAD_UOS_ARM64_INSTALLER_URL == $arm64' \
+            /tmp/uos-installer-urls-update.json >/dev/null
+
+          verified=false
+          for attempt in 1 2 3 4 5; do
+            curl --fail-with-body --silent --show-error \
+              "${INSTALLER_URLS_API_URL}?verify_version=${VERSION}&verify_attempt=${attempt}&verify_nonce=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+              -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+              -H "Cache-Control: no-cache, no-store" \
+              -o /tmp/uos-installer-urls-current.json
+            if jq -e \
+              --arg amd64 "${package_urls[amd64]}" \
+              --arg arm64 "${package_urls[arm64]}" \
+              '.code == 0
+                and .data.DOWNLOAD_UOS_AMD64_INSTALLER_URL == $amd64
+                and .data.DOWNLOAD_UOS_ARM64_INSTALLER_URL == $arm64' \
+              /tmp/uos-installer-urls-current.json >/dev/null; then
+              verified=true
+              break
+            fi
+            sleep $((attempt * 3))
+          done
+          if [ "$verified" != "true" ]; then
+            echo "::error::UOS installer URLs did not converge"
+            jq '{code, message, data}' /tmp/uos-installer-urls-current.json
+            exit 1
+          fi
+          echo "✅ UOS amd64/arm64 packages published and installer URLs verified"
+
+  # ===========================================
+  # Test Launcher - macOS arm64
+  # ===========================================
+  build-test-launcher-macos-arm64:
+    name: Test Launcher macOS (arm64)
+    needs: prepare
+    runs-on: macos-26
+    if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
+
+      - name: Inject version into package.json
+        run: |
+          VERSION="${{ inputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check code signing availability
+        id: signing
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing macOS test launcher signing/notarization secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "available=true" >> $GITHUB_OUTPUT
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Import Code Signing Certificate
+        if: steps.signing.outputs.available == 'true'
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Package test launcher (macOS arm64)
+        run: pnpm run package:test-launcher:macos
+        env:
+          ARCH: arm64
+          NODE_OPTIONS: --max-old-space-size=8192
+          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          REQUIRE_TEST_LAUNCHER_NOTARIZE: "true"
+
+      - name: Verify notarized test launcher (macOS arm64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="tools/floatboat-test-launcher/floatboat-test-launcher-macos.zip"
+          VERIFY_DIR="$(mktemp -d)"
+          ditto -x -k "$ZIP" "$VERIFY_DIR"
+          APP="$VERIFY_DIR/floatboat-test-launcher/Floatboat Test Launcher.app"
+          INNER_APP="$APP/Contents/Resources/floatboat-test-launcher/app/Floatboat.app"
+          test -d "$APP" || { echo "::error::Launcher app not found in $ZIP"; exit 1; }
+          test -d "$INNER_APP" || { echo "::error::Bundled Floatboat.app not found in $ZIP"; exit 1; }
+          codesign --verify --deep --strict --verbose=4 "$INNER_APP"
+          codesign --verify --deep --strict --verbose=4 "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+
+      - name: Collect test launcher artifact
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          SRC="tools/floatboat-test-launcher/floatboat-test-launcher-macos.zip"
+          [ -f "$SRC" ] || { echo "Launcher zip not found: $SRC"; exit 1; }
+          mkdir -p dist/launchers
+          cp "$SRC" "dist/launchers/floatboat-test-launcher-${VERSION}-macos-arm64.zip"
+          echo "✅ Test launcher (macOS arm64): floatboat-test-launcher-${VERSION}-macos-arm64.zip"
+
+      - name: Upload test launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-launcher-macos-arm64
+          path: dist/launchers/*.zip
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Test Launcher - macOS x64 (Intel runner)
+  # ===========================================
+  build-test-launcher-macos-x64:
+    name: Test Launcher macOS (x64)
+    needs: prepare
+    runs-on: macos-26-intel
+    if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'macos')
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
+
+      - name: Inject version into package.json
+        run: |
+          VERSION="${{ inputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check code signing availability
+        id: signing
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_IDENTITY APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then
+              missing+=("$name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing macOS test launcher signing/notarization secrets: ${missing[*]}"
+            exit 1
+          fi
+          echo "available=true" >> $GITHUB_OUTPUT
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_IDENTITY: ${{ secrets.APPLE_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Import Code Signing Certificate
+        if: steps.signing.outputs.available == 'true'
+        uses: apple-actions/import-codesign-certs@v2
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Package test launcher (macOS x64)
+        run: pnpm run package:test-launcher:macos
+        env:
+          ARCH: x64
+          NODE_OPTIONS: --max-old-space-size=8192
+          APPLE_IDENTITY: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_IDENTITY || '' }}
+          APPLE_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.signing.outputs.available == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          REQUIRE_TEST_LAUNCHER_NOTARIZE: "true"
+
+      - name: Verify notarized test launcher (macOS x64)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ZIP="tools/floatboat-test-launcher/floatboat-test-launcher-macos.zip"
+          VERIFY_DIR="$(mktemp -d)"
+          ditto -x -k "$ZIP" "$VERIFY_DIR"
+          APP="$VERIFY_DIR/floatboat-test-launcher/Floatboat Test Launcher.app"
+          INNER_APP="$APP/Contents/Resources/floatboat-test-launcher/app/Floatboat.app"
+          test -d "$APP" || { echo "::error::Launcher app not found in $ZIP"; exit 1; }
+          test -d "$INNER_APP" || { echo "::error::Bundled Floatboat.app not found in $ZIP"; exit 1; }
+          codesign --verify --deep --strict --verbose=4 "$INNER_APP"
+          codesign --verify --deep --strict --verbose=4 "$APP"
+          xcrun stapler validate "$APP"
+          spctl --assess --type execute --verbose=4 "$APP"
+
+      - name: Collect test launcher artifact
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          SRC="tools/floatboat-test-launcher/floatboat-test-launcher-macos.zip"
+          [ -f "$SRC" ] || { echo "Launcher zip not found: $SRC"; exit 1; }
+          mkdir -p dist/launchers
+          cp "$SRC" "dist/launchers/floatboat-test-launcher-${VERSION}-macos-x64.zip"
+          echo "✅ Test launcher (macOS x64): floatboat-test-launcher-${VERSION}-macos-x64.zip"
+
+      - name: Upload test launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-launcher-macos-x64
+          path: dist/launchers/*.zip
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Test Launcher - Windows x64
+  # ===========================================
+  build-test-launcher-windows:
+    name: Test Launcher Windows (x64)
+    needs: prepare
+    runs-on: windows-latest
+    if: inputs.notify_only == false && inputs.desktop_variant == 'all' && needs.prepare.outputs.package_set != 'app' && contains(inputs.platforms, 'windows')
+
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Inject build profile .env
+        if: inputs.build_profile != 'release'
+        shell: bash
+        env:
+          TEST_BUILD_ENV_FILE: ${{ secrets.TEST_BUILD_ENV_FILE }}
+          INTERNAL_TEST_BUILD_ENV_FILE: ${{ secrets.INTERNAL_TEST_BUILD_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          case "${{ inputs.build_profile }}" in
+            test)
+              if [ -z "${TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::TEST_BUILD_ENV_FILE secret is required when build_profile=test"
+                exit 1
+              fi
+              ENV_CONTENT="$TEST_BUILD_ENV_FILE"
+              ;;
+            internal-test)
+              if [ -z "${INTERNAL_TEST_BUILD_ENV_FILE:-}" ]; then
+                echo "::error::INTERNAL_TEST_BUILD_ENV_FILE secret is required when build_profile=internal-test"
+                exit 1
+              fi
+              ENV_CONTENT="${INTERNAL_TEST_BUILD_ENV_FILE:-}"
+              ;;
+            *)
+              echo "::error::Unsupported build_profile: ${{ inputs.build_profile }}"
+              exit 1
+              ;;
+          esac
+          while IFS= read -r line; do
+            [ -n "$line" ] && echo "::add-mask::$line"
+          done <<< "$ENV_CONTENT"
+          printf '%s\n' "$ENV_CONTENT" > .env
+          if [ "${{ inputs.build_profile }}" = "internal-test" ]; then
+            printf '%s\n' 'AOE_INTERNAL_TEST_BUILD=true' >> .env
+            for required_key in STREAMING_ASR_BASE_URL STREAMING_ASR_API_KEY; do
+              if ! grep -Eq "^[[:space:]]*${required_key}[[:space:]]*=[[:space:]]*[^[:space:]]" .env; then
+                echo "::error::internal-test build requires a non-empty ${required_key}"
+                exit 1
+              fi
+            done
+          fi
+          entry_count=$(grep -Ec '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*=' .env || true)
+          echo "✅ Injected ${{ inputs.build_profile }} build .env (${entry_count} entries)."
+
+      - name: Inject version into package.json
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.version = '$VERSION';
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify Racent signing configuration
+        if: inputs.build_profile == 'release'
+        shell: pwsh
+        env:
+          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
+          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
+        run: |
+          foreach ($name in @("SIGNTOOL_ACCESS_KEY", "SIGNTOOL_ACCESS_SECRET", "SIGNTOOL_CERT_CODE")) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              Write-Error "$name is required for release-profile Windows signing."
+              exit 1
+            }
+          }
+          $tool = "build/signing/signtool-amd64.exe"
+          if (-not (Test-Path $tool)) {
+            Write-Error "$tool not found in source repo. Commit Racent signtool to aoe-desktop at $tool."
+            exit 1
+          }
+          $size = (Get-Item $tool).Length
+          if ($size -lt 100000) {
+            Write-Error "$tool looks too small ($size bytes). Likely a Git LFS pointer or corrupted file."
+            exit 1
+          }
+          Write-Host "Racent signtool present: $tool ($([math]::Round($size / 1MB, 2)) MB)"
+
+      - name: Package test launcher (Windows x64)
+        run: pnpm run package:test-launcher:win
+        env:
+          NODE_OPTIONS: --max-old-space-size=8192
+          SIGNTOOL_ACCESS_KEY: ${{ inputs.build_profile == 'release' && secrets.ACCESS_KEY || '' }}
+          SIGNTOOL_ACCESS_SECRET: ${{ inputs.build_profile == 'release' && secrets.ACCESS_SECRET || '' }}
+          SIGNTOOL_CERT_CODE: ${{ inputs.build_profile == 'release' && secrets.CERT_CODE || '' }}
+
+      - name: Collect test launcher artifact
+        shell: bash
+        run: |
+          VERSION="${{ inputs.version }}"
+          SRC="tools/floatboat-test-launcher/floatboat-test-launcher-win.zip"
+          [ -f "$SRC" ] || { echo "Launcher zip not found: $SRC"; exit 1; }
+          mkdir -p dist/launchers
+          cp "$SRC" "dist/launchers/floatboat-test-launcher-${VERSION}-win-x64.zip"
+          echo "✅ Test launcher (Windows x64): floatboat-test-launcher-${VERSION}-win-x64.zip"
+
+      - name: Upload test launcher artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-launcher-windows
+          path: dist/launchers/*.zip
+          retention-days: 3
+          if-no-files-found: error
+
+  # ===========================================
+  # Collect & Publish Release
+  # ===========================================
+  upload:
+    name: Upload All Artifacts
+    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
+    runs-on: ubuntu-latest
+    if: |
+      inputs.notify_only == false &&
+      always() &&
+      (
+        (
+          needs.prepare.outputs.package_set == 'launcher' &&
+          (!contains(inputs.platforms, 'macos') || (
+            needs.build-test-launcher-macos-arm64.result == 'success' &&
+            needs.build-test-launcher-macos-x64.result == 'success'
+          )) &&
+          (!contains(inputs.platforms, 'windows') || needs.build-test-launcher-windows.result == 'success')
+        ) ||
+        (
+          needs.prepare.outputs.package_set != 'launcher' &&
+          contains(inputs.platforms, 'macos') &&
+          contains(inputs.platforms, 'windows') &&
+          needs.build-macos-arm64.result == 'success' &&
+          (inputs.is_rc == true || needs.build-macos-x64.result == 'success') &&
+          needs.build-windows.result == 'success' &&
+          (!contains(inputs.platforms, 'linux') || (
+            (inputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success') &&
+            (inputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success')
+          ))
+        )
+      )
+
+    steps:
+      - name: Checkout source repo (for scripts)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+          fetch-depth: 0
+
+      - name: Checkout release verification tooling
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install and verify metadata dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile --ignore-scripts --prefer-offline; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "::error::Failed to install release metadata dependencies after 3 attempts"
+              exit 1
+            fi
+            delay=$((attempt * 15))
+            echo "::warning::Metadata dependency install attempt ${attempt} failed; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          node -e "require('js-yaml'); require('./scripts/packaging/updateMetadata.cjs')"
+
+      - name: Test release verification tooling
+        run: node --test release-tooling/.github/scripts/*.test.cjs
+
+      - name: Download canonical release notes payload
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: stable-release-notes
+          path: /tmp/release-notes/
+
+      - name: Download changelog
+        uses: actions/download-artifact@v4
+        with:
+          name: release-changelog
+          path: /tmp/changelog/
+
+      - name: Download Desktop app artifacts
+        if: needs.prepare.outputs.package_set != 'launcher'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: artifacts/apps/
+          merge-multiple: true
+
+      - name: Download test launcher (macOS arm64)
+        if: needs.build-test-launcher-macos-arm64.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: test-launcher-macos-arm64
+          path: dist/launchers/
+
+      - name: Download test launcher (macOS x64)
+        if: needs.build-test-launcher-macos-x64.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: test-launcher-macos-x64
+          path: dist/launchers/
+
+      - name: Download test launcher (Windows x64)
+        if: needs.build-test-launcher-windows.result == 'success'
+        uses: actions/download-artifact@v4
+        with:
+          name: test-launcher-windows
+          path: dist/launchers/
+
+      - name: List test launcher artifacts
+        run: |
+          echo "🚀 Test launcher artifacts (kept out of out/make so update metadata ignores them):"
+          ls -la dist/launchers/ 2>/dev/null || echo "  (none)"
+
+      - name: Collect all artifacts into out/make
+        run: |
+          set -euo pipefail
+          mkdir -p out/make dist
+          if [ -d artifacts/apps ]; then
+            find artifacts/apps -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.exe" -o -name "*.deb" \) -exec cp {} out/make/ \;
+          fi
+
+          echo "📦 Final out/make contents:"
+          find out/make -maxdepth 1 -type f -print | sort | sed 's#^#  - #'
+
+      - name: Verify required artifacts
+        if: needs.prepare.outputs.package_set != 'launcher'
+        shell: bash
+        env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          LINUX_REQUESTED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') }}
+          INCLUDE_MACOS_X64: ${{ inputs.is_rc == false }}
+        run: |
+          set -euo pipefail
+
+          require_file() {
+            local file_path="$1"
+            local label="$2"
+            if [ ! -f "$file_path" ]; then
+              echo "::error::Missing ${label}: ${file_path}"
+              exit 1
+            fi
+            echo "  ✅ ${label}: $(basename "$file_path")"
+          }
+
+          echo "🔎 Verifying Desktop release set for ${DESKTOP_VARIANT}"
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
+            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.dmg" "Floatboat macOS x64 DMG"
+            fi
+            require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "Floatboat Windows x64 installer"
+            require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.zip" "Floatboat macOS arm64 updater ZIP"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-x64.zip" "Floatboat macOS x64 updater ZIP"
+            fi
+          fi
+
+          if [ "$DESKTOP_VARIANT" != "floatboat" ]; then
+            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" "DeepSeek Agent macOS arm64 DMG"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" "DeepSeek Agent macOS x64 DMG"
+            fi
+            require_file "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe" "DeepSeek Agent Windows x64 installer"
+            require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" "DeepSeek Agent macOS arm64 updater ZIP"
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then
+              require_file "out/make/Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip" "DeepSeek Agent macOS x64 updater ZIP"
+            fi
+          fi
+
+          # 通用 Linux 是可选平台，只构建 Floatboat amd64 与 arm64 两个 deb。
+          # UOS 送审包由独立 job 验证和发布，不进入此目录或普通 Release 制品计数。
+          if [ "$LINUX_REQUESTED" = "true" ]; then
+            for deb_arch in amd64 arm64; do
+              require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-${deb_arch}.deb" "Floatboat Linux ${deb_arch} deb"
+            done
+            expected_deb=2
+          else
+            expected_deb=0
+          fi
+          deb_count=$(find out/make -maxdepth 1 -type f -name "*.deb" | wc -l | tr -d ' ')
+          if [ "$deb_count" -ne "$expected_deb" ]; then
+            echo "::error::Unexpected Linux artifact count: deb=$deb_count (expected $expected_deb)"
+            exit 1
+          fi
+
+          main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
+          updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            expected_main=6
+            expected_zip=4
+          elif [ "$DESKTOP_VARIANT" = "floatboat" ]; then
+            if [ "$INCLUDE_MACOS_X64" = "true" ]; then expected_main=3; expected_zip=2; else expected_main=2; expected_zip=1; fi
+          else
+            expected_main=3
+            expected_zip=2
+          fi
+          if [ "$main_installer_count" -ne "$expected_main" ] || [ "$updater_zip_count" -ne "$expected_zip" ]; then
+            echo "::error::Unexpected Desktop artifact counts: main=$main_installer_count (expected $expected_main), mac_zip=$updater_zip_count (expected $expected_zip)"
+            exit 1
+          fi
+
+          {
+            echo "### Desktop release artifacts"
+            echo ""
+            echo "Source commit: \`${SOURCE_SHA}\`"
+            echo ""
+            echo "| Variant | Platform | Arch | App version | Main installer |"
+            echo "| --- | --- | --- | --- | --- |"
+            if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
+              echo "| Floatboat | macOS | arm64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-arm64.dmg\` |"
+              [ "$INCLUDE_MACOS_X64" != "true" ] || echo "| Floatboat | macOS | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-x64.dmg\` |"
+              echo "| Floatboat | Windows | x64 | \`${FLOATBOAT_VERSION}\` | \`Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe\` |"
+            fi
+            if [ "$DESKTOP_VARIANT" != "floatboat" ]; then
+              echo "| Floatboat DeepSeek Agent | macOS | arm64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg\` |"
+              [ "$INCLUDE_MACOS_X64" != "true" ] || echo "| Floatboat DeepSeek Agent | macOS | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg\` |"
+              echo "| Floatboat DeepSeek Agent | Windows | x64 | \`${DEEPSEEK_VERSION}\` | \`Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe\` |"
+            fi
+            if [ "$LINUX_REQUESTED" = "true" ]; then
+              for deb_arch in amd64 arm64; do
+                echo "| Floatboat | Linux | ${deb_arch} | \`${FLOATBOAT_VERSION}\` | \`Floatboat-${FLOATBOAT_VERSION}-${deb_arch}.deb\` |"
+              done
+              echo ""
+              echo "> Linux \`.deb\` 仅供手动下载：客户端自动更新只在 macOS / Windows 启用。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Generate macOS Update Metadata
+        if: needs.prepare.outputs.package_set != 'launcher'
+        env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          IS_RC: ${{ inputs.is_rc }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/generate-latest-yml.sh
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
+            ./scripts/generate-latest-yml.sh --platform mac --release-version "$FLOATBOAT_VERSION"
+          fi
+          if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
+            ./scripts/generate-latest-yml.sh --platform mac --release-version "$DEEPSEEK_VERSION"
+          else
+            echo "ℹ️ DeepSeek Agent RC/test metadata intentionally skipped; manual-download artifacts only."
+          fi
+
+      - name: Generate Windows Update Metadata
+        if: needs.prepare.outputs.package_set != 'launcher'
+        env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          IS_RC: ${{ inputs.is_rc }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+        run: |
+          set -euo pipefail
+          chmod +x scripts/generate-latest-yml.sh
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
+            ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+          fi
+          if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
+            ./scripts/generate-latest-yml.sh --platform win "out/make/Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
+          else
+            echo "ℹ️ DeepSeek Agent RC/test metadata intentionally skipped; manual-download artifacts only."
+          fi
+
+      - name: Inject canonical release notes into stable metadata
+        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        shell: bash
+        env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
+        run: |
+          set -euo pipefail
+          payload=/tmp/release-notes/payload.json
+          metadata=(dist/deepseek-agent/deepseek-agent-mac.yml dist/deepseek-agent/deepseek-agent.yml)
+          if [ "$DESKTOP_VARIANT" = "all" ]; then
+            metadata=(dist/latest-mac.yml dist/latest.yml "${metadata[@]}")
+          fi
+          for metadata_path in "${metadata[@]}"; do
+            node release-tooling/.github/scripts/release-notes-envelope.cjs inject \
+              --metadata "$metadata_path" \
+              --payload "$payload"
+          done
+
+      - name: Verify generated update metadata
+        if: needs.prepare.outputs.package_set != 'launcher'
+        shell: bash
+        env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          IS_RC: ${{ inputs.is_rc }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          RELEASE_NOTES_ENABLED: ${{ needs.prepare.outputs.release_notes_enabled }}
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+          BASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [ "$RELEASE_NOTES_ENABLED" = "true" ]; then
+            release_note_args=(
+              --release-notes-payload /tmp/release-notes/payload.json
+              --release-notes-sha256 "$RELEASE_NOTES_SHA256"
+              --base-version "$BASE_VERSION"
+            )
+          else
+            release_note_args=(--forbid-release-notes)
+          fi
+
+          verify_metadata() {
+            node release-tooling/.github/scripts/verify-update-metadata.cjs "$@" "${release_note_args[@]}"
+          }
+
+          if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
+            mac_metadata_args=(
+              --metadata dist/latest-mac.yml
+              --artifact-dir out/make
+              --release-version "$FLOATBOAT_VERSION"
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.dmg"
+              --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-arm64.zip"
+            )
+            if [ "$IS_RC" = "false" ]; then
+              mac_metadata_args+=(
+                --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.dmg"
+                --expected-artifact "Floatboat-${FLOATBOAT_VERSION}-x64.zip"
+              )
+            fi
+            verify_metadata "${mac_metadata_args[@]}"
+
+            verify_metadata \
+              --metadata dist/latest.yml \
+              --artifact-dir out/make \
+              --release-version "$FLOATBOAT_VERSION" \
+              --expected-artifact "Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe"
+          elif [ -f dist/latest-mac.yml ] || [ -f dist/latest.yml ]; then
+            echo "::error::DeepSeek-only publishing must not generate Floatboat updater metadata"
+            exit 1
+          fi
+
+          if [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ]; then
+            verify_metadata \
+              --metadata dist/deepseek-agent/deepseek-agent-mac.yml \
+              --artifact-dir out/make \
+              --release-version "$DEEPSEEK_VERSION" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.dmg" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.dmg" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-arm64.zip" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-${DEEPSEEK_VERSION}-x64.zip"
+
+            verify_metadata \
+              --metadata dist/deepseek-agent/deepseek-agent.yml \
+              --artifact-dir out/make \
+              --release-version "$DEEPSEEK_VERSION" \
+              --expected-artifact "Floatboat-DeepSeek-Agent-Setup-${DEEPSEEK_VERSION}-x64.exe"
+          elif find dist/deepseek-agent -maxdepth 1 -type f -name '*.yml' -print -quit 2>/dev/null | grep -q .; then
+            echo "::error::DeepSeek Agent RC/test metadata must not be generated"
+            exit 1
+          fi
+
+      - name: Prepare empty public release body
+        run: |
+          # Release notes are internal-only and are sent to Feishu in the notify job.
+          # Keep the public GitHub Release body empty to avoid publishing internal notes.
+          : > /tmp/empty-release-body.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.release_tag }}
+          name: ${{ needs.prepare.outputs.desktop_variant == 'deepseek-agent' && format('DeepSeek Release v{0}', inputs.version) || inputs.build_profile == 'internal-test' && format('Internal Test v{0}', inputs.version) || inputs.build_profile == 'test' && format('Test v{0}', inputs.version) || inputs.is_rc == true && format('RC v{0}', inputs.version) || format('Release v{0}', inputs.version) }}
+          body_path: /tmp/empty-release-body.md
+          draft: false
+          prerelease: ${{ inputs.is_rc || inputs.build_profile != 'release' }}
+          fail_on_unmatched_files: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check bug handoff configuration
+        id: bug_handoff
+        if: |
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID || secrets.FEISHU_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET || secrets.FEISHU_APP_SECRET }}
+          FLOATBOAT_BUG_BASE_TOKEN: ${{ secrets.FLOATBOAT_BUG_BASE_TOKEN || vars.FLOATBOAT_BUG_BASE_TOKEN }}
+          FLOATBOAT_BUG_TABLE_ID: ${{ secrets.FLOATBOAT_BUG_TABLE_ID || vars.FLOATBOAT_BUG_TABLE_ID }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          if [ -z "${LARK_APP_ID:-}" ] || [ -z "${LARK_APP_SECRET:-}" ]; then
+            missing+=("LARK_APP_ID/LARK_APP_SECRET or FEISHU_APP_ID/FEISHU_APP_SECRET")
+          fi
+          if [ -z "${FLOATBOAT_BUG_BASE_TOKEN:-}" ]; then
+            missing+=("FLOATBOAT_BUG_BASE_TOKEN")
+          fi
+          if [ -z "${FLOATBOAT_BUG_TABLE_ID:-}" ]; then
+            missing+=("FLOATBOAT_BUG_TABLE_ID")
+          fi
+          if [ ! -f packages/fb-cli/src/commands/promoteMergedBugs.ts ]; then
+            missing+=("source repo command packages/fb-cli/src/commands/promoteMergedBugs.ts")
+          elif ! grep -q "promote-merged-bugs" packages/fb-cli/src/commands/promoteMergedBugs.ts; then
+            missing+=("source repo command registration for promote-merged-bugs")
+          fi
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Bug handoff skipped"
+              echo ""
+              echo "The app package was published, but merged bug PRs were not promoted from 待合并 to 待验收."
+              echo ""
+              echo "Missing configuration or source capability:"
+              for item in "${missing[@]}"; do
+                echo "- ${item}"
+              done
+              echo ""
+              echo "Source ref: \`${{ needs.prepare.outputs.source_sha }}\`"
+              echo "Required GitHub configuration:"
+              echo "- \`LARK_APP_ID\` + \`LARK_APP_SECRET\` secrets, or \`FEISHU_APP_ID\` + \`FEISHU_APP_SECRET\` secrets"
+              echo "- \`FLOATBOAT_BUG_BASE_TOKEN\` secret/variable"
+              echo "- \`FLOATBOAT_BUG_TABLE_ID\` secret/variable"
+              echo "- Source repo support for \`pnpm fb promote-merged-bugs\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::Skipping bug handoff; missing: ${missing[*]}"
+            exit 0
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Bug handoff enabled"
+            echo ""
+            echo "All required Lark/Base configuration is present and the source repo contains \`pnpm fb promote-merged-bugs\`."
+            echo "Source ref: \`${{ needs.prepare.outputs.source_sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Setup pnpm for bug handoff
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js for bug handoff
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install bug handoff tooling
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        run: |
+          npm install -g @larksuite/cli@1.0.57
+          pnpm install --frozen-lockfile
+
+      - name: Configure Lark CLI for bug handoff
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          LARK_APP_ID: ${{ secrets.LARK_APP_ID || secrets.FEISHU_APP_ID }}
+          LARK_APP_SECRET: ${{ secrets.LARK_APP_SECRET || secrets.FEISHU_APP_SECRET }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LARK_APP_ID:-}" ] || [ -z "${LARK_APP_SECRET:-}" ]; then
+            echo "::error::Bug handoff was enabled but Lark app secrets are unavailable."
+            exit 1
+          fi
+          printf '%s' "$LARK_APP_SECRET" | lark-cli config init --app-id "$LARK_APP_ID" --app-secret-stdin --brand feishu
+          lark-cli config default-as bot
+
+      - name: Check Lark Base access for bug handoff
+        id: bug_handoff_access
+        if: |
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          FLOATBOAT_BUG_BASE_TOKEN: ${{ secrets.FLOATBOAT_BUG_BASE_TOKEN || vars.FLOATBOAT_BUG_BASE_TOKEN }}
+          FLOATBOAT_BUG_TABLE_ID: ${{ secrets.FLOATBOAT_BUG_TABLE_ID || vars.FLOATBOAT_BUG_TABLE_ID }}
+        run: |
+          set -euo pipefail
+          if lark-cli base +record-list \
+            --base-token "$FLOATBOAT_BUG_BASE_TOKEN" \
+            --table-id "$FLOATBOAT_BUG_TABLE_ID" \
+            --limit 1 \
+            --offset 0 \
+            --format json >/tmp/bug-handoff-access.json 2>/tmp/bug-handoff-access.err; then
+            echo "accessible=true" >> "$GITHUB_OUTPUT"
+            echo "Bug Base access preflight passed." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "accessible=false" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Bug handoff skipped"
+            echo ""
+            echo "Lark app credentials are configured, but the bot cannot read the Bug Base."
+            echo "Open the Feishu developer console URL from the sanitized error below and apply the missing Base scopes, then rerun the workflow."
+            echo ""
+            echo '```json'
+            sed -E 's/(app[_-]?secret|secret|token|password)(["=: ]+)[^" ,}]+/\1\2***/Ig' /tmp/bug-handoff-access.err
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::warning::Skipping bug handoff because Lark Base access preflight failed."
+
+      - name: Promote merged bug PRs to acceptance
+        if: |
+          steps.bug_handoff_access.outputs.accessible == 'true' &&
+          steps.bug_handoff.outputs.enabled == 'true' &&
+          inputs.promote_merged_bugs == true &&
+          needs.prepare.outputs.package_set != 'launcher' &&
+          (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
+        env:
+          GITHUB_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
+          FLOATBOAT_BUG_BASE_TOKEN: ${{ secrets.FLOATBOAT_BUG_BASE_TOKEN || vars.FLOATBOAT_BUG_BASE_TOKEN }}
+          FLOATBOAT_BUG_TABLE_ID: ${{ secrets.FLOATBOAT_BUG_TABLE_ID || vars.FLOATBOAT_BUG_TABLE_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          CLEAN_GITHUB_TOKEN=$(python3 - <<'PY'
+          import os
+          token = os.environ.get("GITHUB_TOKEN", "").strip().lstrip("\ufeff").strip()
+          print(token, end="")
+          PY
+          )
+          if [ -z "$CLEAN_GITHUB_TOKEN" ]; then
+            echo "::error::SOURCE_REPO_PAT is empty after sanitization."
+            exit 1
+          fi
+          echo "::add-mask::$CLEAN_GITHUB_TOKEN"
+          set +e
+          pnpm fb promote-merged-bugs \
+            --build-ref HEAD \
+            --build-version "${{ inputs.version }}" \
+            --build-label "floatboat-release release ${{ inputs.version }}" \
+            --base-branch dev \
+            --run-url "$RUN_URL" \
+            --github-token "$CLEAN_GITHUB_TOKEN" 2>&1 | tee /tmp/bug-handoff.log
+          status=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "### Bug handoff result"
+            echo ""
+            echo "Build version: \`${{ inputs.version }}\`"
+            echo "Source ref: \`${{ needs.prepare.outputs.source_sha }}\`"
+            echo ""
+            echo '```'
+            cat /tmp/bug-handoff.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::Bug handoff failed after packaging. See the summary for details."
+            exit "$status"
+          fi
+
+      - name: Configure AWS credentials for internal RC updater
+        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Publish and verify internal RC updater
+        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        shell: bash
+        env:
+          TRACK: rc
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+        run: bash release-tooling/.github/scripts/publish-internal-updater.sh
+
+      # ===========================================
+      # S3 Deploy (official releases only)
+      # ===========================================
+      - name: Configure AWS Credentials
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Publish and verify stable updater feeds
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
+        shell: bash
+        env:
+          DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
+          FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
+          RELEASE_NOTES_ENABLED: ${{ needs.prepare.outputs.release_notes_enabled }}
+          RELEASE_NOTES_PAYLOAD: /tmp/release-notes/payload.json
+          RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
+          RELEASE_NOTES_BASE_VERSION: ${{ inputs.version }}
+          LINUX_DEB_ENABLED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') }}
+        run: bash release-tooling/.github/scripts/publish-stable-updater.sh
+
+      - name: Sync Floatboat website installer URLs
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all'
+        env:
+          INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
+          INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
+          INSTALLER_DOWNLOAD_BASE_URL: ${{ vars.INSTALLER_DOWNLOAD_BASE_URL }}
+          INSTALLER_URLS_API_PATH: /api/ops/installer-urls
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${INSTALLER_URLS_API_TOKEN:-}" ]; then
+            echo "::error::INSTALLER_URLS_API_TOKEN secret is required to sync website installer URLs"
+            exit 1
+          fi
+          if [ -z "${INSTALLER_URLS_API_BASE_URL:-}" ]; then
+            echo "::error::INSTALLER_URLS_API_BASE_URL variable is required to sync website installer URLs"
+            exit 1
+          fi
+          if [ -z "${INSTALLER_DOWNLOAD_BASE_URL:-}" ]; then
+            echo "::error::INSTALLER_DOWNLOAD_BASE_URL variable is required to sync website installer URLs"
+            exit 1
+          fi
+
+          INSTALLER_URLS_API_BASE_URL="${INSTALLER_URLS_API_BASE_URL%/}"
+          INSTALLER_DOWNLOAD_BASE_URL="${INSTALLER_DOWNLOAD_BASE_URL%/}"
+          INSTALLER_URLS_API_URL="${INSTALLER_URLS_API_BASE_URL}${INSTALLER_URLS_API_PATH}"
+
+          require_artifact() {
+            local expected_name="$1"
+            local label="$2"
+            local artifact
+            artifact=$(find out/make -type f -name "$expected_name" -print -quit)
+            if [ -z "$artifact" ]; then
+              echo "::error::Missing ${label}: ${expected_name}"
+              exit 1
+            fi
+            printf '%s' "$artifact"
+          }
+
+          WINDOWS_EXE=$(require_artifact "Floatboat-Setup-${VERSION}-x64.exe" "Floatboat Windows installer")
+          MAC_ARM_DMG=$(require_artifact "Floatboat-${VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG")
+          MAC_X64_DMG=$(require_artifact "Floatboat-${VERSION}-x64.dmg" "Floatboat macOS x64 DMG")
+
+          WINDOWS_URL="${INSTALLER_DOWNLOAD_BASE_URL}/$(basename "$WINDOWS_EXE")"
+          MAC_ARM_URL="${INSTALLER_DOWNLOAD_BASE_URL}/$(basename "$MAC_ARM_DMG")"
+          MAC_X64_URL="${INSTALLER_DOWNLOAD_BASE_URL}/$(basename "$MAC_X64_DMG")"
+
+          INSTALLER_URLS_JSON=$(jq -n \
+            --arg windows "$WINDOWS_URL" \
+            --arg mac_arm "$MAC_ARM_URL" \
+            --arg mac_x64 "$MAC_X64_URL" \
+            '{
+              DOWNLOAD_WINDOWS_BASE_INSTALLER_URL: $windows,
+              DOWNLOAD_MAC_ARM_INSTALLER_URL: $mac_arm,
+              DOWNLOAD_MAC_X86_INSTALLER_URL: $mac_x64
+            }')
+
+          echo "🌐 Syncing official installer URLs for v${VERSION}"
+          echo "  Windows: $(basename "$WINDOWS_EXE")"
+          echo "  macOS arm64: $(basename "$MAC_ARM_DMG")"
+          echo "  macOS x64: $(basename "$MAC_X64_DMG")"
+          curl --fail-with-body --silent --show-error -X PATCH "$INSTALLER_URLS_API_URL" \
+            -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -H "Cache-Control: no-cache" \
+            -d "$INSTALLER_URLS_JSON" \
+            -o /tmp/installer-urls-update.json
+
+          if ! jq -e '.code == 0' /tmp/installer-urls-update.json >/dev/null; then
+            echo "::error::Installer URL API rejected the update"
+            jq '{code, message, data}' /tmp/installer-urls-update.json
+            exit 1
+          fi
+
+          verify_installer_urls() {
+            jq -e \
+              --arg windows "$WINDOWS_URL" \
+              --arg mac_arm "$MAC_ARM_URL" \
+              --arg mac_x64 "$MAC_X64_URL" \
+              '.code == 0
+                and .data.DOWNLOAD_WINDOWS_BASE_INSTALLER_URL == $windows
+                and .data.DOWNLOAD_MAC_ARM_INSTALLER_URL == $mac_arm
+                and .data.DOWNLOAD_MAC_X86_INSTALLER_URL == $mac_x64' \
+              /tmp/installer-urls-current.json >/dev/null
+          }
+
+          for attempt in 1 2 3 4 5; do
+            # 网站 API 可能经过边缘缓存；使用唯一查询参数和 no-cache 请求头，
+            # 并为后端最终一致性预留短暂重试窗口。
+            VERIFY_URL="${INSTALLER_URLS_API_URL}?verify_version=${VERSION}&verify_attempt=${attempt}&verify_nonce=${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            curl --fail-with-body --silent --show-error "$VERIFY_URL" \
+              -H "Authorization: Bearer ${INSTALLER_URLS_API_TOKEN}" \
+              -H "Accept: application/json" \
+              -H "Cache-Control: no-cache, no-store" \
+              -H "Pragma: no-cache" \
+              -o /tmp/installer-urls-current.json
+
+            if verify_installer_urls; then
+              echo "✅ Website installer URLs synced and verified on attempt ${attempt}"
+              break
+            fi
+
+            if [ "$attempt" -eq 5 ]; then
+              echo "::error::Installer URL API still returned stale or mismatched values after ${attempt} attempts"
+              jq \
+                --arg windows "$WINDOWS_URL" \
+                --arg mac_arm "$MAC_ARM_URL" \
+                --arg mac_x64 "$MAC_X64_URL" \
+                '{
+                  code,
+                  message,
+                  expected: {
+                    DOWNLOAD_WINDOWS_BASE_INSTALLER_URL: $windows,
+                    DOWNLOAD_MAC_ARM_INSTALLER_URL: $mac_arm,
+                    DOWNLOAD_MAC_X86_INSTALLER_URL: $mac_x64
+                  },
+                  actual: {
+                    DOWNLOAD_WINDOWS_BASE_INSTALLER_URL: .data.DOWNLOAD_WINDOWS_BASE_INSTALLER_URL,
+                    DOWNLOAD_MAC_ARM_INSTALLER_URL: .data.DOWNLOAD_MAC_ARM_INSTALLER_URL,
+                    DOWNLOAD_MAC_X86_INSTALLER_URL: .data.DOWNLOAD_MAC_X86_INSTALLER_URL
+                  }
+                }' /tmp/installer-urls-current.json
+              exit 1
+            fi
+
+            delay=$((attempt * 3))
+            echo "Installer URLs are not visible yet; retrying in ${delay}s (${attempt}/5)"
+            sleep "$delay"
+          done
+
+  # ===========================================
+  # Release Summary & Feishu Notification
+  # ===========================================
+  notify:
+    name: Release Summary
+    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload, publish-linux-uos]
+    runs-on: ubuntu-latest
+    if: always() && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
+
+    steps:
+      - name: Download changelog
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: release-changelog
+          path: /tmp/changelog/
+
+      - name: Summary
+        run: |
+          echo "=========================================="
+          echo "       ${{ inputs.is_rc == true && 'RC' || 'Release' }} v${{ inputs.version }}"
+          echo "=========================================="
+          echo ""
+          echo "📦 Build Results:"
+          echo "   Package set:  ${{ needs.prepare.outputs.package_set }}"
+          echo "   Scope:        ${{ needs.prepare.outputs.desktop_variant }}"
+          if [ "${{ needs.prepare.outputs.desktop_variant }}" = "all" ]; then
+          echo "   Floatboat:    ${{ needs.prepare.outputs.floatboat_version }}"
+          fi
+          echo "   DeepSeek:     ${{ needs.prepare.outputs.deepseek_version }}"
+          echo "   macOS arm64:  ${{ needs.build-macos-arm64.result || 'skipped' }}"
+          echo "   macOS x64:    ${{ needs.build-macos-x64.result || 'skipped' }}"
+          echo "   Windows x64:  ${{ needs.build-windows.result || 'skipped' }}"
+          echo "   Linux generic:${{ needs.build-linux.result || 'skipped' }}"
+          echo "   Linux UOS:    ${{ needs.build-linux-uos.result || 'skipped' }}"
+          echo "   UOS publish:  ${{ needs.publish-linux-uos.result || 'skipped' }}"
+          echo ""
+          echo "📤 Upload:       ${{ needs.upload.result || 'skipped' }}"
+          if [ "${{ inputs.is_rc }}" != "true" ] && [ "${{ inputs.build_profile }}" = "release" ] && [ "${{ needs.prepare.outputs.package_set }}" != "launcher" ]; then
+          echo "☁️  S3 Deploy:    included in upload job"
+          echo "🌐 CDN:          configured by INSTALLER_DOWNLOAD_BASE_URL"
+          if [ "${{ needs.prepare.outputs.desktop_variant }}" = "all" ]; then
+          echo "🔗 Floatboat URLs: synced via installer URL management API"
+          else
+          echo "🛡️  Floatboat:     packages, feed, and website URLs untouched"
+          fi
+          echo "🐋 DeepSeek feed: release.aoe.chat/deepseek-agent"
+          fi
+          echo ""
+          echo "🔒 Release notes are sent internally to Feishu only."
+
+      - name: Send Feishu notification
+        run: |
+          python3 << 'PYEOF'
+          import glob
+          import json
+          import sys
+          import textwrap
+          import time
+          import urllib.request
+
+          version = "${{ inputs.version }}"
+          floatboat_version = "${{ needs.prepare.outputs.floatboat_version }}"
+          deepseek_version = "${{ needs.prepare.outputs.deepseek_version }}"
+          desktop_variant = "${{ needs.prepare.outputs.desktop_variant }}"
+          build_profile = "${{ inputs.build_profile }}"
+          package_set = "${{ needs.prepare.outputs.package_set }}"
+          linux_package = "${{ inputs.linux_package }}"
+          is_rc = "${{ inputs.is_rc }}" == "true"
+          prev_tag = "${{ needs.prepare.outputs.prev_tag }}"
+
+          macos_arm64 = "${{ needs.build-macos-arm64.result }}" or "skipped"
+          macos_x64   = "${{ needs.build-macos-x64.result }}"   or "skipped"
+          windows     = "${{ needs.build-windows.result }}"     or "skipped"
+          linux       = "${{ needs.build-linux.result }}"       or "skipped"
+          uos_linux   = "${{ needs.build-linux-uos.result }}"   or "skipped"
+          uos_publish = "${{ needs.publish-linux-uos.result }}" or "skipped"
+          upload      = "${{ needs.upload.result }}"            or "skipped"
+          linux_platform_requested = "linux" in "${{ inputs.platforms }}"
+
+          changelog_files = glob.glob("/tmp/changelog/changelog-*.md")
+          if changelog_files:
+              with open(changelog_files[0], encoding="utf-8") as f:
+                  changelog = f.read().strip()
+          else:
+              changelog = "_Changelog not available._"
+
+          def icon(s):
+              return {"success": "✅", "failure": "❌", "cancelled": "⏹️", "skipped": "⏭️"}.get(s, "❓")
+
+          emoji = "🏠" if build_profile == "internal-test" else ("🧪" if build_profile == "test" else ("🚧" if is_rc else "🎉"))
+          release_type = "内网测试版本" if build_profile == "internal-test" else ("测试版本" if build_profile == "test" else ("RC 预发布" if is_rc else "正式发布"))
+          range_hint = f"  (since {prev_tag})" if prev_tag else ""
+          # Production artifacts are published to release.aoe.chat.
+          # RC uses internal/rc; stable release uses the CDN root.
+          release_base_url = (
+              "https://release.aoe.chat/internal/rc"
+              if is_rc
+              else "https://release.aoe.chat"
+          ) if build_profile == "release" else None
+
+          def artifact_url(name):
+              if not release_base_url:
+                  return None
+              base_url = release_base_url
+              if name.startswith("Floatboat-DeepSeek-Agent-"):
+                  base_url = f"{base_url}/deepseek-agent"
+              return f"{base_url}/{name}"
+
+          def artifact_links(names):
+              links = [f"- {name}: {artifact_url(name)}" for name in names if artifact_url(name)]
+              return "\n".join(links) if links else "_本次构建未发布到 CDN。_"
+          has_floatboat = desktop_variant in ("all", "floatboat")
+          has_deepseek = desktop_variant in ("all", "deepseek-agent")
+          generic_linux_requested = linux_platform_requested and has_floatboat and linux_package in ("deb", "deb-and-uos")
+          uos_linux_requested = linux_platform_requested and has_floatboat and linux_package in ("uos-floatboat", "deb-and-uos")
+          main_installer_names = []
+          updater_zip_names = []
+          if has_floatboat:
+              main_installer_names.extend([
+                  f"Floatboat-{floatboat_version}-arm64.dmg",
+                  f"Floatboat-Setup-{floatboat_version}-x64.exe",
+              ])
+              updater_zip_names.append(f"Floatboat-{floatboat_version}-arm64.zip")
+              if not is_rc:
+                  main_installer_names.append(f"Floatboat-{floatboat_version}-x64.dmg")
+                  updater_zip_names.append(f"Floatboat-{floatboat_version}-x64.zip")
+          if has_deepseek:
+              main_installer_names.extend([
+                  f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.dmg",
+                  f"Floatboat-DeepSeek-Agent-Setup-{deepseek_version}-x64.exe",
+              ])
+              updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-arm64.zip")
+              if not is_rc:
+                  main_installer_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.dmg")
+                  updater_zip_names.append(f"Floatboat-DeepSeek-Agent-{deepseek_version}-x64.zip")
+          # Linux .deb 只提供手动下载，不写 updater metadata，因此单独列出而不混入主安装包清单。
+          linux_deb_names = []
+          if generic_linux_requested:
+              for deb_arch in ("amd64", "arm64"):
+                  linux_deb_names.append(f"Floatboat-{floatboat_version}-{deb_arch}.deb")
+          uos_deb_names = []
+          if uos_linux_requested:
+              for deb_arch in ("amd64", "arm64"):
+                  uos_deb_names.append(f"Floatboat-{floatboat_version}-{deb_arch}.deb")
+          launcher_names = [
+              f"floatboat-test-launcher-{version}-macos-arm64.zip",
+              f"floatboat-test-launcher-{version}-macos-x64.zip",
+              f"floatboat-test-launcher-{version}-win-x64.zip",
+          ]
+          main_installer_links = (
+              artifact_links(main_installer_names)
+              if package_set != "launcher"
+              else "_本次未构建 Desktop 应用安装包。_"
+          )
+          updater_zip_links = (
+              artifact_links(updater_zip_names)
+              if package_set != "launcher"
+              else "_本次未构建。_"
+          )
+          launcher_links = (
+              "_测试 launcher 未发布到 CDN。_"
+              if package_set != "app"
+              else "_本次未构建。_"
+          )
+          linux_deb_links = (
+              artifact_links(linux_deb_names)
+              if linux_deb_names and package_set != "launcher" and upload == "success"
+              else "_本次未发布。_"
+          )
+          uos_deb_links = (
+              "\n".join(f"- {name}: {release_base_url}/uos/{name}" for name in uos_deb_names)
+              if release_base_url and uos_deb_names and package_set != "launcher" and not is_rc and uos_publish == "success"
+              else "_本次未发布。_"
+          )
+
+          floatboat_version_line = f"Floatboat 版本：{floatboat_version}" if has_floatboat else "Floatboat：未构建、未发布、未更新 feed"
+          deepseek_version_line = f"DeepSeek Agent 版本：{deepseek_version}" if has_deepseek else "DeepSeek Agent：未构建、未发布、未更新 feed"
+          deepseek_feed_note = "DeepSeek Agent RC/test 只提供手动下载，不写入自动更新 feed。" if has_deepseek and (is_rc or build_profile != "release") else ""
+
+          header = f"""{emoji} AOE Desktop {release_type} v{version}
+
+          包类型：{package_set}
+          发行范围：{desktop_variant}
+          {floatboat_version_line}
+          {deepseek_version_line}
+
+          构建结果：
+            macOS arm64：{icon(macos_arm64)} {macos_arm64}
+            macOS x64：  {icon(macos_x64)} {macos_x64}
+            Windows x64：{icon(windows)} {windows}
+            Linux 通用 amd64+arm64：{icon(linux)} {linux}
+            UOS 送审 amd64+arm64：{icon(uos_linux)} {uos_linux}
+            UOS 下载地址发布：{icon(uos_publish)} {uos_publish}
+            上传：       {icon(upload)} {upload}
+
+          主安装包下载（本次共 {len(main_installer_names)} 个）：
+          {main_installer_links}
+
+          macOS updater ZIP：
+          {updater_zip_links}
+
+          普通 Linux .deb（仅手动下载）：
+          {linux_deb_links}
+
+          UOS Linux 送审 .deb（control.tar.gz）：
+          {uos_deb_links}
+
+          测试录制 launcher：
+          {launcher_links}
+
+          {deepseek_feed_note}
+          Linux .deb 不进入任何自动更新 feed：客户端自动更新仅在 macOS / Windows 启用。
+
+          🔒 Release note 仅内部发送到飞书机器人，不写入公开 GitHub Release 页面。
+
+          ────────────────────────
+          Release Note{range_hint}："""
+
+          full_text = textwrap.dedent(header).strip() + "\n\n" + changelog
+
+          # Feishu text messages have practical payload limits. Split conservatively
+          # by characters so long release notes are delivered as multiple messages.
+          MAX_CHARS = 3200
+
+          def split_text(text, max_chars):
+              chunks = []
+              remaining = text
+              while len(remaining) > max_chars:
+                  cut = remaining.rfind("\n", 0, max_chars)
+                  if cut < max_chars // 2:
+                      cut = max_chars
+                  chunks.append(remaining[:cut].rstrip())
+                  remaining = remaining[cut:].lstrip()
+              if remaining:
+                  chunks.append(remaining)
+              return chunks or [""]
+
+          chunks = split_text(full_text, MAX_CHARS)
+          total = len(chunks)
+          webhook_url = "${{ secrets.FEISHU_WEBHOOK_URL }}".strip()
+
+          if not webhook_url or webhook_url == "***":
+              print("❌ FEISHU_WEBHOOK_URL is empty or unavailable", file=sys.stderr)
+              sys.exit(1)
+
+          print(
+              f"📨 Sending internal Feishu release note: version={version}, "
+              f"is_rc={is_rc}, prev_tag={prev_tag or 'none'}, chunks={total}, "
+              f"chars={len(full_text)}"
+          )
+
+          def parse_response(body):
+              try:
+                  return json.loads(body)
+              except json.JSONDecodeError as exc:
+                  raise RuntimeError(f"Feishu returned non-JSON response: {body!r}") from exc
+
+          def assert_feishu_success(data):
+              status_code = data.get("StatusCode")
+              code = data.get("code")
+              if status_code not in (None, 0) or code not in (None, 0):
+                  raise RuntimeError(f"Feishu business error: {data}")
+
+          for index, chunk in enumerate(chunks, start=1):
+              text = chunk if total == 1 else f"【{index}/{total}】\n{chunk}"
+              payload = json.dumps({
+                  "msg_type": "text",
+                  "content": {"text": text}
+              }, ensure_ascii=False)
+
+              req = urllib.request.Request(
+                  webhook_url,
+                  data=payload.encode("utf-8"),
+                  headers={"Content-Type": "application/json; charset=utf-8"},
+                  method="POST"
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=15) as resp:
+                      body = resp.read().decode()
+                  data = parse_response(body)
+                  assert_feishu_success(data)
+                  print(
+                      f"✅ Feishu delivered chunk [{index}/{total}] "
+                      f"chars={len(text)} response={data}"
+                  )
+              except Exception as e:
+                  print(f"❌ Feishu notification failed [{index}/{total}]: {e}", file=sys.stderr)
+                  sys.exit(1)
+              if index < total:
+                  time.sleep(0.5)
+          PYEOF
