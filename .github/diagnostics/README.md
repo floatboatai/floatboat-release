@@ -4,7 +4,7 @@
 
 下载包之前先运行快速自检：在任务临时目录创建主 EXE 标记和普通文件，通过系统 Windows PowerShell 5.1 运行诊断脚本，确认已知文件锁产生错误 32，释放后错误归零。
 
-`diagnostics_only=true` 会只启动一个 Windows selftest runner：不下载或运行安装器。快速自检还验证桌面输出目录 junction 的真实路径解析、拒绝输出链接指向安装目录，以及不递归安装目录内部的子 junction。默认 `false` 继续完整四场景回归。
+`diagnostics_only=true` 会只启动一个 Windows selftest runner：不下载或运行安装器。快速自检还验证桌面输出目录 junction 的真实路径解析、拒绝输出链接指向安装目录，以及不递归安装目录内部的子 junction。默认 `false` 继续完整四场景回归；`regression_scope=baseline` 可只运行默认 TEMP 与短 TEMP 的可信对照。
 
 安装目录固定为用户报告的 `C:\Program Files\Floatboat`。执行前要求目录与 Floatboat 卸载注册项均不存在；每个场景独占一次性 VM，避免注册表残留影响 `/D`。四个场景分别为：
 
@@ -13,7 +13,7 @@
 - `external-lock`：RC4 首次安装后，由系统目录内 PowerShell 对 `resources\app.asar` 建立只读且不共享删除的文件句柄；诊断脚本必须发现错误码 32，释放句柄后必须消失；分别记录有锁升级与释放后重试结果。
 - `apostrophe-temp`：RC4 首次安装、RC4 同版覆盖、RC4 升 RC5、RC5 同版覆盖，始终使用含单引号和空格的 TEMP 路径。
 
-每次安装命令使用 NSIS 官方要求的 `/S /D=<绝对路径>`（`/D` 最后且不加引号），上限 600 秒。进程只按本任务启动或捕获的后代 PID 及创建时间回收，不按进程名称全局查杀。下载后先验证 Authenticode；判断安装成功要求退出码为 0、主 EXE 和卸载器存在、ASAR 内 `package.json.version` 符合预期，同时保留 ProductVersion 和 FileVersion。
+每次安装命令使用 NSIS 官方要求的 `/S /D=<绝对路径>`（`/D` 最后且不加引号），上限 600 秒。进程先按本任务启动或捕获的后代 PID 及创建时间登记，路径信息可为空；只回收身份仍匹配的进程，并确认全部退出后才能继续对照，不按进程名称全局查杀。新 setup 本身出现官方英文 `uninstallFailed: <code>` 且仅提供 MB_OK 时，先记录 owner、原文和按钮，再点确定以取得真实退出码；其它窗口只记录。超时强制结束码单独保存为 `terminationExitCode`，不冒充产品退出码。下载后先验证 Authenticode；判断安装成功要求退出码为 0、主 EXE 和卸载器存在、ASAR 内 `package.json.version` 符合预期，同时保留 ProductVersion 和 FileVersion。
 
 边界刻画不预设必须失败：有锁/长 TEMP 若成功也记录真实结果；超时、基础对照失败、报告未能发现已知锁、恢复后安装失败会令 job 失败。证据始终上传，包括 `results.json`、摘要、安装状态、子进程退出码、窗口文本、相关卸载注册项、最长文件路径和只读诊断报告。
 

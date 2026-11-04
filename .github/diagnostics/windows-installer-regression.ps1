@@ -90,11 +90,11 @@ function Get-InstalledState {
   $state
 }
 
-function Register-OwnedProcess([Diagnostics.Process]$Process, [string]$Reason, [string]$Operation = '') {
-  try {
-    $Process.EnableRaisingEvents = $true
-    $script:Owned[[string]$Process.Id] = [ordered]@{ processId = $Process.Id; process = $Process; startTicks = $Process.StartTime.ToUniversalTime().Ticks; reason = $Reason; operation = $(if ($Operation) { $Operation } else { $Reason }); path = $Process.MainModule.FileName; exitCode = $null }
-  } catch { Write-Warning "Cannot retain process identity: $($_.Exception.Message)" }
+function Register-OwnedProcess([Diagnostics.Process]$Process, [string]$Reason, [string]$Operation = '', [string]$ExecutablePath = '') {
+  # 刚启动的进程 MainModule 可能尚未就绪；生命周期身份不能依赖可选的模块信息。
+  $identity = [ordered]@{ processId = $Process.Id; process = $Process; startTicks = $Process.StartTime.ToUniversalTime().Ticks; reason = $Reason; operation = $(if ($Operation) { $Operation } else { $Reason }); path = $ExecutablePath; exitCode = $null }
+  $script:Owned[[string]$Process.Id] = $identity
+  $Process.EnableRaisingEvents = $true
 }
 
 function Update-OwnedProcesses {
@@ -108,7 +108,7 @@ function Update-OwnedProcesses {
       if ($candidate.CreationDate.ToUniversalTime().Ticks -lt $parent.startTicks) { continue }
       try {
         if ($parent.process.HasExited -and $candidate.CreationDate.ToUniversalTime() -gt $parent.process.ExitTime.ToUniversalTime()) { continue }
-        Register-OwnedProcess (Get-Process -Id $candidate.ProcessId -ErrorAction Stop) "descendant of $($parent.processId)" $parent.operation
+        Register-OwnedProcess (Get-Process -Id $candidate.ProcessId -ErrorAction Stop) "descendant of $($parent.processId)" $parent.operation ([string]$candidate.ExecutablePath)
       } catch { }
     }
   }
@@ -117,15 +117,48 @@ function Update-OwnedProcesses {
   }
 }
 
-function Stop-OwnedProcesses {
+function Stop-OwnedProcesses([string]$Operation = '') {
   Update-OwnedProcesses
   foreach ($identity in @($script:Owned.Values | Sort-Object startTicks -Descending)) {
+    if ($Operation -and $identity.operation -ne $Operation) { continue }
+    if ($identity.process.HasExited) { continue }
     try {
       $current = Get-Process -Id $identity.processId -ErrorAction Stop
-      if ($current.StartTime.ToUniversalTime().Ticks -eq $identity.startTicks) { $current.Kill(); [void]$current.WaitForExit(5000) }
-    } catch { }
+      if ($current.StartTime.ToUniversalTime().Ticks -ne $identity.startTicks) { throw 'Owned process identity changed; refusing to terminate the current PID.' }
+      $identity.process.Kill()
+      if (-not $identity.process.WaitForExit(10000)) { throw 'Owned process did not exit after termination.' }
+    } catch {
+      if (-not $identity.process.HasExited) { throw }
+    }
   }
   Update-OwnedProcesses
+  $remaining = @($script:Owned.Values | Where-Object { (-not $Operation -or $_.operation -eq $Operation) -and -not $_.process.HasExited })
+  if ($remaining.Count -gt 0) { throw 'Task processes remain alive; refusing to start another installer.' }
+}
+
+function Confirm-KnownInstallerDialogs([string]$Operation, $Seen, $Events) {
+  foreach ($identity in $script:Owned.Values) {
+    if ($identity.operation -ne $Operation -or $identity.process.HasExited) { continue }
+    $current = Get-Process -Id $identity.processId -ErrorAction SilentlyContinue
+    if (-not $current -or $current.StartTime.ToUniversalTime().Ticks -ne $identity.startTicks) { continue }
+    foreach ($dialog in [InstallerDiagnosticWindows]::ReadDialogs($identity.processId)) {
+      $text = $dialog.Text -join "`n"
+      $key = "$($identity.startTicks):$($dialog.Handle):$text"
+      if ($Seen.ContainsKey($key)) { continue }
+      $Seen[$key] = $true
+      $uninstallMessages = @($dialog.Text | Where-Object { $_.Trim() -match '^Failed to uninstall old application files\. Please try running the installer again\.\s*:\s*-?[0-9]+$' })
+      $known = $identity.reason -eq $Operation -and $dialog.Title -match '^Floatboat' -and $dialog.DismissButtonId -eq 1 -and $uninstallMessages.Count -eq 1
+      $event = [ordered]@{ observedAt = [DateTime]::UtcNow.ToString('o'); processId = $identity.processId; startTicks = $identity.startTicks; handle = $dialog.Handle; title = $dialog.Title; text = @($dialog.Text); recognizedError = $known; buttonId = $dialog.DismissButtonId; acknowledged = $false }
+      $Events.Add($event)
+      # 先落盘原文，再仅确认本次新安装器自身的官方 uninstallFailed 错误框 MB_OK。
+      Write-Json (Join-Path $OutputDirectory "$Operation-dialogs.json") @($Events.ToArray())
+      if ($known -and $dialog.DismissButtonId -eq 1) {
+        $event.acknowledged = [InstallerDiagnosticWindows]::Acknowledge($dialog.Handle, $identity.processId, $dialog.DismissButtonId)
+        Write-Json (Join-Path $OutputDirectory "$Operation-dialogs.json") @($Events.ToArray())
+        Write-Host "Recorded installer error dialog for PID $($identity.processId); button=$($dialog.DismissButtonId), acknowledged=$($event.acknowledged)"
+      }
+    }
+  }
 }
 
 function Save-Diagnostics([string]$Label) {
@@ -164,10 +197,13 @@ function Invoke-Installer([string]$Label, [string]$Installer, [string]$ExpectedV
   $info.Environment['TEMP'] = $TempDirectory
   $info.Environment['TMP'] = $TempDirectory
   $process = [Diagnostics.Process]::Start($info)
-  Register-OwnedProcess $process $Label
+  Register-OwnedProcess $process $Label -ExecutablePath $Installer
+  $seenDialogs = @{}
+  $dialogEvents = [Collections.Generic.List[object]]::new()
   $deadline = $start.AddSeconds($InstallerTimeoutSeconds)
   do {
     Update-OwnedProcesses
+    Confirm-KnownInstallerDialogs $Label $seenDialogs $dialogEvents
     $activeChildren = @($script:Owned.Values | Where-Object { $_.operation -eq $Label -and -not $_.process.HasExited })
     $active = -not $process.HasExited -or $activeChildren.Count -gt 0
     if ($active) { Start-Sleep -Milliseconds 750 }
@@ -175,14 +211,15 @@ function Invoke-Installer([string]$Label, [string]$Installer, [string]$ExpectedV
   $timedOut = $active
   if ($timedOut) {
     Save-Diagnostics "$Label-timeout"
-    Stop-OwnedProcesses
+    Stop-OwnedProcesses $Label
   }
-  [void]$process.WaitForExit(5000)
+  if (-not $process.WaitForExit(5000)) { throw 'Installer still alive after cleanup; no retry will be attempted.' }
   Update-OwnedProcesses
-  $exitCode = if ($process.HasExited) { $process.ExitCode } else { $null }
+  $exitCode = if (-not $timedOut -and $process.HasExited) { $process.ExitCode } else { $null }
+  $terminationExitCode = if ($timedOut -and $process.HasExited) { $process.ExitCode } else { $null }
   $state = Get-InstalledState
   $passed = -not $timedOut -and $exitCode -eq 0 -and $state.exeExists -and $state.uninstallerExists -and $state.packageVersion -eq $ExpectedVersion
-  $record = [ordered]@{ name = $Label; startedAt = $start.ToString('o'); finishedAt = [DateTime]::UtcNow.ToString('o'); installer = $Installer; arguments = $info.Arguments; tempDirectory = $TempDirectory; tempLength = $TempDirectory.Length; processId = $process.Id; timedOut = $timedOut; exitCode = $exitCode; expectedPackageVersion = $ExpectedVersion; passed = $passed; installed = $state }
+  $record = [ordered]@{ name = $Label; startedAt = $start.ToString('o'); finishedAt = [DateTime]::UtcNow.ToString('o'); installer = $Installer; arguments = $info.Arguments; tempDirectory = $TempDirectory; tempLength = $TempDirectory.Length; processId = $process.Id; timedOut = $timedOut; exitCode = $exitCode; terminationExitCode = $terminationExitCode; dialogs = @($dialogEvents.ToArray()); expectedPackageVersion = $ExpectedVersion; passed = $passed; installed = $state }
   $script:Steps.Add($record)
   Write-Json (Join-Path $OutputDirectory "$Label.json") $record
   Write-Host "$Label exit=$exitCode timeout=$timedOut package=$($state.packageVersion) passed=$passed"
@@ -221,6 +258,41 @@ public static class InstallerDiagnosticWindows {
     }, IntPtr.Zero);
     return result.ToArray();
   }
+  [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder text, int capacity);
+  [DllImport("user32.dll")] private static extern IntPtr GetDlgItem(IntPtr window, int controlId);
+  [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool IsWindowEnabled(IntPtr window);
+  [DllImport("user32.dll")] private static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+  public sealed class Dialog {
+    public long Handle;
+    public string Title;
+    public string[] Text;
+    public int DismissButtonId;
+  }
+  public static Dialog[] ReadDialogs(int processId) {
+    var result = new List<Dialog>();
+    EnumWindows((window, parameter) => {
+      uint owner; GetWindowThreadProcessId(window, out owner);
+      var className = new StringBuilder(256); GetClassName(window, className, className.Capacity);
+      if (owner != (uint)processId || className.ToString() != "#32770" || !IsWindowVisible(window)) return true;
+      var texts = new List<string>();
+      var title = new StringBuilder(4096); GetWindowText(window, title, title.Capacity);
+      EnumChildWindows(window, (child, ignored) => { var text = new StringBuilder(4096); GetWindowText(child, text, text.Capacity); if (text.Length > 0) texts.Add(text.ToString()); return true; }, IntPtr.Zero);
+      int dismiss = 0;
+      foreach (int id in new[] { 2, 1 }) { var button = GetDlgItem(window, id); if (button != IntPtr.Zero && IsWindowVisible(button) && IsWindowEnabled(button)) { dismiss = id; break; } }
+      result.Add(new Dialog { Handle = window.ToInt64(), Title = title.ToString(), Text = texts.ToArray(), DismissButtonId = dismiss });
+      return true;
+    }, IntPtr.Zero);
+    return result.ToArray();
+  }
+  public static bool Acknowledge(long handle, int processId, int buttonId) {
+    if (buttonId != 1) return false;
+    var window = new IntPtr(handle); uint owner; GetWindowThreadProcessId(window, out owner);
+    if (owner != (uint)processId) return false;
+    var button = GetDlgItem(window, buttonId);
+    return button != IntPtr.Zero && IsWindowVisible(button) && IsWindowEnabled(button) && PostMessage(button, 0x00F5, IntPtr.Zero, IntPtr.Zero);
+  }
+
 }
 '@
   $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -259,7 +331,7 @@ try {
     $lockInfo = [Diagnostics.ProcessStartInfo]::new("$env:WINDIR\System32\WindowsPowerShell\v1.0\powershell.exe", "-NoProfile -NonInteractive -EncodedCommand $encoded")
     $lockInfo.UseShellExecute = $false
     $lockProcess = [Diagnostics.Process]::Start($lockInfo)
-    Register-OwnedProcess $lockProcess 'external-system-powershell-file-lock'
+    Register-OwnedProcess $lockProcess 'external-system-powershell-file-lock' -ExecutablePath $lockInfo.FileName
     $readyDeadline = [DateTime]::UtcNow.AddSeconds(20)
     while (-not (Test-Path -LiteralPath $readyFile) -and [DateTime]::UtcNow -lt $readyDeadline -and -not $lockProcess.HasExited) { Start-Sleep -Milliseconds 250 }
     if (-not (Test-Path -LiteralPath $readyFile)) { throw 'External lock process did not acquire the intended file.' }
@@ -310,7 +382,11 @@ try {
 } finally {
   New-Item -ItemType File -Path $releaseLockFile -Force | Out-Null
   try { Save-Diagnostics '99-final' } catch { $_ | Out-String | Set-Content -LiteralPath (Join-Path $OutputDirectory 'final-diagnostic-error.txt') }
-  Stop-OwnedProcesses
+  try { Stop-OwnedProcesses } catch {
+    $cleanupError = $_ | Out-String
+    $script:Fatal = [string]$script:Fatal + "`nCleanup failed: " + $cleanupError
+    $cleanupError | Set-Content -LiteralPath (Join-Path $OutputDirectory 'cleanup-error.txt')
+  }
   $processExitRecords = @($script:Owned.Values | ForEach-Object { [ordered]@{ processId = $_.processId; startTicks = $_.startTicks; reason = $_.reason; operation = $_.operation; path = $_.path; exitCode = $_.exitCode } })
   Write-Json (Join-Path $OutputDirectory 'results.json') @{ scenario = $Scenario; steps = @($script:Steps.ToArray()); checks = @($script:Checks.ToArray()); fatal = $script:Fatal; processes = $processExitRecords }
   $lines = @("## Windows installer regression: $Scenario", '', "Installation root: $InstallDirectory", '', '| Step | Exit | Timeout | Package version | Passed |', '| --- | --- | --- | --- | --- |')

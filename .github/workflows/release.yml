@@ -9,6 +9,13 @@ on:
         required: false
         default: false
 
+      regression_scope:
+        description: "Full installer matrix or focused default-TEMP baseline"
+        type: choice
+        required: false
+        default: all
+        options: [all, baseline]
+
 permissions:
   contents: read
   actions: read
@@ -21,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: ${{ fromJSON(inputs.diagnostics_only && '["selftest"]' || '["baseline","long-temp","external-lock","apostrophe-temp"]') }}
+        scenario: ${{ fromJSON(inputs.diagnostics_only && '["selftest"]' || (inputs.regression_scope == 'baseline' && '["baseline"]' || '["baseline","long-temp","external-lock","apostrophe-temp"]')) }}
     steps:
       - name: Checkout isolated diagnostic tooling
         uses: actions/checkout@v4
