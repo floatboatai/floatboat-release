@@ -32,6 +32,11 @@ const UOS_STORE_CONTRACT = Object.freeze({
 const LIST_PAGE_SIZE = 100;
 const MAX_LIST_PAGES = 100;
 const MAX_LIST_RECORDS = LIST_PAGE_SIZE * MAX_LIST_PAGES;
+const PACKAGE_NAME = 'com.floatboat.desktop';
+// 公开包编辑器更新原包时继承这些适配字段；包 ID、DID 和旧包摘要不属于可继承元数据。
+const PACKAGE_ADAPTATION_FIELDS = Object.freeze([
+  'supBlineVer', 'unsupportBlineVers', 'supSys', 'systemStr', 'system_platform', 'baseline', 'unsupportBaseline',
+]);
 const APPLICATION_STATUS = Object.freeze({
   '-99': 'draft',
   0: 'rejected',
@@ -113,6 +118,71 @@ function normalizeEnvelope(payload, operation) {
     throw new UosStoreApiError('UOS_STORE_REQUEST_REJECTED', `${operation} 被统信平台拒绝`);
   }
   return payload.datas ?? payload.data ?? payload;
+}
+
+function normalizeApplicationDetail(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const root = value.datas ?? value.data ?? value;
+  if (!root || typeof root !== 'object' || Array.isArray(root)) return null;
+  if (root.app_info && root.app_basic_info) return null;
+  const application = root.app_info ?? root;
+  return application && typeof application === 'object' && !Array.isArray(application) &&
+    application.app_basic_info && typeof application.app_basic_info === 'object'
+    ? application : null;
+}
+
+function validateSubmissionTemplate(template, expectedAppId) {
+  const application = normalizeApplicationDetail(template);
+  const invalid = (reason) => { throw new UosStoreApiError('UOS_SUBMISSION_TEMPLATE_INVALID', reason); };
+  const appId = application?.app_basic_info?.app_id;
+  if (!application || !['number', 'string'].includes(typeof appId) || String(appId).trim() === '' ||
+      (expectedAppId !== undefined && String(appId) !== String(expectedAppId))) {
+    invalid('应用详情的商店应用 ID 无法确认');
+  }
+  if (!application.app_fit_info || typeof application.app_fit_info !== 'object' || Array.isArray(application.app_fit_info) ||
+      !Array.isArray(application.app_lan_infos) || application.app_lan_infos.length === 0 ||
+      application.app_lan_infos.some((item) => !item || typeof item !== 'object' || Array.isArray(item))) {
+    invalid('应用详情缺少可复用的适配或语言素材');
+  }
+  const fitArchitectures = application.app_fit_info.arch;
+  if (!Array.isArray(fitArchitectures) || fitArchitectures.length !== 2 ||
+      new Set(fitArchitectures.map((item) => normalizeRemoteArch(item?.code))).size !== 2 ||
+      fitArchitectures.some((item) => !normalizeRemoteArch(item?.code))) {
+    invalid('应用级架构适配不能唯一映射到 amd64 和 arm64');
+  }
+  const rows = application.app_origin_pkgs;
+  if (!Array.isArray(rows) || rows.length !== 2) invalid('应用详情必须包含可唯一映射的双架构原包');
+  const byArch = new Map();
+  const keys = new Set();
+  for (const row of rows) {
+    const arch = normalizeRemoteArch(row?.pkg_arch ?? row?.pkgArch);
+    if (!row || row.pkg_name !== PACKAGE_NAME || !arch || byArch.has(arch) ||
+        typeof row.file_save_key !== 'string' || !row.file_save_key || keys.has(row.file_save_key) ||
+        typeof row.supSys !== 'string' || !row.supSys.trim()) {
+      invalid('已有原包的身份、架构或系统适配无法唯一确认');
+    }
+    byArch.set(arch, row);
+    keys.add(row.file_save_key);
+  }
+  for (const language of application.app_lan_infos) {
+    if (language.pkgUptDesc === undefined || language.pkgUptDesc === null) continue;
+    if (!Array.isArray(language.pkgUptDesc)) invalid('语言素材的包关联无效');
+    for (const description of language.pkgUptDesc) {
+      if (!description || typeof description !== 'object') invalid('语言素材的包关联无效');
+      const fromArray = description.originPkgKeys;
+      const fromString = description.originPkgKeyStr;
+      if (fromArray !== undefined && (!Array.isArray(fromArray) || fromArray.some((key) => typeof key !== 'string'))) {
+        invalid('语言素材的包关联无效');
+      }
+      if (fromString !== undefined && typeof fromString !== 'string') invalid('语言素材的包关联无效');
+      const keyList = fromArray ?? (fromString ? fromString.split(',') : []);
+      if (fromArray && fromString !== undefined && fromArray.join(',') !== fromString) invalid('语言素材的包关联互相矛盾');
+      if (new Set(keyList).size !== keyList.length || keyList.some((key) => !keys.has(key))) {
+        invalid('语言素材引用了无法映射的原包');
+      }
+    }
+  }
+  return application;
 }
 
 function collectPackageRows(value, rows = []) {
@@ -308,9 +378,11 @@ class UosStoreApiClient {
     }
   }
 
-  async getApplicationTemplate(versionId) {
+  async getApplicationTemplate(versionId, expectedAppId) {
     if (!versionId) throw new UosStoreApiError('UOS_STORE_CONFIGURATION_INVALID', '缺少统信应用版本 ID');
-    return this.getVersionDetail(versionId);
+    const detail = await this.getVersionDetail(versionId);
+    validateSubmissionTemplate(detail, expectedAppId);
+    return detail;
   }
 
   async resolveApplicationRecord(appid) {
@@ -438,31 +510,36 @@ class UosStoreApiClient {
       return Object.freeze({ state: 'conflict', history, versionRecord });
     }
     const detail = await this.getVersionDetail(versionId);
-    const detailRoot = detail?.app_info ? detail : detail?.datas?.app_info ? detail.datas : null;
-    if (!detailRoot || detailRoot.app_info?.app_basic_info?.app_id !== manifest.appid) {
+    const detailRoot = normalizeApplicationDetail(detail);
+    if (!detailRoot || String(detailRoot.app_basic_info.app_id) !== String(applicationId) ||
+        !Array.isArray(detailRoot.app_origin_pkgs) ||
+        detailRoot.app_origin_pkgs.some((row) => !row || row.pkg_name !== manifest.appid)) {
       return Object.freeze({ state: 'conflict', history, versionId, versionRecord });
     }
     const audit = await this.requestJson('GET', UOS_STORE_CONTRACT.endpoints.auditStatus(versionId), undefined, '读取审核状态');
-    const rows = collectPackageRows(detailRoot.app_info.app_origin_pkgs).filter((row) => row.pkg_version === manifest.packageVersion);
+    const rows = detailRoot.app_origin_pkgs.filter((row) => row.pkg_version === manifest.packageVersion);
     const expected = new Map(manifest.packages.map((item) => [item.arch, item.sha256]));
     const observed = new Map();
     for (const row of rows) {
       const arch = normalizeRemoteArch(row.pkg_arch ?? row.pkgArch);
       if (!arch || observed.has(arch)) return Object.freeze({ state: 'conflict', audit, history });
-      const hash = String(row.sha256).toLowerCase();
+      if (typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/iu.test(row.sha256)) {
+        return Object.freeze({ state: 'unconfirmed', audit, history, versionId, versionRecord });
+      }
+      const hash = row.sha256.toLowerCase();
       if (expected.get(arch) !== hash) return Object.freeze({ state: 'conflict', audit, history });
       observed.set(arch, hash);
     }
     const reusablePackages = rows.filter((row) => {
       const arch = normalizeRemoteArch(row.pkg_arch ?? row.pkgArch);
-      return arch && expected.get(arch) === String(row.sha256).toLowerCase() && typeof row.file_save_key === 'string';
+      return arch && expected.get(arch) === String(row.sha256).toLowerCase() && typeof row.file_save_key === 'string' && row.file_save_key.length > 0;
     });
     const auditState = classifyPublicationStatus(versionRecord, audit);
     if (auditState === 'rejected' || auditState === 'manual-action-required') {
       return Object.freeze({ state: 'manual-action-required', audit, versionId, versionRecord });
     }
     if (auditState === 'unknown') return Object.freeze({ state: 'unconfirmed', audit, versionId, versionRecord });
-    if ((auditState === 'submitted' || auditState === 'approved') && observed.size === 2) {
+    if ((auditState === 'submitted' || auditState === 'approved') && observed.size === 2 && detailRoot.app_origin_pkgs.length === 2) {
       return Object.freeze({ state: 'submitted', audit, versionId, versionRecord });
     }
     if (auditState === 'submitted' || auditState === 'approved') {
@@ -530,16 +607,45 @@ class UosStoreApiClient {
   }
 
   prepareSubmission(template, packages) {
-    const root = template?.app_info ? template : template?.datas?.app_info ? template.datas : null;
-    if (!root || !root.app_info || typeof root.app_info !== 'object') {
-      throw new UosStoreApiError('UOS_SUBMISSION_TEMPLATE_INVALID', '只读详情未返回 app_info 模板');
+    const cloned = structuredClone(validateSubmissionTemplate(template));
+    const oldByArch = new Map(cloned.app_origin_pkgs.map((row) => [normalizeRemoteArch(row.pkg_arch ?? row.pkgArch), row]));
+    const seen = new Set();
+    const keyMap = new Map();
+    let version;
+    if (!Array.isArray(packages) || packages.length !== 2) {
+      throw new UosStoreApiError('UOS_SUBMISSION_PACKAGES_INVALID', '提交必须包含双架构安装包');
     }
-    const cloned = structuredClone(root.app_info);
-    const basic = cloned.app_basic_info;
-    if (!basic || basic.app_id !== 'com.floatboat.desktop') {
-      throw new UosStoreApiError('UOS_SUBMISSION_TEMPLATE_INVALID', '应用模板不是 com.floatboat.desktop');
+    cloned.app_origin_pkgs = packages.map((item) => {
+      const arch = normalizeRemoteArch(item?.pkg_arch);
+      if (!arch || seen.has(arch) || item.pkg_name !== PACKAGE_NAME ||
+          !/^\d+\.\d+\.\d+\.\d+$/u.test(item.pkg_version) || (version && item.pkg_version !== version) ||
+          typeof item.sha256 !== 'string' || !/^[0-9a-f]{64}$/iu.test(item.sha256) ||
+          !Number.isSafeInteger(item.pkg_size) || item.pkg_size <= 0 ||
+          typeof item.file_save_key !== 'string' || !item.file_save_key ||
+          [...keyMap.values()].includes(item.file_save_key)) {
+        throw new UosStoreApiError('UOS_SUBMISSION_PACKAGES_INVALID', '提交包的身份、双架构、版本或摘要无法确认');
+      }
+      seen.add(arch);
+      version = item.pkg_version;
+      const old = oldByArch.get(arch);
+      const row = structuredClone(item);
+      for (const field of PACKAGE_ADAPTATION_FIELDS) {
+        if (Object.hasOwn(old, field)) row[field] = structuredClone(old[field]);
+      }
+      if (row.pkg_mode === null) row.pkg_mode = cloned.app_basic_info.pkg_mode;
+      keyMap.set(old.file_save_key, row.file_save_key);
+      return row;
+    });
+    for (const language of cloned.app_lan_infos) {
+      for (const description of language.pkgUptDesc ?? []) {
+        if (description.originPkgKeys !== undefined) {
+          description.originPkgKeys = description.originPkgKeys.map((key) => keyMap.get(key));
+        }
+        if (description.originPkgKeyStr) {
+          description.originPkgKeyStr = description.originPkgKeyStr.split(',').map((key) => keyMap.get(key)).join(',');
+        }
+      }
     }
-    cloned.app_origin_pkgs = packages.map((item) => ({ ...item }));
     return Object.freeze({ operate_type: UOS_STORE_CONTRACT.submitOperateType, app_info: cloned });
   }
 
@@ -648,7 +754,7 @@ class UosStoreApiClient {
 
 function normalizeRemoteArch(value) {
   const normalized = String(value ?? '').trim().toLowerCase();
-  if (['amd64', 'x86_64', 'x86-64', '0'].includes(normalized)) return 'amd64';
+  if (['amd64', 'x86_64', 'x86-64', '4'].includes(normalized)) return 'amd64';
   if (['arm64', 'aarch64', 'arm', '3'].includes(normalized)) return 'arm64';
   return null;
 }
@@ -665,6 +771,7 @@ module.exports = {
   classifyPublicationStatus,
   digest,
   normalizeEnvelope,
+  normalizeApplicationDetail,
   normalizeRemoteArch,
   redactMessage,
 };

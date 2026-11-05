@@ -59,7 +59,11 @@ function sanitizeIdentityFailureReason(message) {
 function sanitizeCallbackShape(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
   const enums = {
-    originClass: ['store_https', 'store_http', 'identity_https', 'identity_http', 'other'],
+    originClass: [
+      'store_https', 'store_http', 'identity_https', 'identity_http',
+      'account_https', 'account_http', 'identity_center_https', 'identity_center_http',
+      'static_cdn_https', 'static_cdn_http', 'other',
+    ],
     protocolClass: ['https', 'http', 'other'],
     portClass: ['default', 'nondefault'],
     pathClass: ['root', 'registerlogin', 'follow', 'other'],
@@ -77,6 +81,12 @@ function classifyCallbackShape(callback) {
     'http://appstore-dev.uniontech.com': 'store_http',
     [IDENTITY_ORIGIN]: 'identity_https',
     'http://login.uniontech.com': 'identity_http',
+    'https://account.uniontech.com': 'account_https',
+    'http://account.uniontech.com': 'account_http',
+    'https://identity.chinauos.com': 'identity_center_https',
+    'http://identity.chinauos.com': 'identity_center_http',
+    'https://cdn-nu-common.uniontech.com': 'static_cdn_https',
+    'http://cdn-nu-common.uniontech.com': 'static_cdn_http',
   };
   const paths = { '/': 'root', '/api/oauth2/authorize/registerlogin': 'registerlogin', '/oauth2/follow': 'follow' };
   return sanitizeCallbackShape({
@@ -347,6 +357,7 @@ module.exports = {
   STORE_ORIGIN,
   UnionTechIdentityError,
   authenticateUnionTechIdentity,
+  classifyCallbackShape,
   describeIdentityFailure,
   sanitizeIdentityFailureReason,
   sanitizeCallbackShape,

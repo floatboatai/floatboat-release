@@ -9,6 +9,7 @@ const {
   IDENTITY_ORIGIN,
   STORE_ORIGIN,
   UnionTechIdentityError,
+  classifyCallbackShape,
   validateCallback,
   validateOAuthLoginUrl,
 } = require('./uniontech-identity-authenticator.cjs');
@@ -33,6 +34,9 @@ const FAILURE = Object.freeze({
   launch: '统信浏览器无法启动',
   page: '统信浏览器登录页面无法完成初始化',
   request: '统信浏览器阻止了未受信请求',
+  requestBeforeSubmit: '统信浏览器在提交登录表单前阻止了未受信请求',
+  requestSubmitted: '统信浏览器在提交口令后阻止了未受信请求',
+  requestAuthorized: '统信浏览器在登录响应成功后阻止了未受信请求',
   redirect: '统信浏览器阻止了不受支持的重定向',
   replay: '统信浏览器阻止了重复密码提交',
   password: '统信浏览器密码提交不符合固定契约',
@@ -56,8 +60,8 @@ const OAUTH_FIELDS = ['client_id', 'redirect_uri', 'response_type', 'scope', 'st
 const TMPFS_MAGIC = 0x01021994;
 let authenticating = false;
 
-function failure(stage, code = 'UOS_AUTH_CONTRACT_UNVERIFIED') {
-  return new UnionTechIdentityError(code, FAILURE[stage]);
+function failure(stage, code = 'UOS_AUTH_CONTRACT_UNVERIFIED', options = {}) {
+  return new UnionTechIdentityError(code, FAILURE[stage], options);
 }
 
 function isManualPath(url) {
@@ -164,10 +168,10 @@ async function authenticateUnionTechBrowser(options) {
   const result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
   // 路由或页面事件可能先于等待者失败，提前安装处理避免未处理的拒绝输出敏感堆栈。
   result.catch(() => {});
-  const reject = (reason, code) => {
+  const reject = (reason, code, options) => {
     if (settled) return;
     settled = true;
-    rejectResult(failure(reason, code));
+    rejectResult(failure(reason, code, options));
   };
   const abort = async (route) => { try { await route.abort('blockedbyclient'); } catch {} };
   const captureCallback = (url, isNavigation) => {
@@ -222,7 +226,9 @@ async function authenticateUnionTechBrowser(options) {
         return abort(route);
       }
       if (!isAllowedTarget(url, method, resourceType)) {
-        reject('request');
+        // 点击按钮不代表密码请求已发出，阶段以固定密码请求及其响应为准。
+        const reason = authorized ? 'requestAuthorized' : passwordRequests > 0 ? 'requestSubmitted' : 'requestBeforeSubmit';
+        reject(reason, 'UOS_AUTH_CONTRACT_UNVERIFIED', { callbackShape: classifyCallbackShape(url) });
         return abort(route);
       }
       if ([...url.searchParams.keys()].some((name) => /^(?:account|password)$/iu.test(name))) {

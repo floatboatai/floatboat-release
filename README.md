@@ -85,3 +85,5 @@ Playwright 使用 `.github/scripts/uos-browser-runtime` 中固定版本及锁文
 网页契约依据（2026-11-05）：[统信登录页面脚本](https://login.uniontech.com/main-es2015.c2432283df9f5420074a.js) 的 `toLogin`、`oauth2/follow` 与 `registerlogin`，以及[官方中文文案](https://login.uniontech.com/assets/i18n/zh.json)。固定 follow 页的“我已了解，立即登录”仅关闭社群宣传提示，允许点击一次；“授权并登录”等账号授权操作不自动确认。离线浏览器回归只使用假页面和假凭证，通过 `UOS_BROWSER_OFFLINE_TEST=true` 显式运行 `uniontech-browser-authenticator.integration.test.cjs`，不访问真实统信账号。
 
 UOS 包版本遵循四段规则：稳定来源 `X.Y.Z` 生成 `X.Y.Z.0`，RC 来源 `X.Y.Z-rc.N` 生成 `X.Y.Z.N`。发布器会在上传前读取商店版本历史，拒绝低于商店最高版本的候选；同版本必须通过 amd64/arm64 SHA-256 内容一致性检查后才允许幂等恢复或提交审核。
+
+更新已有应用时，平台应用 ID 与 `com.floatboat.desktop` 包名分别校验；详情支持官网的平铺结构及 `app_info` 包装。上传前确认旧版双架构模板，替换包时继承对应架构的系统适配字段，保留应用文案、截图和完整 `app_fit_info`，同步语言描述引用的包文件 key。平台架构码 `4` 是 X86、`3` 是 ARM，`0` 表示全架构，不能当作 amd64。提交后必须回读同版本双包 SHA-256；服务端未返回可验证摘要时，不宣称送审确认成功。

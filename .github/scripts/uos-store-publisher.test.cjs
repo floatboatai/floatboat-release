@@ -9,6 +9,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { UosStoreApiClient } = require('./uos-store-api-client.cjs');
 
 const {
   JsonPublicationJournal,
@@ -41,6 +42,7 @@ function createHarness(context, options = {}) {
   };
   const calls = [];
   const templateVersionIds = [];
+  const templateApplicationIds = [];
   const inspectStates = [...(options.inspectStates || ['absent', 'submitted'])];
   const client = {
     async authenticate() { calls.push('authenticate'); },
@@ -66,9 +68,10 @@ function createHarness(context, options = {}) {
       }
       return { state };
     },
-    async getApplicationTemplate(versionId) {
+    async getApplicationTemplate(versionId, appId) {
       calls.push('template');
       templateVersionIds.push(versionId);
+      templateApplicationIds.push(appId);
       return { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' }, app_origin_pkgs: [] } };
     },
     async detectPackage(filePath) {
@@ -96,6 +99,7 @@ function createHarness(context, options = {}) {
     manifest,
     calls,
     templateVersionIds,
+    templateApplicationIds,
     client,
     journalPath: path.join(root, 'private', 'journal.json'),
   };
@@ -124,8 +128,90 @@ test('双架构全部上传后只提交一次并回读确认', async (context) =
     'prepare', 'submit', 'inspect',
   ]);
   assert.equal(harness.calls.filter((item) => item === 'submit').length, 1);
+  assert.deepEqual(harness.templateApplicationIds, ['stable-app']);
   assert.doesNotMatch(JSON.stringify(receipt), /very-secret|file_save_key|uploaded-amd64/iu);
   assert.doesNotMatch(fs.readFileSync(harness.journalPath, 'utf8'), /fileSaveKey|uploaded-amd64/iu);
+});
+
+test('真实模板预检在任何检测、上传和提交之前绑定商店应用身份', async (context) => {
+  const harness = createHarness(context);
+  const api = new UosStoreApiClient({ baseUrl: 'http://127.0.0.1' });
+  api.getVersionDetail = async () => ({
+    app_basic_info: { app_id: 'other-app' },
+    app_origin_pkgs: [],
+  });
+  harness.client.getApplicationTemplate = (versionId, appId) => {
+    harness.calls.push('template');
+    assert.equal(versionId, 'current-version');
+    assert.equal(appId, 'stable-app');
+    return api.getApplicationTemplate(versionId, appId);
+  };
+  await assert.rejects(() => runHarness(harness), /UOS_SUBMISSION_TEMPLATE_INVALID/);
+  assert.deepEqual(harness.calls, ['authenticate', 'resolve-app', 'inspect', 'template']);
+});
+
+test('发布器经真实 client 读取平铺模板、上传双架构、提交并以同版本 SHA 回读确认', async (context) => {
+  const harness = createHarness(context);
+  const requests = [];
+  let submitted = null;
+  const template = {
+    app_basic_info: { app_id: 1097210, pkgInstallMode: 1, pkg_mode: 0, inAppPayment: 0 },
+    app_lan_infos: [{ lan: 'zh_CN', desc_info: '已有介绍', appScreenShotList: [{ screen_shot_key: 'existing-screen' }] }],
+    app_fit_info: { arch: [{ code: 4 }, { code: 3 }], system_platform: [{ code: 1 }], futureField: 'keep' },
+    app_origin_pkgs: harness.manifest.packages.map((item, index) => ({
+      pkg_name: 'com.floatboat.desktop', pkg_arch: index === 0 ? 4 : 3,
+      pkg_version: '0.6.2.0', file_save_key: `old-${item.arch}`, supSys: '1', baseline: [{ id: index + 10 }],
+    })),
+  };
+  harness.client = new UosStoreApiClient({
+    baseUrl: 'http://127.0.0.1',
+    fetchImpl: async (input, init) => {
+      const url = new URL(input);
+      const route = url.pathname.replace('/devprod-api', '');
+      requests.push(`${init.method} ${route}`);
+      const reply = (datas) => Response.json({ status: 200, datas });
+      if (route === '/store-dev-app/app' && init.method === 'GET') {
+        return Response.json({ code: 200, total: 1, rows: [{ app_id: 1097210, id: 'current', pkg_name: 'com.floatboat.desktop' }] });
+      }
+      if (route.endsWith('/history')) {
+        return Response.json({ code: 200, total: 1, rows: [{
+          app_id: 1097210, id: submitted ? 'target' : 'current', pkg_version: submitted ? '0.6.3.0' : '0.6.2.0', status: submitted ? 52 : 101,
+        }] });
+      }
+      if (route.endsWith('/detail')) return reply(submitted ? submitted.app_info : template);
+      if (route.endsWith('/audit_status')) return reply({});
+      if (route.endsWith('/detect-pkg-info')) {
+        return reply({ pkg_name: 'com.floatboat.desktop', pkg_version: '0.6.3.0', pkg_arch: url.searchParams.get('fileName').includes('amd64') ? 4 : 3 });
+      }
+      if (route.endsWith('/upload/begin')) {
+        const payload = JSON.parse(init.body);
+        const arch = payload.fileName.includes('amd64') ? 'amd64' : 'arm64';
+        return reply({ id: arch, upload_id: arch, file_save_key: `new-${arch}`, upload_infos: [{ upload_url: `http://127.0.0.1/upload/${arch}` }] });
+      }
+      if (init.method === 'PUT') return new Response(null, { status: 200 });
+      if (route.endsWith('/upload/end')) return reply({ file_save_key: JSON.parse(init.body).file_save_key });
+      if (route === '/store-dev-app/app' && init.method === 'POST') {
+        submitted = JSON.parse(init.body);
+        return reply({});
+      }
+      throw new Error(`unexpected ${init.method} ${route}`);
+    },
+  });
+  harness.client.authenticate = async () => {};
+  const receipt = await runHarness(harness);
+  assert.equal(receipt.status, 'submitted');
+  assert.equal(submitted.app_info.app_basic_info.app_id, 1097210);
+  assert.deepEqual(submitted.app_info.app_lan_infos, template.app_lan_infos);
+  assert.deepEqual(submitted.app_info.app_fit_info, template.app_fit_info);
+  for (const [index, row] of submitted.app_info.app_origin_pkgs.entries()) {
+    assert.equal(row.sha256, harness.manifest.packages[index].sha256);
+    assert.equal(row.pkg_version, '0.6.3.0');
+    assert.equal(row.supSys, '1');
+    assert.deepEqual(row.baseline, template.app_origin_pkgs[index].baseline);
+  }
+  assert.equal(requests.filter((item) => item === 'POST /store-dev-app/app').length, 1);
+  assert.ok(requests.indexOf('GET /store-dev-app/app/current/detail') < requests.indexOf('POST /store-file/upload/begin'));
+  assert.ok(requests.indexOf('GET /store-dev-app/app/target/detail') > requests.indexOf('POST /store-dev-app/app'));
 });
 
 test('已提交的精确双架构版本直接幂等成功', async (context) => {
