@@ -205,6 +205,9 @@ function createHarness(options = {}) {
       events.push({ kind: 'goto', url });
       currentUrl = url;
       await request(url, { navigation: true, resourceType: 'document' });
+      if (new URL(url).hostname === 'login.chinauos.com' && options.afterLegacyRequest) {
+        await request(options.afterLegacyRequest.url, options.afterLegacyRequest);
+      }
       await request(`${IDENTITY}/assets/config/config.json`);
       await request(`${IDENTITY}/api/key`);
       await request(`${IDENTITY}/api/oauth2/client`, {
@@ -302,6 +305,87 @@ test('HTTP 商店根回跳仍只在内存解析，不发起 HTTP 请求', async 
   assert.deepEqual(await harness.run(), { code: 'mock-oauth-code', state: 'expected-state' });
   assert.ok(harness.events.filter((event) => event.kind === 'fetch').every((event) => event.url.startsWith(`${IDENTITY}/`)));
   assertCleaned(harness.events);
+});
+
+test('授权响应确认旧登录域后，只用 HTTPS 访问精确中转并验证最终商店回跳', async () => {
+  const raw = '//login.chinauos.com/api/oauth2/authorize/bridge?ticket=private-session-token&opaque=a%2Bb%26c';
+  const secure = `https:${raw}`;
+  for (const scheme of ['http:', 'https:']) {
+    const target = `${scheme}${raw}`;
+    const harness = createHarness({
+      authorizeRedirect: raw,
+      afterAuthorizeRequest: { url: target, resourceType: 'document', navigation: true },
+      responses: { [secure]: response(302, {}, { location: CALLBACK_URL }) },
+    });
+    assert.deepEqual(await harness.run(), { code: 'mock-oauth-code', state: 'expected-state' });
+    const forwarded = harness.events.filter((event) => event.kind === 'fetch');
+    assert.equal(forwarded.filter((event) => event.url === secure).length, 1);
+    assert.ok(forwarded.every((event) => new URL(event.url).protocol === 'https:'));
+    assert.ok(forwarded.filter((event) => event.method === 'POST').every((event) => new URL(event.url).origin === IDENTITY));
+    assert.equal(forwarded.filter((event) => event.method === 'POST' && new URL(event.url).pathname === '/api/oauth2/authorize').length, 1);
+    assertCleaned(harness.events);
+  }
+});
+
+test('旧登录域不是普通白名单，来源未确认、查询不匹配、POST 和人工流程继续停止', async () => {
+  const raw = '//login.chinauos.com/api/oauth2/authorize/bridge?ticket=private-session-token';
+  const target = `http:${raw}`;
+  for (const options of [
+    { beforeSubmitRequest: { url: target, navigation: true, resourceType: 'document' } },
+    { afterAuthorizeRequest: { url: target, navigation: true, resourceType: 'document' } },
+    { authorizeRedirect: raw, afterAuthorizeRequest: { url: target + '&extra=true', navigation: true, resourceType: 'document' } },
+    { authorizeRedirect: raw, afterAuthorizeRequest: { url: target, method: 'POST', navigation: true, resourceType: 'document' } },
+    { authorizeRedirect: raw, afterAuthorizeRequest: { url: target, resourceType: 'xhr' } },
+    { authorizeRedirect: raw, afterAuthorizeRequest: { url: target.replace('chinauos.com', 'chinauos.com:443'), navigation: true, resourceType: 'document' } },
+    { authorizeRedirect: '//login.chinauos.com/oauth2/bind/phone?ticket=private-session-token', afterAuthorizeRequest: { url: 'http://login.chinauos.com/oauth2/bind/phone?ticket=private-session-token', navigation: true, resourceType: 'document' } },
+  ]) {
+    const harness = createHarness(options);
+    await assert.rejects(harness.run, (error) => assertSafeError(error));
+    assert.ok(!harness.events.some((event) => event.kind === 'fetch' && new URL(event.url).hostname === 'login.chinauos.com'));
+    assertCleaned(harness.events);
+  }
+});
+
+test('GET/HEAD 同名接口与非 200 密码响应不能作为旧域握手证据', async () => {
+  const url = `${IDENTITY}/api/oauth2/authorize`;
+  const raw = '//login.chinauos.com/api/oauth2/authorize/bridge?ticket=private-session-token';
+  for (const options of [
+    ...['GET', 'HEAD'].map((method) => ({ beforeSubmitRequest: { url, method }, responses: { [url]: response(200, { code: 200, data: { redirect: raw } }) } })),
+    { authorizeRedirect: raw, authorizeStatus: 202 },
+  ]) {
+    const harness = createHarness(options);
+    await assert.rejects(harness.run, (error) => assertSafeError(error));
+    assert.ok(!harness.events.some((event) => event.kind === 'fetch' && new URL(event.url).hostname === 'login.chinauos.com'));
+    assertCleaned(harness.events);
+  }
+});
+
+test('旧登录域后端返回错误 state 不能建立商店会话', async () => {
+  const raw = '//login.chinauos.com/api/oauth2/authorize/bridge?ticket=private-session-token';
+  const harness = createHarness({
+    authorizeRedirect: raw,
+    afterAuthorizeRequest: { url: `http:${raw}`, resourceType: 'document', navigation: true },
+    responses: { [`https:${raw}`]: response(302, {}, { location: CALLBACK_URL.replace('expected-state', 'wrong-state') }) },
+  });
+  await assert.rejects(harness.run, (error) => assertSafeError(error));
+  assertCleaned(harness.events);
+});
+
+test('旧域握手后，跨域子资源重定向也不能复用原请求的身份头', async () => {
+  const raw = '//login.chinauos.com/api/oauth2/authorize/bridge?ticket=private-session-token';
+  const source = `${IDENTITY}/private-api`;
+  const target = 'https://login.chinauos.com/private-api';
+  for (const resourceType of ['script', 'xhr', 'fetch']) {
+    const harness = createHarness({
+      authorizeRedirect: raw,
+      afterAuthorizeRequest: { url: `http:${raw}`, resourceType: 'document', navigation: true },
+      afterLegacyRequest: { url: source, resourceType },
+      responses: { [source]: response(302, {}, { location: target }) },
+    });
+    await assert.rejects(harness.run, (error) => assertSafeError(error));
+    assert.ok(!harness.events.some((event) => event.kind === 'fetch' && event.url === target));
+    assertCleaned(harness.events);
+  }
 });
 
 test('未知目标与提交前商店回跳均被拦截且不会填入凭据', async () => {

@@ -64,6 +64,7 @@ const POST_PATHS = new Set([
 ]);
 const OAUTH_FIELDS = ['client_id', 'redirect_uri', 'response_type', 'scope', 'state'];
 const TMPFS_MAGIC = 0x01021994;
+const LEGACY_IDENTITY_ORIGIN = 'https://login.chinauos.com';
 let authenticating = false;
 
 function failure(stage, code = 'UOS_AUTH_CONTRACT_UNVERIFIED', options = {}) {
@@ -75,10 +76,23 @@ function isManualPath(url) {
     url.pathname.startsWith('/oauth2/client/') || url.pathname.startsWith('/m/');
 }
 
-function isAllowedTarget(url, method, resourceType) {
+function isAllowedTarget(url, method, resourceType, legacyBridgeConfirmed = false) {
   if (url.username || url.password || url.hash || url.protocol !== 'https:') return false;
   if (url.origin === IDENTITY_ORIGIN) return ['GET', 'HEAD'].includes(method) || (method === 'POST' && POST_PATHS.has(url.pathname));
+  if (legacyBridgeConfirmed && url.origin === LEGACY_IDENTITY_ORIGIN) return ['GET', 'HEAD'].includes(method);
   return url.origin === 'https://cdn-nu-common.uniontech.com' && ['GET', 'HEAD'].includes(method) && resourceType === 'image';
+}
+
+function confirmedLegacyBridge(url, lastRedirect) {
+  if (lastRedirect?.source !== 'authorize' || !lastRedirect.raw.startsWith('//')) return undefined;
+  try {
+    const expected = new URL(lastRedirect.raw, IDENTITY_ORIGIN);
+    if (expected.origin !== LEGACY_IDENTITY_ORIGIN || expected.username || expected.password || expected.hash) return undefined;
+    if (!['http://login.chinauos.com', LEGACY_IDENTITY_ORIGIN].includes(url.origin) || url.username || url.password || url.hash) return undefined;
+    const target = new URL(url.href);
+    target.protocol = 'https:';
+    return target.href === expected.href ? target : undefined;
+  } catch { return undefined; }
 }
 
 function isPasswordForm(request, loginUrl, username, password) {
@@ -165,6 +179,7 @@ async function authenticateUnionTechBrowser(options) {
   let pendingNavigation;
   let navigationRedirects = 0;
   let lastRedirect;
+  let legacyBridgeConfirmed = false;
   let stage = 'storage';
   let flow;
   const ready = { config: false, key: false, client: false };
@@ -196,7 +211,7 @@ async function authenticateUnionTechBrowser(options) {
     return true;
   };
 
-  const inspectResponse = async (url, response) => {
+  const inspectResponse = async (url, response, method, passwordRequest) => {
     if (url.origin !== IDENTITY_ORIGIN) return;
     if (!['/assets/config/config.json', '/api/key', '/api/oauth2/client', '/api/oauth2/authorize', '/api/oauth2/authorize/registerlogin'].includes(url.pathname)) return;
     const payload = await response.json();
@@ -211,6 +226,10 @@ async function authenticateUnionTechBrowser(options) {
       if (Number(payload?.code) !== 200 || !payload.data || typeof payload.data !== 'object') return reject('page');
       ready.client = true;
     } else {
+      if (response.status() !== 200 ||
+          (url.pathname === '/api/oauth2/authorize' ? !passwordRequest : method !== 'POST' || !authorized)) {
+        return reject('response', 'UOS_AUTH_FAILED');
+      }
       if (Number(payload?.code) !== 200 || !payload.data || typeof payload.data !== 'object') return reject('response', 'UOS_AUTH_FAILED');
       if (payload.data.need_bind_contact || payload.data.cancel_unregister_key || payload.data.phone_unbind) {
         return reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
@@ -230,15 +249,30 @@ async function authenticateUnionTechBrowser(options) {
       const method = request.method();
       const resourceType = request.resourceType();
       const isNavigation = method === 'GET' && request.isNavigationRequest() && request.frame() === page.mainFrame();
+      if (isNavigation && submitted && authorized && !legacyBridgeConfirmed) {
+        const bridge = confirmedLegacyBridge(url, lastRedirect);
+        if (bridge) {
+          if (isManualPath(bridge)) {
+            reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+            return abort(route);
+          }
+          legacyBridgeConfirmed = true;
+          if (url.protocol === 'http:') {
+            // 官方授权响应给出旧登录域；只在本机升级导航，认证参数不经 HTTP 发送。
+            pendingNavigation = bridge.href;
+            return abort(route);
+          }
+        }
+      }
       const optionalAsset = !request.isNavigationRequest() && ['GET', 'HEAD'].includes(method) && ['image', 'font'].includes(resourceType);
       // 社群提示的动态二维码不是认证条件；只阻断资源，避免图片失效误报为登录失败。
-      if (optionalAsset && !isAllowedTarget(url, method, resourceType)) return abort(route);
+      if (optionalAsset && !isAllowedTarget(url, method, resourceType, legacyBridgeConfirmed)) return abort(route);
       if (captureCallback(url, isNavigation)) return abort(route);
-      if (url.origin === IDENTITY_ORIGIN && isManualPath(url)) {
+      if ([IDENTITY_ORIGIN, LEGACY_IDENTITY_ORIGIN].includes(url.origin) && isManualPath(url)) {
         reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
         return abort(route);
       }
-      if (!isAllowedTarget(url, method, resourceType)) {
+      if (!isAllowedTarget(url, method, resourceType, legacyBridgeConfirmed)) {
         // 点击按钮不代表密码请求已发出，阶段以固定密码请求及其响应为准。
         const stage = authorized ? 'requestAuthorized' : passwordRequests > 0 ? 'requestSubmitted' : 'requestBeforeSubmit';
         const kind = request.isNavigationRequest() ? 'Navigation' : resourceType === 'script' ? 'Script' : ['xhr', 'fetch'].includes(resourceType) ? 'Data' : '';
@@ -288,13 +322,19 @@ async function authenticateUnionTechBrowser(options) {
           const location = response.headers().location;
           if (!location || redirects === 5) { reject('redirect'); return abort(route); }
           const next = new URL(location, url);
-          if (optionalAsset && (next.origin !== IDENTITY_ORIGIN || url.origin !== IDENTITY_ORIGIN || !isAllowedTarget(next, method, resourceType))) return abort(route);
+          if (optionalAsset && (next.origin !== url.origin || !isAllowedTarget(next, method, resourceType, legacyBridgeConfirmed))) return abort(route);
           if (captureCallback(next, isNavigation)) return abort(route);
-          if (next.origin === IDENTITY_ORIGIN && isManualPath(next)) {
+          if ([IDENTITY_ORIGIN, LEGACY_IDENTITY_ORIGIN].includes(next.origin) && isManualPath(next)) {
             reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
             return abort(route);
           }
-          if (next.origin !== IDENTITY_ORIGIN || url.origin !== IDENTITY_ORIGIN || !isAllowedTarget(next, method, resourceType)) {
+          const identityOrigins = legacyBridgeConfirmed ? [IDENTITY_ORIGIN, LEGACY_IDENTITY_ORIGIN] : [IDENTITY_ORIGIN];
+          if (!identityOrigins.includes(next.origin) || !identityOrigins.includes(url.origin) || !isAllowedTarget(next, method, resourceType, legacyBridgeConfirmed)) {
+            reject('redirect');
+            return abort(route);
+          }
+          // 跨域只能交给新主文档导航，避免改写 route.fetch 目标时携带原请求身份头。
+          if (next.origin !== url.origin && !(isNavigation && resourceType === 'document')) {
             reject('redirect');
             return abort(route);
           }
@@ -312,7 +352,7 @@ async function authenticateUnionTechBrowser(options) {
           reject(passwordRequest ? 'response' : 'page', 'UOS_AUTH_FAILED');
           return abort(route);
         }
-        await inspectResponse(url, response);
+        await inspectResponse(url, response, method, passwordRequest);
         if (settled) return abort(route);
         await route.fulfill({ response });
         return;
@@ -380,7 +420,7 @@ async function authenticateUnionTechBrowser(options) {
             continue;
           }
           const current = new URL(page.url());
-          if (current.origin !== IDENTITY_ORIGIN || isManualPath(current)) {
+          if (!(current.origin === IDENTITY_ORIGIN || (legacyBridgeConfirmed && current.origin === LEGACY_IDENTITY_ORIGIN)) || isManualPath(current)) {
             reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
             break;
           }
