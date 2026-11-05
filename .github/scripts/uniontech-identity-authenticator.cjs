@@ -4,6 +4,7 @@
 'use strict';
 
 const crypto = require('node:crypto');
+const { sanitizeNavigationDiagnostic } = require('./uniontech-navigation-diagnostic.cjs');
 
 const IDENTITY_ORIGIN = 'https://login.uniontech.com';
 const STORE_ORIGIN = 'https://appstore-dev.uniontech.com';
@@ -39,6 +40,8 @@ class UnionTechIdentityError extends Error {
     this.retryable = Boolean(options.retryable);
     const callbackShape = sanitizeCallbackShape(options.callbackShape);
     if (callbackShape) this.callbackShape = callbackShape;
+    const navigationDiagnostic = sanitizeNavigationDiagnostic(options.navigationDiagnostic);
+    if (navigationDiagnostic) this.navigationDiagnostic = navigationDiagnostic;
   }
 }
 

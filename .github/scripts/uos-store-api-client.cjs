@@ -7,6 +7,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const { UnionTechIdentityError, sanitizeCallbackShape, sanitizeIdentityFailureReason } = require('./uniontech-identity-authenticator.cjs');
 const { BROWSER_FAILURE_MESSAGES } = require('./uniontech-browser-authenticator.cjs');
+const { sanitizeNavigationDiagnostic } = require('./uniontech-navigation-diagnostic.cjs');
 
 const UOS_STORE_CONTRACT = Object.freeze({
   basePath: '/devprod-api',
@@ -60,6 +61,8 @@ class UosStoreApiError extends Error {
     this.outcomeUnknown = Boolean(options.outcomeUnknown);
     const callbackShape = sanitizeCallbackShape(options.callbackShape);
     if (callbackShape) this.callbackShape = callbackShape;
+    const navigationDiagnostic = sanitizeNavigationDiagnostic(options.navigationDiagnostic);
+    if (navigationDiagnostic) this.navigationDiagnostic = navigationDiagnostic;
   }
 }
 
@@ -80,7 +83,8 @@ function describeUosAuthenticationFailure(error) {
   const prefix = `${error.code}: `;
   const reason = sanitizeAuthenticationReason(error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '');
   const callbackShape = sanitizeCallbackShape(error.callbackShape);
-  return Object.freeze({ code: error.code, reason, ...(callbackShape ? { callbackShape } : {}) });
+  const navigationDiagnostic = sanitizeNavigationDiagnostic(error.navigationDiagnostic);
+  return Object.freeze({ code: error.code, reason, ...(callbackShape ? { callbackShape } : {}), ...(navigationDiagnostic ? { navigationDiagnostic } : {}) });
 }
 
 function digest(algorithm, value) {
@@ -355,6 +359,7 @@ class UosStoreApiClient {
         throw new UosStoreApiError(error.code, sanitizeAuthenticationReason(message), {
           retryable: error.retryable,
           callbackShape: error.callbackShape,
+          navigationDiagnostic: error.navigationDiagnostic,
         });
       }
       throw new UosStoreApiError('UOS_AUTH_FAILED', '统信 Identity 未能建立自动化会话', { retryable: true });
