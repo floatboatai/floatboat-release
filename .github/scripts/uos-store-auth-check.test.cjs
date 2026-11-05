@@ -18,6 +18,60 @@ function outputCapture() {
   return { info, errors, log: (value) => info.push(value), error: (value) => errors.push(value) };
 }
 
+test('商店失败输出具体接口和独立状态码，登录沿用官网 JSON 与同源头', async () => {
+  const base = 'https://appstore-dev.uniontech.com';
+  const login = 'https://login.uniontech.com/oauth2/authorize?client_id=mock&redirect_uri=https%3A%2F%2Fappstore-dev.uniontech.com&response_type=code&scope=base&state=mock-state';
+  for (const [failedPath, operation] of [
+    ['/store-dev-auth/login', 'login_callback'],
+    ['/store-dev-auth/dev_info', 'developer_info'],
+    ['/store-dev-app/app', 'applications'],
+  ]) {
+    const capture = outputCapture();
+    const paths = [];
+    const client = new UosStoreApiClient({
+      baseUrl: base,
+      identityAuthenticator: async () => ({ code: 'private-code', state: 'mock-state' }),
+      fetchImpl: async (input, init) => {
+        const pathname = new URL(input).pathname.replace('/devprod-api', '');
+        paths.push(pathname);
+        assert.equal(init.headers.origin, base);
+        assert.equal(init.headers.referer, `${base}/`);
+        if (pathname === '/store-dev-auth/getLoginPath') return Response.json({ status: 200, datas: login });
+        if (pathname === '/store-dev-auth/login') {
+          assert.equal(init.method, 'POST');
+          assert.equal(init.headers['content-type'], 'application/json;charset=utf-8');
+          assert.deepEqual(JSON.parse(init.body), { code: 'private-code', state: 'mock-state' });
+        }
+        if (pathname === failedPath) return Response.json({ status: 400, code: 10001, desc: 'state private-code private-password https://private.invalid/' });
+        if (pathname === '/store-dev-auth/login') return Response.json({ status: 200, datas: {} }, { headers: { 'set-cookie': 'access-token=private-cookie; Secure; HttpOnly' } });
+        if (pathname === '/store-dev-auth/dev_info') return Response.json({ status: 200, datas: { dev_type: 0 } });
+        assert.fail('失败后不能继续请求');
+      },
+    });
+    assert.equal(await runAuthenticationCheck({ client, credentials: { username: 'private-account', password: 'private-password' }, ...capture }), 1);
+    const diagnostic = JSON.parse(capture.errors[0].slice('UOS authentication check failed: '.length));
+    assert.deepEqual(diagnostic.storeResponse, { operation, httpStatus: 200, status: 400, code: 10001, reasonClass: 'state' });
+    assert.equal(paths.at(-1), failedPath);
+    assert.deepEqual(capture.info, []);
+    assert.doesNotMatch(capture.errors.join(''), /private-|https?:|mock-state/u);
+  }
+});
+
+test('商店响应诊断拒绝额外字段、访问器和非法数值，不输出服务端正文', async () => {
+  const valid = { operation: 'login_callback', httpStatus: 200, status: 400, code: null, reasonClass: 'unknown' };
+  for (const value of [
+    { ...valid, desc: 'private-token' }, { ...valid, operation: 'private-token' },
+    { ...valid, httpStatus: '200' }, { ...valid, code: 9999999 },
+    { ...valid, reasonClass: 'private-token' }, Object.assign(Object.create({}), valid),
+    Object.defineProperty({ ...valid }, 'code', { get() { throw new Error('private-token'); } }),
+  ]) {
+    const capture = outputCapture();
+    const client = { authenticate: async () => { throw new UosStoreApiError('UOS_STORE_REQUEST_REJECTED', 'private-token', { storeResponse: value }); } };
+    assert.equal(await runAuthenticationCheck({ client, credentials: {}, ...capture }), 1);
+    assert.doesNotMatch(capture.errors.join(''), /storeResponse|private-|9999999/u);
+  }
+});
+
 test('认证成功后只确认目标应用，返回值不包含平台记录', async () => {
   const calls = [];
   const credentials = { username: 'private-account', password: 'private-password' };
