@@ -11,6 +11,8 @@ const {
   BROWSER_FAILURE_MESSAGES,
   BROWSER_SELECTORS,
 } = require('./uniontech-browser-authenticator.cjs');
+const { UosStoreApiClient } = require('./uos-store-api-client.cjs');
+const { runAuthenticationCheck } = require('./uos-store-auth-check.cjs');
 
 const IDENTITY = 'https://login.uniontech.com';
 const STORE = 'https://appstore-dev.uniontech.com';
@@ -103,6 +105,9 @@ function createHarness(options = {}) {
         const fetchUrl = fetchOptions.url || description.url;
         events.push({ kind: 'fetch', ...description, url: fetchUrl, options: fetchOptions });
         if (options.fetchFailure) throw new Error(`${PRIVATE_USER} ${PRIVATE_PASSWORD} ${PRIVATE_TOKEN}`);
+        if (options.duringAuthorizeRequest && description.method === 'POST' && new URL(fetchUrl).pathname === '/api/oauth2/authorize') {
+          await request(options.duringAuthorizeRequest.url, options.duringAuthorizeRequest);
+        }
         return resolveResponse(fetchUrl, description);
       },
       fulfill: async () => {
@@ -128,6 +133,10 @@ function createHarness(options = {}) {
   }
 
   async function submit() {
+    if (options.beforeAuthorizeRequest) {
+      await request(options.beforeAuthorizeRequest.url, options.beforeAuthorizeRequest);
+      return;
+    }
     const disposition = await request(`${IDENTITY}/api/oauth2/authorize`, { method: 'POST', body: authorizeBody() });
     if (options.duplicateAuthorize) {
       await request(`${IDENTITY}/api/oauth2/authorize`, { method: 'POST', body: authorizeBody() });
@@ -517,6 +526,78 @@ test('其他已知 API 的 POST 请求不能夹带字段或变更原 OAuth 参�
     await assert.rejects(harness.run, (error) => assertSafeError(error));
     assert.equal(harness.events.some((event) => event.kind === 'fetch' && event.url === url && event.body === body), false);
     assert.equal(harness.events.some((event) => event.kind === 'fill'), false);
+    assertCleaned(harness.events);
+  }
+});
+
+test('拒绝请求的三个登录阶段及固定分类经过真实 API 日志仍不包含 URL 或敏感字段', async () => {
+  const cases = [
+    {
+      trigger: 'beforeSubmitRequest',
+      url: 'https://account.uniontech.com/private-path?code=private-callback-secret&state=private-state',
+      reason: '统信浏览器在提交登录表单前阻止了未受信请求',
+      originClass: 'account_https', protocolClass: 'https', hasUserinfo: false, hasFragment: false,
+    },
+    {
+      trigger: 'beforeAuthorizeRequest',
+      url: 'https://account.uniontech.com/private-path?token=private-callback-secret',
+      reason: '统信浏览器在提交登录表单前阻止了未受信请求',
+      originClass: 'account_https', protocolClass: 'https', hasUserinfo: false, hasFragment: false,
+    },
+    {
+      trigger: 'duringAuthorizeRequest',
+      url: 'http://identity.chinauos.com/private-path?token=private-callback-secret',
+      reason: '统信浏览器在提交口令后阻止了未受信请求',
+      originClass: 'identity_center_http', protocolClass: 'http', hasUserinfo: false, hasFragment: false,
+    },
+    {
+      trigger: 'afterAuthorizeRequest',
+      url: 'https://private-user:private-password@cdn-nu-common.uniontech.com/private-path?token=private-callback-secret#private-fragment',
+      reason: '统信浏览器在登录响应成功后阻止了未受信请求',
+      originClass: 'static_cdn_https', protocolClass: 'https', hasUserinfo: true, hasFragment: true,
+    },
+  ];
+  for (const entry of cases) {
+    const harness = createHarness({ [entry.trigger]: { url: entry.url, resourceType: 'script' } });
+    const apiRequests = [];
+    const client = new UosStoreApiClient({
+      baseUrl: STORE,
+      identityAuthenticator: harness.run,
+      fetchImpl: async (input, init) => {
+        const url = new URL(input);
+        apiRequests.push({ path: url.pathname, method: init.method });
+        assert.equal(url.pathname, '/devprod-api/store-dev-auth/getLoginPath');
+        assert.equal(init.method, 'GET');
+        return new Response(JSON.stringify({ status: 200, datas: LOGIN_URL }));
+      },
+    });
+    const logs = [];
+    const errors = [];
+    const exitCode = await runAuthenticationCheck({
+      client,
+      credentials: { username: PRIVATE_USER, password: PRIVATE_PASSWORD },
+      log: (line) => logs.push(line),
+      error: (line) => errors.push(line),
+    });
+    assert.equal(exitCode, 1);
+    assert.deepEqual(logs, []);
+    assert.equal(errors.length, 1);
+    const diagnostic = JSON.parse(errors[0].slice('UOS authentication check failed: '.length));
+    assert.deepEqual(diagnostic, {
+      code: 'UOS_AUTH_CONTRACT_UNVERIFIED',
+      reason: entry.reason,
+      callbackShape: {
+        originClass: entry.originClass,
+        protocolClass: entry.protocolClass,
+        portClass: 'default',
+        pathClass: 'other',
+        hasUserinfo: entry.hasUserinfo,
+        hasFragment: entry.hasFragment,
+      },
+    });
+    assert.doesNotMatch(errors[0], /https?:|uniontech\.com|chinauos\.com|private-|token=|code=|state=/u);
+    assert.equal(apiRequests.length, 1);
+    assert.equal(harness.events.some((event) => event.kind === 'fetch' && event.url === entry.url), false);
     assertCleaned(harness.events);
   }
 });

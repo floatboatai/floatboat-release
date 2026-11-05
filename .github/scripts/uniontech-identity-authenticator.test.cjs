@@ -10,6 +10,8 @@ const test = require('node:test');
 const {
   UnionTechIdentityError,
   authenticateUnionTechIdentity,
+  classifyCallbackShape,
+  sanitizeCallbackShape,
   validateCallback,
   validateOAuthLoginUrl,
 } = require('./uniontech-identity-authenticator.cjs');
@@ -233,4 +235,86 @@ test('Identity registerlogin 中转要求人工处理，不能当作商店回跳
     (error) => error.code === 'UOS_AUTH_INTERACTION_REQUIRED' && !/private-key|private-url/u.test(error.message),
   );
   assert.equal(harness.events.some((event) => event.path === '/api/oauth2/authorize/registerlogin'), false);
+});
+
+test('回跳来源诊断只输出固定 HTTP/HTTPS 枚举和既有六字段，不携带真实地址内容', () => {
+  for (const [hostname, prefix] of [
+    ['appstore-dev.uniontech.com', 'store'],
+    ['login.uniontech.com', 'identity'],
+    ['account.uniontech.com', 'account'],
+    ['identity.chinauos.com', 'identity_center'],
+    ['cdn-nu-common.uniontech.com', 'static_cdn'],
+  ]) {
+    for (const protocol of ['https', 'http']) {
+      const url = new URL(`${protocol}://private-user:private-password@${hostname}/private-path?token=private-token&code=private-code#private-fragment`);
+      const shape = classifyCallbackShape(url);
+      assert.deepEqual(shape, {
+        originClass: `${prefix}_${protocol}`,
+        protocolClass: protocol,
+        portClass: 'default',
+        pathClass: 'other',
+        hasUserinfo: true,
+        hasFragment: true,
+      });
+      assert.ok(Object.isFrozen(shape));
+      assert.deepEqual(sanitizeCallbackShape(shape), shape);
+      const serialized = JSON.stringify(shape);
+      assert.equal(serialized.includes(hostname), false);
+      assert.doesNotMatch(serialized, /private-|https?:\/\/|token|code=|\?/u);
+    }
+  }
+});
+
+test('来源分类对仿冒域名和非默认端口一律返回 other', () => {
+  for (const hostname of ['appstore-dev.uniontech.com', 'login.uniontech.com', 'account.uniontech.com', 'identity.chinauos.com', 'cdn-nu-common.uniontech.com']) {
+    for (const protocol of ['https', 'http']) {
+      const spoof = classifyCallbackShape(new URL(`${protocol}://${hostname}.untrusted.invalid/`));
+      assert.equal(spoof.originClass, 'other');
+      assert.equal(spoof.portClass, 'default');
+      const nondefaultPort = classifyCallbackShape(new URL(`${protocol}://${hostname}:8080/`));
+      assert.equal(nondefaultPort.originClass, 'other');
+      assert.equal(nondefaultPort.portClass, 'nondefault');
+    }
+  }
+});
+
+test('新增来源分类不扩大商店回跳接受范围', () => {
+  for (const hostname of ['account.uniontech.com', 'identity.chinauos.com', 'cdn-nu-common.uniontech.com']) {
+    for (const protocol of ['https', 'http']) {
+      assert.throws(
+        () => validateCallback(`${protocol}://${hostname}/?code=private-code&state=expected-state`, 'expected-state'),
+        (error) => {
+          assert.equal(error.code, 'UOS_AUTH_CONTRACT_UNVERIFIED');
+          assert.doesNotMatch(`${error.message} ${JSON.stringify(error.callbackShape)}`, /private-code|expected-state|uniontech\.com|chinauos\.com/u);
+          return true;
+        },
+      );
+    }
+  }
+});
+
+test('回跳分类清洗继续拒绝额外字段、缺失字段和非法枚举', () => {
+  const valid = {
+    originClass: 'account_https',
+    protocolClass: 'https',
+    portClass: 'default',
+    pathClass: 'root',
+    hasUserinfo: false,
+    hasFragment: false,
+  };
+  assert.deepEqual(sanitizeCallbackShape(valid), valid);
+  for (const candidate of [
+    { ...valid, url: 'https://account.uniontech.com/?token=private-token' },
+    { ...valid, originClass: 'https://account.uniontech.com' },
+    { ...valid, originClass: 'account_ftp' },
+    { ...valid, protocolClass: 'ftp' },
+    { ...valid, portClass: '8080' },
+    { ...valid, pathClass: '/private-path' },
+    { ...valid, hasFragment: 'private-fragment' },
+    Object.fromEntries(Object.entries(valid).filter(([key]) => key !== 'hasUserinfo')),
+    [valid],
+    null,
+  ]) {
+    assert.equal(sanitizeCallbackShape(candidate), undefined);
+  }
 });

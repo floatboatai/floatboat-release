@@ -180,7 +180,7 @@ async function publishUosStore(options) {
     });
   }
 
-  const template = await options.client.getApplicationTemplate(existing.versionId || application.currentVersionId);
+  const template = await options.client.getApplicationTemplate(existing.versionId || application.currentVersionId, application.appId);
   const submissionPackages = [];
   const reusableByArch = new Map(
     existing.state === 'uploaded' || existing.state === 'partial-uploaded'

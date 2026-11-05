@@ -18,6 +18,7 @@ const {
   classifyAuditStatus,
   classifyPublicationStatus,
   digest,
+  normalizeRemoteArch,
   describeUosAuthenticationFailure,
   redactMessage,
 } = require('./uos-store-api-client.cjs');
@@ -27,6 +28,201 @@ async function readBody(request) {
   for await (const chunk of request) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
+
+function createApplicationDetail() {
+  // 形状来自公开编辑页 getAppDetialInfo；值为虚构样本，不含账号数据。
+  return {
+    app_basic_info: { app_id: 1097210, pkg_mode: 0, pkgInstallMode: 1, inAppPayment: 0, businessField: 'keep' },
+    app_fit_info: {
+      arch: [{ code: 4, name: 'X86', futureField: 'keep' }, { code: 3, name: 'ARM' }],
+      system_mode: [{ code: 1 }],
+      system_platform: [{ code: 1 }, { code: 11 }],
+      region: [{ code: 1 }],
+      cpu_clip: [{ code: 9 }],
+      supWayland: 0,
+      futureField: { keep: true },
+    },
+    app_lan_infos: [{
+      lan: 'zh_CN', name: 'Floatboat', brief_info: '已有简介', desc_info: '已有详细介绍', update_desc: '已有更新说明',
+      icon_save_key: 'existing-icon', appScreenShotList: [{ screen_shot_key: 'existing-screen', sort: 0 }],
+      pkgUptDesc: [{ originPkgKeys: ['old-amd64'], originPkgKeyStr: 'old-amd64', uptDesc: '架构说明', futureField: 'keep' }],
+    }],
+    app_origin_pkgs: ['amd64', 'arm64'].map((arch, index) => ({
+      id: `old-row-${arch}`, pkg_name: 'com.floatboat.desktop', pkg_arch: index === 0 ? 4 : 3,
+      pkgArch: arch, pkg_version: '0.6.3.2', pkg_size: 101 + index, sha256: 'c'.repeat(64),
+      file_save_key: `old-${arch}`, supSys: index === 0 ? '1,11' : '1', systemStr: `existing-${arch}`,
+      supBlineVer: 'existing-baseline', baseline: [{ id: index + 7 }], system_platform: index === 0 ? [1, 11] : [1],
+      unsupportBlineVers: '', unsupportBaseline: [],
+    })),
+    futureSection: { keep: 'untouched' },
+  };
+}
+
+function createSubmissionPackages() {
+  return ['amd64', 'arm64'].map((arch, index) => ({
+    pkg_name: 'com.floatboat.desktop', pkg_arch: index === 0 ? 4 : 3, pkgArch: arch,
+    pkg_version: '0.6.3.6', pkg_size: 201 + index, sha256: (index === 0 ? 'a' : 'b').repeat(64),
+    file_save_key: `new-${arch}`, pkg_mode: null, detectedField: `new-${arch}`,
+  }));
+}
+
+test('公开平铺详情及 wrapper 生成同一提交，保留文案商务元数据与各架构适配', () => {
+  const client = new UosStoreApiClient({ baseUrl: 'http://127.0.0.1' });
+  for (const wrap of [(value) => value, (value) => ({ app_info: value }), (value) => ({ datas: value }), (value) => ({ datas: { app_info: value } })]) {
+    const detail = createApplicationDetail();
+    const original = structuredClone(detail);
+    const packages = createSubmissionPackages();
+    const payload = client.prepareSubmission(wrap(detail), packages);
+    assert.equal(payload.operate_type, 52);
+    assert.deepEqual(payload.app_info.app_basic_info, original.app_basic_info);
+    assert.deepEqual(payload.app_info.app_fit_info, original.app_fit_info);
+    assert.deepEqual(payload.app_info.futureSection, original.futureSection);
+    assert.deepEqual(payload.app_info.app_lan_infos, [{
+      ...original.app_lan_infos[0],
+      pkgUptDesc: [{ ...original.app_lan_infos[0].pkgUptDesc[0], originPkgKeys: ['new-amd64'], originPkgKeyStr: 'new-amd64' }],
+    }]);
+    for (const [index, row] of payload.app_info.app_origin_pkgs.entries()) {
+      for (const field of ['supSys', 'supBlineVer', 'systemStr', 'system_platform', 'baseline', 'unsupportBaseline', 'unsupportBlineVers']) {
+        assert.deepEqual(row[field], original.app_origin_pkgs[index][field]);
+      }
+      assert.equal(row.pkg_version, '0.6.3.6');
+      assert.equal(row.sha256, packages[index].sha256);
+      assert.equal(row.file_save_key, packages[index].file_save_key);
+      assert.equal(row.pkg_mode, 0);
+      assert.equal(row.id, undefined);
+      assert.equal(row.detectedField, packages[index].detectedField);
+    }
+    assert.deepEqual(detail, original);
+  }
+});
+
+test('公开平铺详情以稳定应用 ID、包名、架构和哈希绑定审核状态', async () => {
+  const detail = createApplicationDetail();
+  detail.app_origin_pkgs = createSubmissionPackages();
+  const manifest = {
+    appid: 'com.floatboat.desktop', packageVersion: '0.6.3.6',
+    packages: createSubmissionPackages().map((row) => ({ arch: row.pkgArch, sha256: row.sha256 })),
+  };
+  const client = new UosStoreApiClient({
+    baseUrl: 'http://127.0.0.1',
+    fetchImpl: async (url) => {
+      const pathname = new URL(url).pathname;
+      if (pathname.endsWith('/history')) return Response.json({ code: 200, rows: [{ id: 'target', app_id: 1097210, pkg_version: '0.6.3.6', status: 52 }], total: 1 });
+      if (pathname.endsWith('/detail')) return Response.json({ status: 200, datas: detail });
+      if (pathname.endsWith('/audit_status')) return Response.json({ status: 200, datas: {} });
+      throw new Error('unexpected request');
+    },
+  });
+  assert.equal((await client.inspectPublication('1097210', manifest)).state, 'submitted');
+  detail.app_basic_info.app_id = 1097211;
+  assert.equal((await client.inspectPublication('1097210', manifest)).state, 'conflict');
+  detail.app_basic_info.app_id = 1097210;
+  detail.app_origin_pkgs[0].pkg_name = 'com.floatboat.desktop.deepseek';
+  assert.equal((await client.inspectPublication('1097210', manifest)).state, 'conflict');
+});
+
+test('模板适配缺失或双架构映射歧义在读取模板阶段拒绝，不猜默认系统', async () => {
+  const client = new UosStoreApiClient({ baseUrl: 'http://127.0.0.1' });
+  for (const corrupt of [
+    (detail) => { delete detail.app_origin_pkgs[0].supSys; },
+    (detail) => { detail.app_origin_pkgs[1].pkg_arch = 4; },
+    (detail) => { detail.app_origin_pkgs.pop(); },
+    (detail) => { detail.app_origin_pkgs[0].pkg_name = 'com.example.other'; },
+    (detail) => { delete detail.app_lan_infos; },
+    (detail) => { delete detail.app_fit_info.arch; },
+    (detail) => { detail.app_fit_info.arch[0].code = 0; },
+    (detail) => { detail.app_fit_info.arch[0].code = 3; },
+  ]) {
+    const detail = createApplicationDetail();
+    corrupt(detail);
+    client.getVersionDetail = async () => detail;
+    await assert.rejects(() => client.getApplicationTemplate('version', 1097210), /UOS_SUBMISSION_TEMPLATE_INVALID/);
+  }
+  const detail = createApplicationDetail();
+  delete detail.app_origin_pkgs[0].unsupportBaseline;
+  delete detail.app_origin_pkgs[0].unsupportBlineVers;
+  client.getVersionDetail = async () => detail;
+  const result = client.prepareSubmission(await client.getApplicationTemplate('version', 1097210), createSubmissionPackages());
+  assert.equal(Object.hasOwn(result.app_info.app_origin_pkgs[0], 'unsupportBaseline'), false);
+  assert.equal(Object.hasOwn(result.app_info.app_origin_pkgs[0], 'unsupportBlineVers'), false);
+  await assert.rejects(() => client.getApplicationTemplate('version', 1097211), /UOS_SUBMISSION_TEMPLATE_INVALID/);
+});
+
+test('公开架构编码 4 为 X86、3 为 ARM，0 全架构不能冒充 amd64', () => {
+  assert.equal(normalizeRemoteArch(4), 'amd64');
+  assert.equal(normalizeRemoteArch('4'), 'amd64');
+  assert.equal(normalizeRemoteArch(3), 'arm64');
+  assert.equal(normalizeRemoteArch('ARM'), 'arm64');
+  for (const value of [0, '0', 'all', '全架构', 'x86', 'i386', 6, 8]) assert.equal(normalizeRemoteArch(value), null);
+});
+
+test('更新说明包引用缺失或矛盾时预检拒绝，不留下旧 key', async () => {
+  const client = new UosStoreApiClient({ baseUrl: 'http://127.0.0.1' });
+  for (const pkgUptDesc of [
+    [{ originPkgKeys: ['missing-key'], uptDesc: '已有说明' }],
+    [{ originPkgKeys: ['old-amd64'], originPkgKeyStr: 'old-arm64', uptDesc: '已有说明' }],
+    [{ originPkgKeyStr: 'old-amd64,missing-key', uptDesc: '已有说明' }],
+  ]) {
+    const detail = createApplicationDetail();
+    detail.app_lan_infos[0].pkgUptDesc = pkgUptDesc;
+    client.getVersionDetail = async () => detail;
+    await assert.rejects(() => client.getApplicationTemplate('version', 1097210), /UOS_SUBMISSION_TEMPLATE_INVALID/);
+  }
+  const detail = createApplicationDetail();
+  detail.app_lan_infos[0].pkgUptDesc = [
+    { originPkgKeyStr: 'old-amd64,old-arm64', uptDesc: '共同说明' },
+    { originPkgKeys: [], uptDesc: '默认更新说明' },
+  ];
+  const result = client.prepareSubmission(detail, createSubmissionPackages().reverse());
+  assert.deepEqual(result.app_info.app_lan_infos[0].pkgUptDesc, [
+    { originPkgKeyStr: 'new-amd64,new-arm64', uptDesc: '共同说明' },
+    { originPkgKeys: [], uptDesc: '默认更新说明' },
+  ]);
+  assert.equal(result.app_info.app_origin_pkgs[0].supSys, '1');
+  assert.equal(result.app_info.app_origin_pkgs[1].supSys, '1,11');
+});
+
+test('提交包必须是同一版本的唯一双架构，不能复用另一个包的 file key', () => {
+  const client = new UosStoreApiClient({ baseUrl: 'http://127.0.0.1' });
+  for (const corrupt of [
+    (packages) => { packages[1].pkg_arch = 4; },
+    (packages) => { packages[1].pkg_version = '0.6.3.5'; },
+    (packages) => { packages[1].sha256 = ''; },
+    (packages) => { packages[1].file_save_key = packages[0].file_save_key; },
+    (packages) => { packages[1].pkg_name = 'com.example.other'; },
+    (packages) => { packages[0].pkg_arch = 0; },
+    (packages) => { delete packages[0].pkg_arch; },
+    (packages) => { packages[0].pkg_size = 0; },
+  ]) {
+    const packages = createSubmissionPackages();
+    corrupt(packages);
+    assert.throws(() => client.prepareSubmission(createApplicationDetail(), packages), /UOS_SUBMISSION_PACKAGES_INVALID/);
+  }
+});
+
+test('详情缺 SHA、夹带旧版本或额外包时不能误判为已提交的精确双架构', async () => {
+  const client = new UosStoreApiClient({ baseUrl: 'http://127.0.0.1' });
+  const manifest = {
+    appid: 'com.floatboat.desktop', packageVersion: '0.6.3.6',
+    packages: createSubmissionPackages().map((row) => ({ arch: row.pkgArch, sha256: row.sha256 })),
+  };
+  client.listApplicationHistory = async () => [{ id: 'target', app_id: 1097210, pkg_version: '0.6.3.6', status: 52 }];
+  client.requestJson = async () => ({});
+  for (const [corrupt, expected] of [
+    [(rows) => { delete rows[0].sha256; }, 'unconfirmed'],
+    [(rows) => { rows.push({ ...rows[0], sha256: '' }); }, 'conflict'],
+    [(rows) => { rows.push({ ...rows[0], pkg_version: '0.6.3.2' }); }, 'unconfirmed'],
+    [(rows) => { rows[1].pkg_version = '0.6.3.2'; }, 'unconfirmed'],
+    [(rows) => { rows[0].sha256 = 'e'.repeat(64); }, 'conflict'],
+    [(rows) => { rows[0].pkg_arch = 0; }, 'conflict'],
+  ]) {
+    const detail = createApplicationDetail();
+    detail.app_origin_pkgs = createSubmissionPackages();
+    corrupt(detail.app_origin_pkgs);
+    client.getVersionDetail = async () => detail;
+    assert.equal((await client.inspectPublication('1097210', manifest)).state, expected);
+  }
+});
 
 test('登录检查通过认证适配层保留固定诊断和不含字段值的回跳分类', async () => {
   const client = new UosStoreApiClient({
@@ -190,12 +386,12 @@ test('提交模板复用当前版本详情端点', async () => {
   const calls = [];
   client.requestJson = async (...args) => {
     calls.push(args);
-    return { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' } } };
+    return { app_info: createApplicationDetail() };
   };
 
-  const template = await client.getApplicationTemplate('version/id');
+  const template = await client.getApplicationTemplate('version/id', 1097210);
 
-  assert.equal(template.app_info.app_basic_info.app_id, 'com.floatboat.desktop');
+  assert.equal(template.app_info.app_basic_info.app_id, 1097210);
   assert.deepEqual(calls, [[
     'GET',
     '/store-dev-app/app/version%2Fid/detail',
@@ -381,13 +577,13 @@ test('审核结论通过 app_id 历史精确绑定唯一版本 id 与双架构�
     packages: Object.entries(hash).map(([arch, sha256]) => ({ arch, sha256 })),
   };
   const row = (arch, versionId = 'version-current') => ({
-    pkg_version: '0.6.3.0', pkg_arch: arch, sha256: hash[arch], file_save_key: `key-${arch}`, version_id: versionId,
+    pkg_name: 'com.floatboat.desktop', pkg_version: '0.6.3.0', pkg_arch: arch, sha256: hash[arch], file_save_key: `key-${arch}`, version_id: versionId,
   });
   const client = new UosStoreApiClient({ baseUrl: 'http://127.0.0.1' });
 
   const setRemote = ({
     history = [{ id: 'version-current', pkg_version: '0.6.3.0' }],
-    detail = { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' }, app_origin_pkgs: [row('amd64')] } },
+    detail = { app_info: { app_basic_info: { app_id: 'app' }, app_origin_pkgs: [row('amd64')] } },
     audit = { audit_status: '草稿' },
   } = {}) => {
     client.listApplicationHistory = async () => history;
@@ -406,13 +602,13 @@ test('审核结论通过 app_id 历史精确绑定唯一版本 id 与双架构�
 
   setRemote({
     history: [{ id: 'version-current', pkg_version: '0.6.3.0', status: 52, statusStr: '审核中' }],
-    detail: { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
+    detail: { app_info: { app_basic_info: { app_id: 'app' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
     audit: { datas: { datas: [{ check_item: '包安全', status: 1 }], submit_time: '2026-11-02' } },
   });
   assert.equal((await client.inspectPublication('app', manifest)).state, 'submitted');
 
   setRemote({
-    detail: { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
+    detail: { app_info: { app_basic_info: { app_id: 'app' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
     audit: { audit_status: '审核通过' },
   });
   assert.equal((await client.inspectPublication('app', manifest)).state, 'submitted');
@@ -423,12 +619,12 @@ test('审核结论通过 app_id 历史精确绑定唯一版本 id 与双架构�
   assert.equal((await client.inspectPublication('app', manifest)).state, 'unconfirmed');
 
   setRemote({
-    detail: { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' }, app_origin_pkgs: [row('amd64'), row('amd64')] } },
+    detail: { app_info: { app_basic_info: { app_id: 'app' }, app_origin_pkgs: [row('amd64'), row('amd64')] } },
   });
   assert.equal((await client.inspectPublication('app', manifest)).state, 'conflict');
 
   setRemote({
-    detail: { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
+    detail: { app_info: { app_basic_info: { app_id: 'app' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
     audit: { audit_status: '已驳回' },
   });
   assert.equal((await client.inspectPublication('app', manifest)).state, 'manual-action-required');
@@ -438,7 +634,7 @@ test('审核结论通过 app_id 历史精确绑定唯一版本 id 与双架构�
       { id: 'version-old', pkg_version: '0.6.2.0', audit_status: '已驳回' },
       { id: 'version-current', pkg_version: '0.6.3.0' },
     ],
-    detail: { app_info: { app_basic_info: { app_id: 'com.floatboat.desktop' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
+    detail: { app_info: { app_basic_info: { app_id: 'app' }, app_origin_pkgs: [row('amd64'), row('arm64')] } },
     audit: { audit_status: '审核中' },
   });
   assert.equal((await client.inspectPublication('app', manifest)).state, 'submitted');
@@ -471,10 +667,10 @@ test('版本历史有界拉取全部分页，目标版本可位于后页', async
     }
     if (endpoint.endsWith('/detail')) {
       return { app_info: {
-        app_basic_info: { app_id: 'com.floatboat.desktop' },
+        app_basic_info: { app_id: 'stable-app' },
         app_origin_pkgs: [
-          { pkg_version: '0.6.3.0', pkg_arch: 'amd64', sha256: hash.amd64, file_save_key: 'amd64-key' },
-          { pkg_version: '0.6.3.0', pkg_arch: 'arm64', sha256: hash.arm64, file_save_key: 'arm64-key' },
+          { pkg_name: 'com.floatboat.desktop', pkg_version: '0.6.3.0', pkg_arch: 'amd64', sha256: hash.amd64, file_save_key: 'amd64-key' },
+          { pkg_name: 'com.floatboat.desktop', pkg_version: '0.6.3.0', pkg_arch: 'arm64', sha256: hash.arm64, file_save_key: 'arm64-key' },
         ],
       } };
     }
