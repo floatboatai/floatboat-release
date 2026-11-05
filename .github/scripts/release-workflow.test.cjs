@@ -6,6 +6,8 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 
 const workflowPath = path.join(__dirname, '..', 'workflows', 'release.yml');
@@ -363,5 +365,58 @@ test('无 Secret fan-in 先校验当前 run 双架构，再允许受保护发布
   assert.match(publishingJob, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(publishingJob, /ref: \$\{\{ github\.sha \}\}/);
 
-  assert.match(existingPublishJob, /if: inputs\.notify_only == false && inputs\.is_rc == false && inputs\.build_profile == 'release' && inputs\.linux_package == 'uos-floatboat' && inputs\.desktop_variant == 'floatboat' && needs\.prepare\.outputs\.package_set == 'app' && contains\(inputs\.platforms, 'linux'\) && needs\.build-linux-uos\.result == 'success'/);
+  assert.doesNotMatch(existingPublishJob, /upload_uos_store/);
+  assert.match(existingPublishJob, /needs: \[prepare, build-linux, build-linux-uos, upload\]/);
+  assert.match(existingPublishJob, /inputs\.is_rc == false/);
+});
+
+
+test('RC 范围脚本保留普通双平台和 Linux 四包路径，仅显式送审接受 UOS 专包', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const step = readNamedStep(workflow, 'Resolve release scope');
+  const marker = '        run: |\n';
+  const script = step.slice(step.indexOf(marker) + marker.length)
+    .split('\n').map((line) => line.replace(/^          /, '')).join('\n');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'uos-release-scope-'));
+  try {
+    const cases = [
+      ['macos,windows', 'deb-and-uos', 'false', 0],
+      ['linux', 'deb-and-uos', 'false', 0],
+      ['linux', 'uos-floatboat', 'true', 0],
+      ['linux', 'uos-floatboat', 'false', 1],
+      ['linux', 'deb-and-uos', 'true', 1],
+      ['macos,windows', 'uos-floatboat', 'true', 1],
+    ];
+    for (const [platforms, linuxPackage, upload, expected] of cases) {
+      const result = spawnSync('bash', ['-c', script], {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          INPUT_DESKTOP_VARIANT: 'floatboat',
+          INPUT_VERSION: '0.6.3-rc.6',
+          INPUT_IS_RC: 'true',
+          INPUT_BUILD_PROFILE: 'release',
+          INPUT_PLATFORMS: platforms,
+          INPUT_LINUX_PACKAGE: linuxPackage,
+          INPUT_UPLOAD_UOS_STORE: upload,
+          INPUT_PROMOTE_MERGED_BUGS: 'false',
+          GITHUB_OUTPUT: path.join(directory, 'output'),
+        },
+      });
+      assert.equal(result.status, expected, `${platforms}/${linuxPackage}/${upload}: ${result.stderr} ${result.stdout}`);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('送审校验和发布消费构建任务实际产出的独立 UOS artifacts', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const producer = readNamedStep(readNamedJob(workflow, 'build-linux-uos'), 'Upload UOS artifacts');
+  assert.match(producer, /name: uos-linux-\$\{\{ matrix\.arch \}\}/);
+  for (const name of ['validate-uos-publication', 'publish-uos-store']) {
+    const consumer = readNamedJob(workflow, name);
+    assert.match(consumer, /pattern: uos-linux-\*/);
+    assert.doesNotMatch(consumer, /desktop-linux-uos/);
+  }
 });
