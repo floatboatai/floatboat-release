@@ -68,7 +68,7 @@ Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使
 
 `release.yml` 的 `upload_uos_store` 默认是 `false`。只有 `com.floatboat.desktop` 的稳定或 RC UOS Floatboat 构建、amd64/arm64 两个包均构建成功或经来源校验恢复，并通过无凭证校验后，才会进入统信商店上传并自动提交审核；RC 送审使用 `platforms=linux`、`is_rc=true`，稳定版沿用包含 Linux 的正式构建。普通 Linux、Windows、macOS、DeepSeek 与默认发布流程不会读取统信凭证。该流程完全运行在 GitHub Actions 中，不依赖 Desktop Backend 或其他发布请求服务。
 
-`reuse_uos_run_id` 默认为空，正常发布继续构建双包。修复上传器后可填入本仓 `main` 上已完成的 `release.yml` 运行 ID，复用其已成功构建并校验的两个 UOS 包；必须同时指定原来的 `version`、`repo_ref`，且 `upload_uos_store=true`、`desktop_variant=floatboat`、`platforms=linux`、`linux_package=uos-floatboat`、`build_profile=release`、`package_set=app`。恢复任务会核对来源运行、成功任务、唯一未过期制品、原清单、源码 SHA、包版本、架构、大小和摘要，再上传为当前运行的制品；当前清单及回执使用真实的新运行身份，并在 `buildSource` 保留原来源。任何来源不一致都在读取统信凭证前失败，不允许复用普通 Linux 包或缺少任一架构的包。
+`reuse_uos_run_id` 默认为空，正常发布继续构建双包。修复上传器后可填入本仓 `main` 上已完成的 `release.yml` 运行 ID，复用其已成功构建并校验的两个 UOS 包；必须同时指定原来的 `version`、`repo_ref`，且 `upload_uos_store=true`、`desktop_variant=floatboat`、`platforms=linux`、`linux_package=uos-floatboat`、`build_profile=release`、`package_set=app`、`skip_release_notes=true`。恢复任务会核对来源运行、成功任务、唯一未过期制品、原清单、源码 SHA、包版本、架构、大小和摘要，再上传为当前运行的制品；当前清单及回执使用真实的新运行身份，并在 `buildSource` 保留原来源。任何来源不一致都在读取统信凭证前失败，不允许复用普通 Linux 包或缺少任一架构的包。
 
 分片上传最多 4 并发，每次 PUT 最多 300 秒；仅暂时网络错误及 HTTP 408/429/5xx 对相同 URL 和相同字节最多尝试 3 次。TLS、重定向和普通 4xx 直接失败；一个分片终止失败后取消其余请求，不执行完成上传或送审。日志只记录分片数量、重试次数和固定原因，不记录签名 URL 或响应正文。
 

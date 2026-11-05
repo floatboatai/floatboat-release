@@ -2207,7 +2207,15 @@ jobs:
           ref: ${{ github.sha }}
           path: release-tooling
           persist-credentials: false
-          sparse-checkout: .github/scripts
+          sparse-checkout: |
+            .github/scripts
+            .github/workflows
+
+      - name: Verify UOS publication tooling before credentials
+        run: |
+          node --test release-tooling/.github/scripts/uniontech-*.test.cjs \
+            release-tooling/.github/scripts/uos-*.test.cjs \
+            release-tooling/.github/scripts/release-workflow.test.cjs
 
       - name: Download current-run UOS artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
