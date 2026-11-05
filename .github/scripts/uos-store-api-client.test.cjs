@@ -404,7 +404,7 @@ test('API client 只发送 400KiB 检测前缀并按前端 MD5 begin/PUT/end 契
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'uos-api-client-'));
   context.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const packagePath = path.join(root, 'Floatboat-0.6.3-amd64.deb');
-  const packageBytes = Buffer.alloc(400 * 1024 + 123, 0x61);
+  const packageBytes = Buffer.alloc(UOS_STORE_CONTRACT.uploadChunkBytes + 123, 0x61);
   fs.writeFileSync(packagePath, packageBytes);
   const events = [];
   let server;

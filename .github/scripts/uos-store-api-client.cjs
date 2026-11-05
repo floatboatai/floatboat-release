@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const { UnionTechIdentityError, sanitizeCallbackShape, sanitizeIdentityFailureReason, sanitizeAuthenticationResponse } = require('./uniontech-identity-authenticator.cjs');
 const { BROWSER_FAILURE_MESSAGES } = require('./uniontech-browser-authenticator.cjs');
 const { sanitizeNavigationDiagnostic } = require('./uniontech-navigation-diagnostic.cjs');
+const { uploadChunks, UosChunkUploadError } = require('./uos-chunk-uploader.cjs');
 
 const UOS_STORE_CONTRACT = Object.freeze({
   basePath: '/devprod-api',
@@ -358,6 +359,7 @@ class UosStoreApiClient {
     this.fetch = options.fetchImpl || globalThis.fetch;
     if (typeof this.fetch !== 'function') throw new UosStoreApiError('UOS_STORE_CONFIGURATION_INVALID', '缺少 fetch');
     this.identityAuthenticator = options.identityAuthenticator || null;
+    this.onUploadProgress = options.onUploadProgress;
     this.cookies = new Map();
     this.sensitiveValues = [];
   }
@@ -635,9 +637,15 @@ class UosStoreApiClient {
     if (!Array.isArray(uploadInfos) || uploadInfos.length !== chunks.length) {
       throw new UosStoreApiError('UOS_UPLOAD_CONTRACT_MISMATCH', '分片上传 URL 数量不匹配');
     }
-    for (let index = 0; index < chunks.length; index += 1) {
-      const uploadUrl = uploadInfos[index]?.upload_url;
-      await this.putChunk(uploadUrl, chunks[index].data);
+    try {
+      await uploadChunks(chunks.map((chunk, index) => ({ data: chunk.data, url: uploadInfos[index]?.upload_url })), {
+        fetchImpl: this.fetch,
+        onProgress: this.onUploadProgress,
+      });
+    } catch (error) {
+      if (!(error instanceof UosChunkUploadError)) throw error;
+      const code = error.reason === 'invalid_url' ? 'UOS_UPLOAD_CONTRACT_MISMATCH' : 'UOS_UPLOAD_FAILED';
+      throw new UosStoreApiError(code, error.message, { retryable: error.retryable });
     }
     const result = await this.requestJson('POST', UOS_STORE_CONTRACT.endpoints.uploadEnd, {
       chunks: chunks.map(({ hash }) => hash),
@@ -706,31 +714,6 @@ class UosStoreApiClient {
       }
       throw error;
     }
-  }
-
-  async putChunk(rawUrl, data) {
-    let url;
-    try {
-      url = new URL(rawUrl);
-    } catch {
-      throw new UosStoreApiError('UOS_UPLOAD_CONTRACT_MISMATCH', '分片上传 URL 无效');
-    }
-    if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) {
-      throw new UosStoreApiError('UOS_UPLOAD_CONTRACT_MISMATCH', '分片上传 URL 必须使用 HTTPS');
-    }
-    let response;
-    try {
-      response = await this.fetch(url, {
-        method: 'PUT',
-        redirect: 'error',
-        headers: { 'content-type': 'application/octet-stream' },
-        body: data,
-        signal: AbortSignal.timeout(120_000),
-      });
-    } catch {
-      throw new UosStoreApiError('UOS_UPLOAD_FAILED', '分片上传网络失败', { retryable: true });
-    }
-    if (!response.ok) throw new UosStoreApiError('UOS_UPLOAD_FAILED', `分片上传失败 HTTP ${response.status}`, { retryable: true });
   }
 
   async requestJson(method, endpoint, body, operation, extraHeaders = {}) {
