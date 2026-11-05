@@ -101,6 +101,14 @@ on:
         required: false
         default: false
         type: boolean
+      uos_upload_location:
+        description: "Internal UOS upload executor (workbench prepares verified CDN downloads)"
+        required: false
+        default: "actions"
+        type: choice
+        options:
+          - "actions"
+          - "workbench"
       reuse_uos_run_id:
         description: "Optional completed Release run whose verified UOS packages match this source SHA and version"
         required: false
@@ -252,6 +260,7 @@ jobs:
         env:
           DISPATCH_ID: ${{ inputs.dispatch_id }}
           UPLOAD_UOS_STORE: ${{ inputs.upload_uos_store }}
+          UOS_UPLOAD_LOCATION: ${{ inputs.uos_upload_location }}
           REUSE_UOS_RUN_ID: ${{ inputs.reuse_uos_run_id }}
           REPO_REF: ${{ inputs.repo_ref }}
           VERSION: ${{ inputs.version }}
@@ -277,6 +286,14 @@ jobs:
             [ "$UPLOAD_UOS_STORE" = "true" ] || { echo "::error::UOS artifact reuse requires upload_uos_store=true"; exit 1; }
             [ "$PLATFORMS" = "linux" ] || { echo "::error::UOS artifact reuse requires exactly linux"; exit 1; }
           fi
+
+          case "${UOS_UPLOAD_LOCATION:-actions}" in
+            actions) ;;
+            workbench)
+              [ "$UPLOAD_UOS_STORE" = "true" ] || { echo "::error::Workbench UOS upload requires upload_uos_store=true"; exit 1; }
+              ;;
+            *) echo "::error::Unsupported UOS upload location"; exit 1 ;;
+          esac
 
           if [ "$UPLOAD_UOS_STORE" != "true" ]; then
             echo "UOS App Store publication is disabled; existing release behavior is unchanged."
@@ -1959,6 +1976,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       always() &&
+      inputs.uos_upload_location != 'workbench' &&
       inputs.notify_only == false &&
       inputs.is_rc == false &&
       inputs.build_profile == 'release' &&
@@ -2257,7 +2275,7 @@ jobs:
     name: Publish UOS App Store
     needs: [prepare, validate-uos-publication]
     runs-on: ubuntu-22.04
-    if: ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
+    if: ${{ !cancelled() && inputs.uos_upload_location != 'workbench' && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
     environment: uos-app-store-production
     concurrency:
       group: uos-app-store-production
@@ -2332,6 +2350,74 @@ jobs:
         if: always()
         run: |
           rm -rf artifacts/uos verified private
+
+  # ===========================================
+  # Prepare verified downloads for local UOS review (no Store Secrets)
+  # ===========================================
+  stage-uos-review:
+    name: Prepare UOS Workbench Downloads
+    needs: [prepare, validate-uos-publication]
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && inputs.uos_upload_location == 'workbench' && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      index_url: ${{ steps.publish.outputs.index_url }}
+      index_sha256: ${{ steps.publish.outputs.index_sha256 }}
+    env:
+      UOS_RELEASE_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+      UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+      UOS_REUSE_RUN_ID: ${{ inputs.reuse_uos_run_id }}
+      UOS_STAGE_MANIFEST_SHA256: ${{ needs.validate-uos-publication.outputs.manifest_sha256 }}
+    steps:
+      - name: Checkout trusted UOS staging scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Setup UOS staging Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+
+      - name: Download current-run UOS staging packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: uos-linux-*
+          path: artifacts/uos
+          merge-multiple: true
+
+      - name: Download current-run UOS staging manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: uos-publication-manifest-${{ needs.validate-uos-publication.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verified
+
+      - name: Revalidate UOS staging content before AWS access
+        run: node release-tooling/.github/scripts/uos-stage.cjs verify artifacts/uos verified/uos-publication-manifest.json
+
+      - name: Configure UOS staging AWS credentials
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Publish immutable UOS review downloads
+        id: publish
+        run: node release-tooling/.github/scripts/uos-stage.cjs publish artifacts/uos verified/uos-publication-manifest.json uos-review-downloads.json
+
+      - name: Upload verified UOS workbench download index
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: uos-review-downloads-${{ needs.validate-uos-publication.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: uos-review-downloads.json
+          retention-days: 30
+          if-no-files-found: error
 
   # ===========================================
   # Test Launcher - macOS arm64
