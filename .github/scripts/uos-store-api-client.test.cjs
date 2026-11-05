@@ -14,9 +14,11 @@ const { UnionTechIdentityError, validateCallback } = require('./uniontech-identi
 const {
   UOS_STORE_CONTRACT,
   UosStoreApiClient,
+  UosStoreApiError,
   classifyAuditStatus,
   classifyPublicationStatus,
   digest,
+  describeUosAuthenticationFailure,
   redactMessage,
 } = require('./uos-store-api-client.cjs');
 
@@ -25,6 +27,56 @@ async function readBody(request) {
   for await (const chunk of request) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
+
+test('登录检查通过认证适配层保留固定诊断和不含字段值的回跳分类', async () => {
+  const client = new UosStoreApiClient({
+    baseUrl: 'https://appstore-dev.uniontech.com',
+    identityAuthenticator: async () => validateCallback('http://login.uniontech.com/unknown?code=private-code&state=private-state', 'expected-state'),
+    fetchImpl: async () => new Response(JSON.stringify({ status: 200, datas: 'https://login.uniontech.com/oauth2/authorize?state=expected-state' })),
+  });
+  let authenticationError;
+  try {
+    await client.authenticate({ username: 'private-user', password: 'private-password' });
+  } catch (error) {
+    authenticationError = error;
+  }
+  const diagnostic = describeUosAuthenticationFailure(authenticationError);
+  assert.deepEqual(diagnostic, {
+    code: 'UOS_AUTH_CONTRACT_UNVERIFIED',
+    reason: '统信 OAuth 回跳不属于固定开发者平台',
+    callbackShape: {
+      originClass: 'identity_http', protocolClass: 'http', portClass: 'default', pathClass: 'other',
+      hasUserinfo: false, hasFragment: false,
+    },
+  });
+  assert.doesNotMatch(JSON.stringify(diagnostic), /private-code|private-state|private-user|private-password|unknown|login\.uniontech/u);
+});
+
+test('登录检查拒绝任意错误内容及带未知字段的回跳分类', () => {
+  for (const error of [
+    new Error('private-password'),
+    new UosStoreApiError('private-code', 'private-password'),
+    new UosStoreApiError('UOS_AUTH_FAILED', 'private-password'),
+  ]) {
+    error.callbackShape = {
+      originClass: 'other', protocolClass: 'https', portClass: 'default', pathClass: 'other',
+      hasUserinfo: false, hasFragment: false, password: 'private-password',
+    };
+    const diagnostic = describeUosAuthenticationFailure(error);
+    assert.equal(diagnostic.callbackShape, undefined);
+    assert.doesNotMatch(JSON.stringify(diagnostic), /private-password|private-code/u);
+  }
+  const error = new UosStoreApiError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳不属于固定开发者平台');
+  for (const value of [
+    { originClass: 'https://private-domain', protocolClass: 'https', portClass: 'default', pathClass: 'other', hasUserinfo: false, hasFragment: false },
+    { originClass: 'other', protocolClass: 'https', portClass: 'default', pathClass: 'other', hasUserinfo: false, hasFragment: 'private-token' },
+  ]) {
+    error.callbackShape = value;
+    const diagnostic = describeUosAuthenticationFailure(error);
+    assert.equal(diagnostic.callbackShape, undefined);
+    assert.doesNotMatch(JSON.stringify(diagnostic), /private-domain|private-token/u);
+  }
+});
 
 test('Identity 失败保留固定契约原因，同时拒绝输出任意异常内容', async () => {
   for (const [identityError, expectedMessage] of [

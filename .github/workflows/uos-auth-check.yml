@@ -1,0 +1,31 @@
+name: UOS Authentication Check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-uos-authentication:
+    name: Check UOS authentication
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: uos-app-store-production
+    concurrency:
+      group: uos-app-store-production
+      cancel-in-progress: false
+    steps:
+      - name: Checkout trusted UOS authentication tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Check UOS authentication
+        env:
+          UOS_STORE_USERNAME: ${{ secrets.UOS_STORE_USERNAME }}
+          UOS_STORE_PASSWORD: ${{ secrets.UOS_STORE_PASSWORD }}
+        run: node .github/scripts/uos-store-auth-check.cjs
