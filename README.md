@@ -63,3 +63,19 @@ Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使
 每次 Nightly 或 RC 完整发布成功后，本次轨道会自动接管 `internal/channel.yml`，因此最后成功发布的预发布类型就是内部客户端当前检查的类型。切换只发生在本地 metadata 校验、immutable 制品上传与 S3 校验、no-cache metadata 上传、CloudFront 失效、公网 metadata 回读及所有制品 HEAD 校验全部成功之后；失败或部分发布不会改变当前首选轨道。stable 发布不修改内部策略。
 
 内部发布采用失败关闭门禁：任何缺失制品、版本/文件集合/大小/SHA512 不匹配、DeepSeek 污染、S3 属性异常、CloudFront 后公网内容未收敛，都会令发布步骤失败；策略文件不会在轨道内容完成验证前上传。
+
+## UOS 商店自动送审
+
+`release.yml` 的 `upload_uos_store` 默认是 `false`。只有 `com.floatboat.desktop` 的稳定或 RC UOS Floatboat 构建、同一运行内 amd64/arm64 两个包均成功并通过无凭证校验后，才会进入统信商店上传并自动提交审核；RC 送审使用 `platforms=linux`、`is_rc=true`，稳定版沿用包含 Linux 的正式构建。普通 Linux、Windows、macOS、DeepSeek 与默认发布流程不会读取统信凭证。该流程完全运行在 GitHub Actions 中，不依赖 Desktop Backend 或其他发布请求服务。
+
+仓库管理员需要创建 GitHub Actions Environment `uos-app-store-production`：
+
+- Environment deployment branch 只允许 `main`。
+- Environment Secrets 只配置 `UOS_STORE_USERNAME` 与 `UOS_STORE_PASSWORD`，不要把明文写入 workflow、仓库变量、安装包、日志或制品。
+- 可按需要为 Environment 配置 required reviewers，审批通过前 Job 无法读取 Secrets。
+
+发布器按统信公开前端的当前契约在内存中完成 RSA 加密与 OAuth 登录，再用一次性 `code/state` 建立开发者平台短期会话；不会把 Identity Cookie、商店 Token 或账号密码写入磁盘、日志、安装包与回执。遇到 CAPTCHA、MFA、账号绑定、授权确认、身份选择或 SSO 契约变化时会失败关闭，不会绕过交互认证。
+
+`upload_uos_store=true` 没有独立的“仅登录”或“仅上传”模式：受保护 Job 登录成功后会继续上传双架构包并提交审核。首次真实运行前应先配置 Environment required reviewers，由发布负责人核对版本与无凭证校验 Job 后再批准；本地 mock 测试证明协议形状、幂等状态机和脱敏边界，不替代真实账号资格与平台联调。
+
+UOS 包版本遵循四段规则：稳定来源 `X.Y.Z` 生成 `X.Y.Z.0`，RC 来源 `X.Y.Z-rc.N` 生成 `X.Y.Z.N`。发布器会在上传前读取商店版本历史，拒绝低于商店最高版本的候选；同版本必须通过 amd64/arm64 SHA-256 内容一致性检查后才允许幂等恢复或提交审核。

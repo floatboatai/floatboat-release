@@ -1,5 +1,7 @@
 name: Release
 
+run-name: ${{ inputs.dispatch_id != '' && format('Release · {0} · {1} · {2}', inputs.dispatch_id, inputs.version, inputs.repo_ref) || format('Release · {0}', inputs.version) }}
+
 on:
   workflow_dispatch:
     inputs:
@@ -10,6 +12,11 @@ on:
       version:
         description: "Version string (e.g., 0.2.2-rc.1)"
         required: true
+        type: string
+      dispatch_id:
+        description: "Optional UUID used only to correlate this workflow run with the Desktop dispatcher"
+        required: false
+        default: ""
         type: string
       platforms:
         description: "Platforms to build"
@@ -89,6 +96,11 @@ on:
         required: false
         default: false
         type: boolean
+      upload_uos_store:
+        description: "Upload both verified UOS packages and submit them for review"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -131,26 +143,32 @@ jobs:
           INPUT_BUILD_PROFILE: ${{ inputs.build_profile }}
           INPUT_PLATFORMS: ${{ inputs.platforms }}
           INPUT_LINUX_PACKAGE: ${{ inputs.linux_package }}
+          INPUT_UPLOAD_UOS_STORE: ${{ inputs.upload_uos_store }}
           INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
         run: |
           set -euo pipefail
 
           if [ "$INPUT_IS_RC" = "true" ]; then
             [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::RC publishing requires desktop_variant=floatboat"; exit 1; }
-            case "$INPUT_PLATFORMS" in
-              "macos,windows") ;;
-              "linux")
-                [ "$INPUT_LINUX_PACKAGE" = "deb-and-uos" ] || {
-                  echo "::error::Linux-only RC artifact validation requires linux_package=deb-and-uos"
+            if [ "$INPUT_UPLOAD_UOS_STORE" = "true" ]; then
+              [ "$INPUT_PLATFORMS" = "linux" ] || { echo "::error::RC UOS publishing requires exactly linux"; exit 1; }
+              [ "$INPUT_LINUX_PACKAGE" = "uos-floatboat" ] || { echo "::error::RC UOS publishing requires linux_package=uos-floatboat"; exit 1; }
+            else
+              case "$INPUT_PLATFORMS" in
+                "macos,windows") ;;
+                "linux")
+                  [ "$INPUT_LINUX_PACKAGE" = "deb-and-uos" ] || {
+                    echo "::error::Linux-only RC artifact validation requires linux_package=deb-and-uos"
+                    exit 1
+                  }
+                  echo "::notice::Linux-only RC builds Actions artifacts without publishing CDN or installer URLs."
+                  ;;
+                *)
+                  echo "::error::RC publishing requires exactly macos,windows; Linux artifact validation requires exactly linux with linux_package=deb-and-uos"
                   exit 1
-                }
-                echo "::notice::Linux-only RC builds Actions artifacts without publishing CDN or installer URLs."
-                ;;
-              *)
-                echo "::error::RC publishing requires exactly macos,windows; Linux artifact validation requires exactly linux with linux_package=deb-and-uos"
-                exit 1
-                ;;
-            esac
+                  ;;
+              esac
+            fi
           fi
 
           case "$INPUT_DESKTOP_VARIANT" in
@@ -223,6 +241,55 @@ jobs:
           fi
           echo "package_set=$package_set" >> "$GITHUB_OUTPUT"
           echo "📦 Package set: $package_set"
+
+      - name: Validate UOS Store dispatch
+        shell: bash
+        env:
+          DISPATCH_ID: ${{ inputs.dispatch_id }}
+          UPLOAD_UOS_STORE: ${{ inputs.upload_uos_store }}
+          REPO_REF: ${{ inputs.repo_ref }}
+          VERSION: ${{ inputs.version }}
+          PLATFORMS: ${{ inputs.platforms }}
+          LINUX_PACKAGE: ${{ inputs.linux_package }}
+          DESKTOP_VARIANT: ${{ inputs.desktop_variant }}
+          IS_RC: ${{ inputs.is_rc }}
+          NOTIFY_ONLY: ${{ inputs.notify_only }}
+          BUILD_PROFILE: ${{ inputs.build_profile }}
+          PACKAGE_SET: ${{ steps.package_set.outputs.package_set }}
+          SKIP_RELEASE_NOTES: ${{ inputs.skip_release_notes }}
+          WORKFLOW_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+
+          if [ -n "$DISPATCH_ID" ] && ! [[ "$DISPATCH_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+            echo "::error::dispatch_id must be an RFC 4122 UUID"
+            exit 1
+          fi
+
+          if [ "$UPLOAD_UOS_STORE" != "true" ]; then
+            echo "UOS App Store publication is disabled; existing release behavior is unchanged."
+            exit 0
+          fi
+
+          [ "$NOTIFY_ONLY" = "false" ] || { echo "::error::UOS App Store publication does not support notify_only"; exit 1; }
+          if [[ "$VERSION" == *-rc.* ]]; then
+            [ "$IS_RC" = "true" ] || { echo "::error::RC UOS App Store publication requires is_rc=true"; exit 1; }
+          else
+            [ "$IS_RC" = "false" ] || { echo "::error::stable UOS App Store publication requires is_rc=false"; exit 1; }
+          fi
+          [ "$BUILD_PROFILE" = "release" ] || { echo "::error::UOS App Store publication requires build_profile=release"; exit 1; }
+          [ "$LINUX_PACKAGE" = "uos-floatboat" ] || { echo "::error::UOS App Store publication requires linux_package=uos-floatboat"; exit 1; }
+          [ "$DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::UOS App Store publication requires desktop_variant=floatboat"; exit 1; }
+          [ "$PACKAGE_SET" = "app" ] || { echo "::error::UOS App Store publication requires package_set=app"; exit 1; }
+          [ "$SKIP_RELEASE_NOTES" = "true" ] || { echo "::error::UOS-only publication requires skip_release_notes=true"; exit 1; }
+          [ "$WORKFLOW_REF" = "refs/heads/main" ] || { echo "::error::UOS App Store publication must run from floatboat-release main"; exit 1; }
+          case ",$PLATFORMS," in
+            *,linux,*) ;;
+            *) echo "::error::UOS App Store publication requires the linux platform"; exit 1 ;;
+          esac
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || { echo "::error::UOS App Store publication requires a stable or RC three-part version"; exit 1; }
+          [[ "$REPO_REF" =~ ^[0-9a-fA-F]{40}$ ]] || { echo "::error::UOS App Store publication requires an immutable 40-character source SHA"; exit 1; }
+          echo "✅ UOS App Store publication inputs passed fail-fast validation."
 
       - name: Checkout source repo
         uses: actions/checkout@v4
@@ -2018,6 +2085,123 @@ jobs:
             exit 1
           fi
           echo "✅ UOS amd64/arm64 packages published and installer URLs verified"
+
+  # ===========================================
+  # Validate UOS App Store publication (no Secrets)
+  # ===========================================
+  validate-uos-publication:
+    name: Validate UOS Store Publication
+    needs: [prepare, build-linux-uos]
+    runs-on: ubuntu-latest
+    if: inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.build-linux-uos.result == 'success'
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      manifest_sha256: ${{ steps.manifest.outputs.manifest_sha256 }}
+      package_version: ${{ steps.manifest.outputs.package_version }}
+    steps:
+      - name: Checkout trusted UOS publication tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Download current-run UOS artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: uos-linux-*
+          path: artifacts/uos
+          merge-multiple: true
+
+      - name: Validate packages and generate publication manifest
+        id: manifest
+        env:
+          UOS_RELEASE_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p verified
+          node release-tooling/.github/scripts/uos-publication-manifest.cjs \
+            artifacts/uos \
+            verified/uos-publication-manifest.json
+
+      - name: Upload verified UOS publication manifest
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: uos-publication-manifest-${{ steps.manifest.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verified/uos-publication-manifest.json
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================
+  # Publish UOS App Store (protected Environment)
+  # ===========================================
+  publish-uos-store:
+    name: Publish UOS App Store
+    needs: [prepare, build-linux-uos, validate-uos-publication]
+    runs-on: ubuntu-latest
+    if: inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.build-linux-uos.result == 'success' && needs.validate-uos-publication.result == 'success'
+    environment: uos-app-store-production
+    concurrency:
+      group: uos-app-store-production
+      cancel-in-progress: false
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout trusted UOS publisher
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Download current-run UOS artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: uos-linux-*
+          path: artifacts/uos
+          merge-multiple: true
+
+      - name: Download verified UOS publication manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: uos-publication-manifest-${{ needs.validate-uos-publication.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: verified
+
+      - name: Upload both UOS packages and submit review
+        env:
+          UOS_STORE_USERNAME: ${{ secrets.UOS_STORE_USERNAME }}
+          UOS_STORE_PASSWORD: ${{ secrets.UOS_STORE_PASSWORD }}
+          UOS_PUBLICATION_MANIFEST_SHA256: ${{ needs.validate-uos-publication.outputs.manifest_sha256 }}
+          UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p private
+          node release-tooling/.github/scripts/uos-store-publisher.cjs \
+            artifacts/uos \
+            verified/uos-publication-manifest.json \
+            private/uos-publication-receipt.json \
+            private/uos-publication-journal.json
+
+      - name: Upload redacted UOS publication receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: uos-publication-receipt-${{ needs.validate-uos-publication.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: private/uos-publication-receipt.json
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Remove UOS publication session files
+        if: always()
+        run: |
+          rm -rf artifacts/uos verified private
 
   # ===========================================
   # Test Launcher - macOS arm64
