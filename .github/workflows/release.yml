@@ -266,6 +266,58 @@ jobs:
             Stop-Transcript
           }
 
+      - name: Diagnose installed uninstaller signature after failure
+        if: failure()
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          # 只读保留失败现场，不运行卸载器，也不改动原有签名断言。
+          function Read-SignatureDiagnostic([string]$Path) {
+            $signature = Get-AuthenticodeSignature -LiteralPath $Path
+            $bytes = [IO.File]::ReadAllBytes($Path)
+            if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) { throw 'Uninstaller lacks a DOS header.' }
+            $pe = [BitConverter]::ToUInt32($bytes, 0x3c)
+            if ($pe + 26 -gt $bytes.Length -or [BitConverter]::ToUInt32($bytes, $pe) -ne 0x4550) { throw 'Uninstaller lacks a PE header.' }
+            $magic = [BitConverter]::ToUInt16($bytes, $pe + 24)
+            $directory = switch ($magic) { 0x10b { $pe + 24 + 96 + 32 }; 0x20b { $pe + 24 + 112 + 32 }; default { throw 'Unknown PE optional header.' } }
+            if ($directory + 8 -gt $bytes.Length) { throw 'Truncated PE security directory.' }
+            $certificateOffset = [BitConverter]::ToUInt32($bytes, $directory)
+            $certificateSize = [BitConverter]::ToUInt32($bytes, $directory + 4)
+            return @{
+              path = $Path; bytes = $bytes.Length; sha256 = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+              status = $signature.Status.ToString(); statusMessage = $signature.StatusMessage
+              signerSubject = $(if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { $null })
+              signerThumbprint = $(if ($signature.SignerCertificate) { $signature.SignerCertificate.Thumbprint } else { $null })
+              peMagic = $magic; certificateFileOffset = $certificateOffset; certificateSize = $certificateSize
+              certificateWithinFile = ($certificateOffset -gt 0 -and $certificateSize -gt 0 -and ([long]$certificateOffset + $certificateSize) -le $bytes.Length)
+            }
+          }
+          $evidence = Join-Path $env:GITHUB_WORKSPACE 'evidence'
+          [IO.Directory]::CreateDirectory($evidence) | Out-Null
+          $diagnostic = @{ installedUninstaller = $null; candidateExtraction = @{ status = 'unavailable' } }
+          try { $diagnostic.installedUninstaller = Read-SignatureDiagnostic 'C:\Program Files\Floatboat\Uninstall Floatboat.exe' }
+          catch { $diagnostic.installedUninstaller = @{ error = $_.Exception.Message } }
+          try {
+            $sevenZip = Join-Path $env:ProgramFiles '7-Zip/7z.exe'
+            if (-not [IO.File]::Exists($sevenZip)) { throw 'The runner does not have the full 7-Zip executable at its standard path.' }
+            $installers = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'installers/candidate') -Recurse -File -Filter 'Floatboat-Setup-*-x64.exe')
+            if ($installers.Count -ne 1) { throw 'The verified candidate installer is unavailable or ambiguous.' }
+            $listing = @(& $sevenZip l -slt -tNsis -- $installers[0].FullName 2>&1 | ForEach-Object { $_.ToString() })
+            $listExit = $LASTEXITCODE
+            $listing | Set-Content -LiteralPath (Join-Path $evidence 'candidate-nsis-members.txt') -Encoding utf8
+            if ($listExit -ne 0) { throw "The runner 7-Zip cannot list the candidate NSIS archive (exit $listExit)." }
+            $members = @($listing | ForEach-Object { if ($_ -match '^Path = (.+)$' -and $Matches[1] -match '(?i)(^|[\\/])[^\\/]*uninstall[^\\/]*\.exe$') { $_.Substring(7) } })
+            $diagnostic.candidateExtraction = @{ status = 'unavailable'; discoveredUninstallerMembers = $members }
+            if ($members.Count -ne 1) { throw 'No unique uninstaller member was discovered in the NSIS listing.' }
+            $extracted = Join-Path $evidence 'candidate-embedded-uninstaller.exe'
+            # PowerShell 7.4+ 的原生命令重定向保留字节；只按实际列出的成员名输出到固定证据文件。
+            & $sevenZip x -so -tNsis -spd -- $installers[0].FullName $members[0] 1> $extracted 2> (Join-Path $evidence 'candidate-uninstaller-extract.stderr.txt')
+            if ($LASTEXITCODE -ne 0 -or (Get-Item -LiteralPath $extracted).Length -eq 0) { throw 'The discovered candidate uninstaller could not be extracted.' }
+            $diagnostic.candidateExtraction = @{ status = 'extracted'; member = $members[0]; signature = (Read-SignatureDiagnostic $extracted) }
+          } catch { $diagnostic.candidateExtraction.error = $_.Exception.Message }
+          $output = Join-Path $evidence 'uninstaller-signature-diagnostic.json'
+          $diagnostic | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $output -Encoding utf8
+
       - name: Upload comparison evidence
         if: always()
         uses: actions/upload-artifact@v4
