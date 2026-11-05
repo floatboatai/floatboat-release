@@ -22,7 +22,10 @@ function json(payload, options = {}) {
 
 function createHarness(options = {}) {
   const { publicKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
-  const publicPem = publicKey.export({ type: 'pkcs1', format: 'pem' });
+  let publicPem = options.publicPem ?? publicKey.export({ type: options.keyType || 'pkcs1', format: 'pem' });
+  if (options.identityPublicKeyLabel) {
+    publicPem = publicPem.replace('BEGIN PUBLIC KEY', 'BEGIN RSA Public Key').replace('END PUBLIC KEY', 'END RSA Public Key');
+  }
   const events = [];
   const loginUrl = options.loginUrl || 'https://login.uniontech.com/oauth2/authorize?client_id=client-id&redirect_uri=https%3A%2F%2Fappstore-dev.uniontech.com&response_type=code&scope=base%2Cuser%3Aread&state=expected-state&theme=dark&lang=zh';
   const fetchImpl = async (input, init = {}) => {
@@ -53,38 +56,68 @@ function createHarness(options = {}) {
   return { events, fetchImpl, loginUrl };
 }
 
-test('Identity 登录按公开前端契约初始化 OAuth，并只发送 RSA 密文', async () => {
-  const harness = createHarness();
-  const callback = await authenticateUnionTechIdentity({
-    loginUrl: harness.loginUrl,
-    username: 'release-user@example.com',
-    password: 'release-password',
-    fetchImpl: harness.fetchImpl,
-  });
+for (const [label, keyOptions] of [
+  ['PKCS#1', {}],
+  ['SPKI', { keyType: 'spki' }],
+  ['统信非标准 SPKI 边框', { keyType: 'spki', identityPublicKeyLabel: true }],
+]) {
+  test(`Identity 使用 ${label} 按公开前端契约初始化 OAuth，并只发送 RSA 密文`, async () => {
+    const harness = createHarness(keyOptions);
+    const callback = await authenticateUnionTechIdentity({
+      loginUrl: harness.loginUrl,
+      username: 'release-user@example.com',
+      password: 'release-password',
+      fetchImpl: harness.fetchImpl,
+    });
 
-  assert.deepEqual(callback, { code: 'oauth-code', state: 'expected-state' });
-  assert.deepEqual(harness.events.map((event) => event.path), [
-    '/oauth2/authorize',
-    '/assets/config/config.json',
-    '/api/key',
-    '/api/oauth2/client',
-    '/api/oauth2/authorize',
-  ]);
-  const initialize = new URLSearchParams(harness.events.find((event) => event.path === '/api/oauth2/client').body);
-  assert.equal(initialize.get('client_id'), 'client-id');
-  assert.equal(initialize.get('redirect_uri'), 'https://appstore-dev.uniontech.com');
-  assert.equal(initialize.get('theme'), 'dark');
-  assert.equal(initialize.get('lang'), 'zh');
-  const authorize = new URLSearchParams(harness.events.at(-1).body);
-  assert.equal(authorize.get('token'), 'has');
-  assert.equal(authorize.get('validate'), 'random_hdh');
-  assert.equal(authorize.get('user_oauth'), 'o_base');
-  assert.equal(authorize.get('theme'), 'dark');
-  assert.match(authorize.get('account'), /^[A-Za-z0-9+/]+={0,2}$/u);
-  assert.match(authorize.get('password'), /^[A-Za-z0-9+/]+={0,2}$/u);
-  assert.notEqual(authorize.get('account'), 'release-user@example.com');
-  assert.notEqual(authorize.get('password'), 'release-password');
-  assert.doesNotMatch(JSON.stringify(harness.events), /release-user@example\.com|release-password/u);
+    assert.deepEqual(callback, { code: 'oauth-code', state: 'expected-state' });
+    assert.deepEqual(harness.events.map((event) => event.path), [
+      '/oauth2/authorize',
+      '/assets/config/config.json',
+      '/api/key',
+      '/api/oauth2/client',
+      '/api/oauth2/authorize',
+    ]);
+    const initialize = new URLSearchParams(harness.events.find((event) => event.path === '/api/oauth2/client').body);
+    assert.equal(initialize.get('client_id'), 'client-id');
+    assert.equal(initialize.get('redirect_uri'), 'https://appstore-dev.uniontech.com');
+    assert.equal(initialize.get('theme'), 'dark');
+    assert.equal(initialize.get('lang'), 'zh');
+    const authorize = new URLSearchParams(harness.events.at(-1).body);
+    assert.equal(authorize.get('token'), 'has');
+    assert.equal(authorize.get('validate'), 'random_hdh');
+    assert.equal(authorize.get('user_oauth'), 'o_base');
+    assert.equal(authorize.get('theme'), 'dark');
+    assert.match(authorize.get('account'), /^[A-Za-z0-9+/]+={0,2}$/u);
+    assert.match(authorize.get('password'), /^[A-Za-z0-9+/]+={0,2}$/u);
+    assert.notEqual(authorize.get('account'), 'release-user@example.com');
+    assert.notEqual(authorize.get('password'), 'release-password');
+    assert.doesNotMatch(JSON.stringify(harness.events), /release-user@example\.com|release-password/u);
+  });
+}
+
+test('Identity 拒绝非 RSA、公钥损坏和未知边框，且不提交凭证', async () => {
+  const { publicKey: ecKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+  const { publicKey: rsaKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const spki = rsaKey.export({ type: 'spki', format: 'pem' });
+  for (const publicPem of [
+    ecKey.export({ type: 'spki', format: 'pem' }),
+    '-----BEGIN RSA Public Key-----\ninvalid\n-----END RSA Public Key-----',
+    spki.replaceAll('PUBLIC KEY', 'UNKNOWN KEY'),
+    spki.replace('BEGIN PUBLIC KEY', 'BEGIN RSA Public Key'),
+  ]) {
+    const harness = createHarness({ publicPem });
+    await assert.rejects(
+      () => authenticateUnionTechIdentity({
+        loginUrl: harness.loginUrl,
+        username: 'release-user',
+        password: 'release-password',
+        fetchImpl: harness.fetchImpl,
+      }),
+      (error) => error.code === 'UOS_AUTH_CONTRACT_UNVERIFIED',
+    );
+    assert.equal(harness.events.some((event) => event.init.method === 'POST'), false);
+  }
 });
 
 test('Identity 开启验证码、出现授权确认或账户绑定时一律要求人工交互', async () => {
