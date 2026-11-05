@@ -1,30 +1,32 @@
-name: Windows upgrade guard probe
-run-name: Windows upgrade guard probe
+name: Windows shortcut probe
+run-name: Windows shortcut probe
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   probe:
-    name: Verify external hardlink guard
+    name: Verify Windows shortcut interfaces
     runs-on: windows-2022
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Run native file guard experiment
+      - name: Probe both path modes in independent processes
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $output = Join-Path $env:GITHUB_WORKSPACE 'evidence'
-          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File './scripts/diagnostics/windows-upgrade-guard-probe.ps1' -OutputDirectory $output
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          foreach ($mode in @('modern', 'default')) {
+            $output = Join-Path $env:GITHUB_WORKSPACE ('evidence/' + $mode)
+            & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File './scripts/diagnostics/windows-upgrade-shortcut-probe.ps1' -OutputDirectory $output -PathMode $mode
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Upload native probe evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-upgrade-guard-probe-${{ github.run_id }}
+          name: windows-shortcut-probe-${{ github.run_id }}
           path: evidence/
           retention-days: 7
           if-no-files-found: error
