@@ -110,7 +110,8 @@ function createHarness(options = {}) {
         }
         return resolveResponse(fetchUrl, description);
       },
-      fulfill: async () => {
+      fulfill: async (fulfillOptions = {}) => {
+        if (options.navigationFulfillFailure && fulfillOptions.status === 204) throw new Error(`${PRIVATE_USER} ${PRIVATE_PASSWORD} ${PRIVATE_TOKEN}`);
         disposition = 'fulfilled';
         events.push({ kind: 'fulfill', ...description });
       },
@@ -420,6 +421,16 @@ test('旧域握手后，跨域子资源重定向也不能复用原请求的身�
     assert.ok(!harness.events.some((event) => event.kind === 'fetch' && event.url === target));
     assertCleaned(harness.events);
   }
+});
+
+test('受控导航的本地响应失败仍被固定错误包装并清理', async () => {
+  const raw = '//login.chinauos.com/api/oauth2/authorize/bridge?ticket=private-session-token';
+  const harness = createHarness({
+    authorizeRedirect: raw, navigationFulfillFailure: true,
+    afterAuthorizeRequest: { url: `http:${raw}`, resourceType: 'document', navigation: true },
+  });
+  await assert.rejects(harness.run, (error) => assertSafeError(error, 'UOS_AUTH_FAILED'));
+  assertCleaned(harness.events);
 });
 
 test('未知目标与提交前商店回跳均被拦截且不会填入凭据', async () => {
