@@ -75,7 +75,7 @@ function createHarness(options = {}) {
     if (target.pathname === '/api/oauth2/authorize' && request.method === 'POST') {
       return response(options.authorizeStatus || 200, {
         code: 200,
-        data: { redirect: options.callbackUrl || CALLBACK_URL },
+        data: { redirect: options.authorizeRedirect || options.callbackUrl || CALLBACK_URL },
       }, options.authorizeHeaders || {});
     }
     if (target.pathname === '/api/oauth2/showqrcode') return response(200, { code: 200, data: {} });
@@ -649,10 +649,39 @@ test('拒绝请求的三个登录阶段及固定分类经过真实 API 日志仍
         hasUserinfo: entry.hasUserinfo,
         hasFragment: entry.hasFragment,
       },
+      ...(kind.navigation ? { navigationDiagnostic: {
+        requestHost: 'cdn-nu-common.uniontech.com', source: 'authorize', format: 'absolute',
+        sourceHost: 'appstore-dev.uniontech.com', followHost: 'appstore-dev.uniontech.com',
+        relation: 'different', hasAutoLoginKey: false,
+      } } : {}),
     });
-    assert.doesNotMatch(errors[0], /https?:|uniontech\.com|chinauos\.com|private-|token=|code=|state=/u);
+    assert.doesNotMatch(errors[0], /https?:|private-|token=|code=|state=/u);
     assert.equal(apiRequests.length, 1);
     assert.equal(harness.events.some((event) => event.kind === 'fetch' && event.url === entry.url), false);
     assertCleaned(harness.events);
   }
+});
+
+test('官网将根相对地址拼成伪主机时，API 日志只给出固定导航证据并保留阻断', async () => {
+  const raw = '/api/oauth2/authorize/step?code=private-callback-secret&state=private-state';
+  const target = `http:${raw}`;
+  const harness = createHarness({ authorizeRedirect: raw, afterAuthorizeRequest: { url: target, resourceType: 'document', navigation: true } });
+  const client = new UosStoreApiClient({
+    baseUrl: STORE, identityAuthenticator: harness.run,
+    fetchImpl: async () => new Response(JSON.stringify({ status: 200, datas: LOGIN_URL })),
+  });
+  const errors = [];
+  const result = await runAuthenticationCheck({
+    client, credentials: { username: PRIVATE_USER, password: PRIVATE_PASSWORD },
+    log: () => assert.fail('未知目标不能认证成功'), error: (line) => errors.push(line),
+  });
+  assert.equal(result, 1);
+  const diagnostic = JSON.parse(errors[0].slice('UOS authentication check failed: '.length));
+  assert.deepEqual(diagnostic.navigationDiagnostic, {
+    requestHost: 'api', source: 'authorize', format: 'root', sourceHost: 'login.uniontech.com',
+    followHost: 'api', relation: 'official_follow_exact', hasAutoLoginKey: false,
+  });
+  assert.doesNotMatch(errors[0], /private-|https?:|[?&]|\/oauth2/u);
+  assert.equal(harness.events.some((event) => event.kind === 'fetch' && event.url === target), false);
+  assertCleaned(harness.events);
 });

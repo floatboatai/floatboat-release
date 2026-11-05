@@ -5,6 +5,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { diagnoseNavigation } = require('./uniontech-navigation-diagnostic.cjs');
 const {
   IDENTITY_ORIGIN,
   STORE_ORIGIN,
@@ -163,6 +164,7 @@ async function authenticateUnionTechBrowser(options) {
   let followRequests = 0;
   let pendingNavigation;
   let navigationRedirects = 0;
+  let lastRedirect;
   let stage = 'storage';
   let flow;
   const ready = { config: false, key: false, client: false };
@@ -214,6 +216,9 @@ async function authenticateUnionTechBrowser(options) {
         return reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
       }
       if (url.pathname === '/api/oauth2/authorize') authorized = true;
+      if (typeof payload.data.redirect === 'string' && payload.data.redirect.length <= 8192) {
+        lastRedirect = { source: url.pathname === '/api/oauth2/authorize' ? 'authorize' : 'registerlogin', raw: payload.data.redirect };
+      }
     }
   };
 
@@ -238,7 +243,10 @@ async function authenticateUnionTechBrowser(options) {
         const stage = authorized ? 'requestAuthorized' : passwordRequests > 0 ? 'requestSubmitted' : 'requestBeforeSubmit';
         const kind = request.isNavigationRequest() ? 'Navigation' : resourceType === 'script' ? 'Script' : ['xhr', 'fetch'].includes(resourceType) ? 'Data' : '';
         const reason = `${stage}${kind}`;
-        reject(reason, 'UOS_AUTH_CONTRACT_UNVERIFIED', { callbackShape: classifyCallbackShape(url) });
+        reject(reason, 'UOS_AUTH_CONTRACT_UNVERIFIED', {
+          callbackShape: classifyCallbackShape(url),
+          ...(request.isNavigationRequest() ? { navigationDiagnostic: diagnoseNavigation(url, lastRedirect) } : {}),
+        });
         return abort(route);
       }
       if ([...url.searchParams.keys()].some((name) => /^(?:account|password)$/iu.test(name))) {
