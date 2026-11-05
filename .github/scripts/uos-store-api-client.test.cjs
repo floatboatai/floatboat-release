@@ -9,7 +9,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { UnionTechIdentityError } = require('./uniontech-identity-authenticator.cjs');
+const { UnionTechIdentityError, validateCallback } = require('./uniontech-identity-authenticator.cjs');
 
 const {
   UOS_STORE_CONTRACT,
@@ -64,6 +64,37 @@ async function startServer(handler) {
     close: () => new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve())),
   };
 }
+
+test('兼容 HTTP 商店回跳后只向固定 HTTPS API 兑换 code/state', async () => {
+  const requests = [];
+  const client = new UosStoreApiClient({
+    baseUrl: 'https://appstore-dev.uniontech.com',
+    identityAuthenticator: async () => validateCallback('http://appstore-dev.uniontech.com/?code=oauth-code&state=expected-state', 'expected-state'),
+    fetchImpl: async (input, init) => {
+      const url = new URL(input);
+      requests.push({ url: url.href, method: init.method, body: init.body });
+      if (url.pathname.endsWith('/getLoginPath')) {
+        return new Response(JSON.stringify({ status: 200, datas: 'https://login.uniontech.com/oauth2/authorize?state=expected-state' }));
+      }
+      if (url.pathname.endsWith('/login')) {
+        return new Response(JSON.stringify({ status: 200, datas: {} }), {
+          headers: { 'set-cookie': 'access-token=short-session; Secure; HttpOnly' },
+        });
+      }
+      if (url.pathname.endsWith('/dev_info')) {
+        return new Response(JSON.stringify({ status: 200, datas: { dev_type: 1 } }));
+      }
+      throw new Error('unexpected request');
+    },
+  });
+  await client.authenticate({ username: 'release-user', password: 'release-password' });
+  assert.ok(requests.every((request) => new URL(request.url).origin === 'https://appstore-dev.uniontech.com'));
+  assert.deepEqual(requests[1], {
+    url: 'https://appstore-dev.uniontech.com/devprod-api/store-dev-auth/login',
+    method: 'POST',
+    body: JSON.stringify({ code: 'oauth-code', state: 'expected-state' }),
+  });
+});
 
 function json(response, payload, statusCode = 200, headers = {}) {
   response.writeHead(statusCode, { 'content-type': 'application/json', ...headers });
