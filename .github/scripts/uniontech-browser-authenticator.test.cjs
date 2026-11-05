@@ -63,7 +63,7 @@ function createHarness(options = {}) {
   }
 
   function resolveResponse(url, request) {
-    if (options.responses?.[url]) return options.responses[url];
+    if (options.responses?.[url]) return typeof options.responses[url] === 'function' ? options.responses[url](request) : options.responses[url];
     const target = new URL(url);
     if (target.pathname === '/assets/config/config.json') {
       return response(200, options.config || { JSEncrypt: true, NECaptcha: false });
@@ -353,11 +353,45 @@ test('GET/HEAD 同名接口与非 200 密码响应不能作为旧域握手证据
     ...['GET', 'HEAD'].map((method) => ({ beforeSubmitRequest: { url, method }, responses: { [url]: response(200, { code: 200, data: { redirect: raw } }) } })),
     { authorizeRedirect: raw, authorizeStatus: 202 },
   ]) {
-    const harness = createHarness(options);
+    const harness = createHarness({ ...options, beforeAuthorizeRequest: options.beforeSubmitRequest ? { url: `http:${raw}`, navigation: true, resourceType: 'document' } : undefined });
     await assert.rejects(harness.run, (error) => assertSafeError(error));
     assert.ok(!harness.events.some((event) => event.kind === 'fetch' && new URL(event.url).hostname === 'login.chinauos.com'));
     assertCleaned(harness.events);
   }
+});
+
+test('合法 GET JSON、GET HTML 和空 HEAD 响应继续流程，随后仅密码 POST 授信', async () => {
+  const url = `${IDENTITY}/api/oauth2/authorize`;
+  for (const [method, jsonBody] of [['GET', true], ['GET', false], ['HEAD', false]]) {
+    const harness = createHarness({
+      beforeSubmitRequest: { url, method },
+      responses: { [url]: (request) => request.method === 'POST' || jsonBody ?
+        response(200, { code: 200, data: { redirect: CALLBACK_URL } }) :
+        { ...response(200), json: async () => { throw new Error('read response is not JSON'); } } },
+    });
+    assert.deepEqual(await harness.run(), { code: 'mock-oauth-code', state: 'expected-state' });
+    assert.equal(harness.events.filter((event) => event.kind === 'fetch' && event.url === url && event.method === 'POST').length, 1);
+    assertCleaned(harness.events);
+  }
+});
+
+test('认证响应诊断区分密码与中转，只传递有限数值状态码', async () => {
+  const harness = createHarness({ authorizeStatus: 202 });
+  const client = new UosStoreApiClient({
+    baseUrl: STORE, identityAuthenticator: harness.run,
+    fetchImpl: async () => new Response(JSON.stringify({ status: 200, datas: LOGIN_URL })),
+  });
+  const errors = [];
+  assert.equal(await runAuthenticationCheck({
+    client, credentials: { username: PRIVATE_USER, password: PRIVATE_PASSWORD },
+    log: () => assert.fail('非200密码响应不能成功'), error: (line) => errors.push(line),
+  }), 1);
+  assert.deepEqual(JSON.parse(errors[0].slice('UOS authentication check failed: '.length)), {
+    code: 'UOS_AUTH_FAILED', reason: '统信密码接口未返回成功响应',
+    authenticationResponse: { stage: 'password', httpStatus: 202, code: 200 },
+  });
+  assert.doesNotMatch(errors[0], /private-|https?:|[?&]/u);
+  assertCleaned(harness.events);
 });
 
 test('旧登录域后端返回错误 state 不能建立商店会话', async () => {
