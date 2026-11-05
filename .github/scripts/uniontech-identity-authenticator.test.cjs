@@ -10,6 +10,7 @@ const test = require('node:test');
 const {
   UnionTechIdentityError,
   authenticateUnionTechIdentity,
+  validateCallback,
   validateOAuthLoginUrl,
 } = require('./uniontech-identity-authenticator.cjs');
 
@@ -187,4 +188,49 @@ test('Identity 网络错误不会把账号密码写入诊断', async () => {
     }),
     (error) => error.code === 'UOS_AUTH_FAILED' && !/release-user|release-password/u.test(error.message),
   );
+});
+
+test('商店 HTTP 回跳只在内存中提取 code/state，认证请求始终使用 HTTPS', async () => {
+  const harness = createHarness({
+    authorizeData: { redirect: 'http://appstore-dev.uniontech.com/?code=oauth-code&state=expected-state' },
+  });
+  const callback = await authenticateUnionTechIdentity({
+    loginUrl: harness.loginUrl,
+    username: 'release-user',
+    password: 'release-password',
+    fetchImpl: harness.fetchImpl,
+  });
+  assert.deepEqual(callback, { code: 'oauth-code', state: 'expected-state' });
+  assert.ok(harness.events.every((event) => new URL(event.url).origin === 'https://login.uniontech.com'));
+});
+
+test('HTTP 回跳仍校验原始 origin、路径、用户信息、fragment 与 state', () => {
+  for (const rawUrl of [
+    'http://appstore-dev.uniontech.com:443/?code=oauth-code&state=expected-state',
+    'http://appstore-dev.uniontech.com:8080/?code=oauth-code&state=expected-state',
+    'http://evil.example/?code=oauth-code&state=expected-state',
+    'http://appstore-dev.uniontech.com/other?code=oauth-code&state=expected-state',
+    'http://user:password@appstore-dev.uniontech.com/?code=oauth-code&state=expected-state',
+    'http://appstore-dev.uniontech.com/?code=oauth-code&state=expected-state#fragment',
+    'http://appstore-dev.uniontech.com/?code=oauth-code&state=wrong-state',
+    'http://appstore-dev.uniontech.com/?code=oauth-code&state=expected-state&state=other',
+  ]) {
+    assert.throws(() => validateCallback(rawUrl, 'expected-state'), (error) => error.code === 'UOS_AUTH_CONTRACT_UNVERIFIED');
+  }
+});
+
+test('Identity registerlogin 中转要求人工处理，不能当作商店回跳或自动访问', async () => {
+  const harness = createHarness({
+    authorizeData: { redirect: 'https://login.uniontech.com/api/oauth2/authorize/registerlogin?autoLoginKey=private-key&redirectUrl=private-url' },
+  });
+  await assert.rejects(
+    () => authenticateUnionTechIdentity({
+      loginUrl: harness.loginUrl,
+      username: 'release-user',
+      password: 'release-password',
+      fetchImpl: harness.fetchImpl,
+    }),
+    (error) => error.code === 'UOS_AUTH_INTERACTION_REQUIRED' && !/private-key|private-url/u.test(error.message),
+  );
+  assert.equal(harness.events.some((event) => event.path === '/api/oauth2/authorize/registerlogin'), false);
 });

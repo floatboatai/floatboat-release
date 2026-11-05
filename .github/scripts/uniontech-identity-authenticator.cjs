@@ -24,6 +24,10 @@ const SAFE_IDENTITY_FAILURE_MESSAGES = new Set([
   '统信 OAuth 未返回回跳地址',
   '统信 OAuth 回跳地址无效',
   '统信 OAuth 回跳不属于固定开发者平台',
+  '统信 OAuth 回跳包含用户信息',
+  '统信 OAuth 回跳包含 fragment',
+  '统信 OAuth 回跳路径不是商店根路径',
+  '统信 OAuth 返回额外登录中转，需要人工处理',
   '统信 OAuth 回跳 code/state 无法确认',
 ]);
 
@@ -39,7 +43,8 @@ class UnionTechIdentityError extends Error {
 function describeIdentityFailure(error) {
   // 只输出源码声明的静态原因，第三方响应和任意异常文本继续隐藏。
   const fallback = '统信 Identity 未能建立自动化会话';
-  if (!(error instanceof UnionTechIdentityError) || error.code !== 'UOS_AUTH_CONTRACT_UNVERIFIED') return fallback;
+  if (!(error instanceof UnionTechIdentityError) ||
+      !['UOS_AUTH_CONTRACT_UNVERIFIED', 'UOS_AUTH_INTERACTION_REQUIRED'].includes(error.code)) return fallback;
   const prefix = `${error.code}: `;
   const message = error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '';
   return SAFE_IDENTITY_FAILURE_MESSAGES.has(message) ? message : fallback;
@@ -162,8 +167,23 @@ function validateCallback(rawRedirect, expectedState) {
   } catch {
     throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳地址无效');
   }
-  if (callback.origin !== STORE_ORIGIN || callback.pathname !== '/' || callback.username || callback.password || callback.hash) {
+  if (callback.username || callback.password) {
+    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳包含用户信息');
+  }
+  if (callback.hash) {
+    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳包含 fragment');
+  }
+  if (callback.origin === IDENTITY_ORIGIN && callback.pathname === '/api/oauth2/authorize/registerlogin') {
+    throw interactionRequired('统信 OAuth 返回额外登录中转，需要人工处理');
+  }
+  // 回跳仅提供 code/state，不访问该 URL；兑换始终走固定 HTTPS 商店 API。
+  // 先匹配原始 origin，避免修改协议时吞掉原本不受信的显式端口。
+  if (callback.origin === 'http://appstore-dev.uniontech.com') callback.protocol = 'https:';
+  if (callback.origin !== STORE_ORIGIN) {
     throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳不属于固定开发者平台');
+  }
+  if (callback.pathname !== '/') {
+    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳路径不是商店根路径');
   }
   const codes = callback.searchParams.getAll('code');
   const states = callback.searchParams.getAll('state');
