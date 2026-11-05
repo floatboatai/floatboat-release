@@ -285,7 +285,7 @@ async function authenticateUnionTechBrowser(options) {
           legacyBridgeConfirmed = true;
           if (url.protocol === 'http:') {
             // 官方授权响应给出旧登录域；只在本机升级导航，认证参数不经 HTTP 发送。
-            return scheduleNavigation(route, bridge);
+            return await scheduleNavigation(route, bridge);
           }
         }
       }
@@ -365,7 +365,7 @@ async function authenticateUnionTechBrowser(options) {
           }
           if (isNavigation && resourceType === 'document') {
             // 新导航重新经过完整拦截，且官方脚本看到正确的 pathname 与相对资源基准。
-            return scheduleNavigation(route, next);
+            return await scheduleNavigation(route, next);
           }
           url = next;
           continue;
