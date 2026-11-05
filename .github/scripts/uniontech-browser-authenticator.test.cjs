@@ -151,7 +151,7 @@ function createHarness(options = {}) {
     }
     if (options.afterAuthorizeRequest) {
       await request(options.afterAuthorizeRequest.url, options.afterAuthorizeRequest);
-      return;
+      if (!options.continueAfterAuthorizeRequest) return;
     }
     if (options.noCallback) return;
     if (options.follow) {
@@ -444,6 +444,58 @@ test('获准的 CDN 只承载图片，不能作为脚本或提交目标', async 
   }
 });
 
+test('登录前后的未知图片和字体仅阻止加载，不终止会话，也不联网转发', async () => {
+  for (const trigger of ['beforeSubmitRequest', 'afterAuthorizeRequest']) {
+    for (const resourceType of ['image', 'font']) {
+      for (const method of ['GET', 'HEAD']) {
+        const url = `${trigger === 'beforeSubmitRequest' ? 'https' : 'http'}://untrusted.invalid/asset?token=${PRIVATE_TOKEN}`;
+        const harness = createHarness({
+          [trigger]: { url, resourceType, method },
+          continueAfterAuthorizeRequest: true,
+        });
+        assert.deepEqual(await harness.run(), { code: 'mock-oauth-code', state: 'expected-state' });
+        assert.equal(harness.events.some((event) => event.kind === 'fetch' && event.url === url), false);
+        assert.ok(harness.events.some((event) => event.kind === 'abort' && event.url === url));
+        assertCleaned(harness.events);
+      }
+    }
+  }
+});
+
+test('外部 document、script、xhr、fetch 以及伪装为图片的 POST 仍终止登录', async () => {
+  for (const request of [
+    { resourceType: 'document', navigation: true },
+    { resourceType: 'script' },
+    { resourceType: 'xhr' },
+    { resourceType: 'fetch' },
+    { resourceType: 'stylesheet' },
+    { resourceType: 'media' },
+    { resourceType: 'image', method: 'POST' },
+    { resourceType: 'font', method: 'POST' },
+    { resourceType: 'image', navigation: true },
+  ]) {
+    const url = 'http://untrusted.invalid/private-path?token=private-callback-secret';
+    const harness = createHarness({ afterAuthorizeRequest: { url, ...request }, continueAfterAuthorizeRequest: true });
+    await assert.rejects(harness.run, (error) => assertSafeError(error, 'UOS_AUTH_CONTRACT_UNVERIFIED'));
+    assert.equal(harness.events.some((event) => event.kind === 'fetch' && event.url === url), false);
+    assertCleaned(harness.events);
+  }
+});
+
+test('图片重定向到外部或商店仅阻止加载，资源请求不能完成认证', async () => {
+  const imageUrl = `${IDENTITY}/assets/qrcode.png`;
+  for (const target of ['http://untrusted.invalid/qrcode.png', CALLBACK_URL]) {
+    const harness = createHarness({
+      beforeSubmitRequest: { url: imageUrl, resourceType: 'image' },
+      responses: { [imageUrl]: response(302, {}, { location: target }) },
+    });
+    assert.deepEqual(await harness.run(), { code: 'mock-oauth-code', state: 'expected-state' });
+    assert.equal(harness.events.some((event) => event.kind === 'fetch' && event.url === target), false);
+    assert.ok(harness.events.some((event) => event.kind === 'fill'));
+    assertCleaned(harness.events);
+  }
+});
+
 test('登录后回跳仍必须满足固定根路径、无用户信息和 fragment、唯一且一致的 state', async () => {
   for (const callbackUrl of [
     `${STORE}/other?code=mock-oauth-code&state=expected-state`,
@@ -558,7 +610,10 @@ test('拒绝请求的三个登录阶段及固定分类经过真实 API 日志仍
     },
   ];
   for (const entry of cases) {
-    const harness = createHarness({ [entry.trigger]: { url: entry.url, resourceType: 'script' } });
+    const kind = entry.trigger === 'afterAuthorizeRequest' ? { resourceType: 'document', navigation: true } :
+      entry.trigger === 'duringAuthorizeRequest' ? { resourceType: 'fetch' } : { resourceType: 'script' };
+    const label = kind.navigation ? '页面跳转' : kind.resourceType === 'script' ? '脚本' : '接口请求';
+    const harness = createHarness({ [entry.trigger]: { url: entry.url, ...kind } });
     const apiRequests = [];
     const client = new UosStoreApiClient({
       baseUrl: STORE,
@@ -585,7 +640,7 @@ test('拒绝请求的三个登录阶段及固定分类经过真实 API 日志仍
     const diagnostic = JSON.parse(errors[0].slice('UOS authentication check failed: '.length));
     assert.deepEqual(diagnostic, {
       code: 'UOS_AUTH_CONTRACT_UNVERIFIED',
-      reason: entry.reason,
+      reason: `${entry.reason}（${label}）`,
       callbackShape: {
         originClass: entry.originClass,
         protocolClass: entry.protocolClass,
