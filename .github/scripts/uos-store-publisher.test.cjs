@@ -13,6 +13,7 @@ const { UosStoreApiClient } = require('./uos-store-api-client.cjs');
 
 const {
   JsonPublicationJournal,
+  createReceipt,
   publishUosStore,
   validateRuntimeIdentity,
 } = require('./uos-store-publisher.cjs');
@@ -131,6 +132,52 @@ test('双架构全部上传后只提交一次并回读确认', async (context) =
   assert.deepEqual(harness.templateApplicationIds, ['stable-app']);
   assert.doesNotMatch(JSON.stringify(receipt), /very-secret|file_save_key|uploaded-amd64/iu);
   assert.doesNotMatch(fs.readFileSync(harness.journalPath, 'utf8'), /fileSaveKey|uploaded-amd64/iu);
+});
+
+test('实际分片 PUT 被拒绝后发布器不完成上传、不关联也不提交审核', async (context) => {
+  const harness = createHarness(context);
+  const calls = [];
+  const api = new UosStoreApiClient({
+    baseUrl: 'https://store.example.test',
+    fetchImpl: async (url, options) => {
+      calls.push(options.method);
+      assert.equal(url, 'https://uploads.example.test/package?signature=private-signature');
+      return new Response('private response content', { status: 403 });
+    },
+  });
+  api.requestJson = async (_method, endpoint) => {
+    calls.push(endpoint);
+    assert.equal(endpoint, '/store-file/upload/begin');
+    return { upload_infos: [{ upload_url: 'https://uploads.example.test/package?signature=private-signature' }] };
+  };
+  harness.client.uploadPackage = api.uploadPackage.bind(api);
+  await assert.rejects(runHarness(harness), (error) => {
+    assert.equal(error.code, 'UOS_UPLOAD_FAILED');
+    assert.equal(error.retryable, false);
+    assert.match(error.message, /http_rejected/u);
+    assert.match(error.message, /HTTP 403/u);
+    assert.doesNotMatch(error.message, /private|https|signature/u);
+    return true;
+  });
+  assert.deepEqual(calls, ['/store-file/upload/begin', 'PUT']);
+  assert.deepEqual(harness.calls, ['authenticate', 'resolve-app', 'inspect', 'template', 'detect-amd64']);
+});
+
+test('复用成品回执保留源构建证据，当前运行身份不被覆盖', async (context) => {
+  const harness = createHarness(context);
+  harness.manifest.buildSource = {
+    repository: 'floatboatai/floatboat-release', runId: '101', sourceValidationAttempt: 2,
+    workflowSha: 'b'.repeat(40), manifestArtifactId: '1000', manifestArtifactDigest: `sha256:${'1'.repeat(64)}`,
+    manifestSha256: '2'.repeat(64), packageArtifactIds: { x64: '1001', arm64: '1002' },
+    packageArtifactDigests: { x64: `sha256:${'3'.repeat(64)}`, arm64: `sha256:${'4'.repeat(64)}` },
+  };
+  const receipt = await runHarness(harness);
+  assert.deepEqual(receipt.github, { runId: '123', runAttempt: 1 });
+  assert.deepEqual(receipt.buildSource, harness.manifest.buildSource);
+  harness.manifest.buildSource.privateField = 'private-signature';
+  const failedReceipt = createReceipt(harness.manifest, { status: 'failed' });
+  assert.equal(failedReceipt.buildSource, undefined);
+  assert.doesNotMatch(JSON.stringify(failedReceipt), /privateField|private-signature/u);
 });
 
 test('真实模板预检在任何检测、上传和提交之前绑定商店应用身份', async (context) => {

@@ -333,7 +333,7 @@ test('无 Secret fan-in 先校验当前 run 双架构，再允许受保护发布
   const existingPublishJob = readNamedJob(workflow, 'publish-linux-uos');
 
   assert.match(validationJob, /name: Validate UOS Store Publication/);
-  assert.match(validationJob, /needs: \[prepare, build-linux-uos\]/);
+  assert.match(validationJob, /needs: \[prepare, build-linux-uos, restore-uos-artifacts\]/);
   assert.match(validationJob, /inputs\.upload_uos_store == true/);
   assert.match(validationJob, /github\.ref == 'refs\/heads\/main'/);
   assert.match(validationJob, /uos-publication-manifest\.cjs/);
@@ -345,7 +345,7 @@ test('无 Secret fan-in 先校验当前 run 双架构，再允许受保护发布
   );
 
   assert.match(publishingJob, /name: Publish UOS App Store/);
-  assert.match(publishingJob, /needs: \[prepare, build-linux-uos, validate-uos-publication\]/);
+  assert.match(publishingJob, /needs: \[prepare, validate-uos-publication\]/);
   assert.match(publishingJob, /environment: uos-app-store-production/);
   assert.match(publishingJob, /github\.ref == 'refs\/heads\/main'/);
   assert.match(publishingJob, /concurrency:[\s\S]*group: uos-app-store-production[\s\S]*cancel-in-progress: false/);
@@ -425,4 +425,42 @@ test('送审校验和发布消费构建任务实际产出的独立 UOS artifacts
     assert.match(consumer, /pattern: uos-linux-\*/);
     assert.doesNotMatch(consumer, /desktop-linux-uos/);
   }
+});
+
+test('UOS制品复用按来源artifact ID下载，恢复当前run制品且跳过重新构建', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const restore = readNamedJob(workflow, 'restore-uos-artifacts');
+  const validate = readNamedJob(workflow, 'validate-uos-publication');
+  assert.match(workflow, /reuse_uos_run_id:[\s\S]*default: ""/);
+  assert.match(readNamedJob(workflow, 'build-linux-uos'), /inputs\.reuse_uos_run_id == ''/);
+  assert.match(restore, /inputs\.reuse_uos_run_id != ''/);
+  assert.match(restore, /uos-artifact-reuse\.cjs select/);
+  assert.match(restore, /uos-artifact-reuse\.cjs restore/);
+  assert.equal((restore.match(/artifact-ids:/gu) || []).length, 3);
+  assert.match(restore, /name: uos-linux-x64/);
+  assert.match(restore, /name: uos-linux-arm64/);
+  assert.doesNotMatch(restore, /secrets\.|environment:|GITHUB_RUN_ID:|GITHUB_RUN_ATTEMPT:/);
+  assert.match(validate, /!cancelled\(\)/);
+  assert.match(validate, /needs\.build-linux-uos\.result == 'skipped' && needs\.restore-uos-artifacts\.result == 'success'/);
+  assert.match(validate, /needs\.build-linux-uos\.result == 'success' && needs\.restore-uos-artifacts\.result == 'skipped'/);
+  assert.match(validate, /UOS_BUILD_SOURCE_SHA256: \$\{\{ needs\.restore-uos-artifacts\.outputs\.build_source_sha256 \}\}/);
+  assert.match(validate, /uos-artifact-reuse\.cjs manifest/);
+});
+
+test('UOS复用输入在源码checkout之前拒绝非送审或混合平台范围', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const step = readNamedStep(workflow, 'Validate UOS Store dispatch');
+  const marker = '        run: |\n';
+  const script = step.slice(step.indexOf(marker) + marker.length).split('\n').map((line) => line.replace(/^          /, '')).join('\n');
+  const base = { ...process.env, DISPATCH_ID: '', UPLOAD_UOS_STORE: 'true', REUSE_UOS_RUN_ID: '42022907112',
+    REPO_REF: 'a'.repeat(40), VERSION: '0.6.3-rc.6', PLATFORMS: 'linux', LINUX_PACKAGE: 'uos-floatboat',
+    DESKTOP_VARIANT: 'floatboat', IS_RC: 'true', NOTIFY_ONLY: 'false', BUILD_PROFILE: 'release', PACKAGE_SET: 'app',
+    SKIP_RELEASE_NOTES: 'true', WORKFLOW_REF: 'refs/heads/main' };
+  assert.equal(spawnSync('bash', ['-c', script], { env: base }).status, 0);
+  for (const override of [{ UPLOAD_UOS_STORE: 'false' }, { PLATFORMS: 'macos,linux' }, { REUSE_UOS_RUN_ID: '100;echo wrong' },
+    { DESKTOP_VARIANT: 'all' }, { LINUX_PACKAGE: 'deb-and-uos' }, { BUILD_PROFILE: 'test' }, { PACKAGE_SET: 'all' }]) {
+    const result = spawnSync('bash', ['-c', script], { env: { ...base, ...override }, encoding: 'utf8' });
+    assert.notEqual(result.status, 0, JSON.stringify(override));
+  }
+  assert.equal(spawnSync('bash', ['-c', script], { env: { ...base, REUSE_UOS_RUN_ID: '', UPLOAD_UOS_STORE: 'false' } }).status, 0);
 });

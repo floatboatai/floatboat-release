@@ -10,10 +10,12 @@ const path = require('node:path');
 const {
   UosStoreApiClient,
   UosStoreApiError,
+  describeUosAuthenticationFailure,
   normalizeRemoteArch,
   redactMessage,
 } = require('./uos-store-api-client.cjs');
 const { authenticateUnionTechBrowser } = require('./uniontech-browser-authenticator.cjs');
+const { sanitizeBuildSource } = require('./uos-artifact-reuse.cjs');
 
 const APP_ID = 'com.floatboat.desktop';
 const RECEIPT_SCHEMA_VERSION = 1;
@@ -121,6 +123,7 @@ class JsonPublicationJournal {
 }
 
 function createReceipt(manifest, overrides = {}) {
+  const buildSource = sanitizeBuildSource(manifest.buildSource);
   return Object.freeze({
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     appid: manifest.appid,
@@ -128,6 +131,7 @@ function createReceipt(manifest, overrides = {}) {
     packageVersion: manifest.packageVersion,
     sourceSha: manifest.sourceSha,
     github: manifest.github,
+    ...(buildSource ? { buildSource } : {}),
     packages: manifest.packages.map(({ arch, filename, sha256, size }) => ({ arch, filename, sha256, size })),
     stage: overrides.stage || 'created',
     status: overrides.status || 'running',
@@ -287,6 +291,11 @@ async function main(argv) {
     const client = new UosStoreApiClient({
       baseUrl: 'https://appstore-dev.uniontech.com',
       identityAuthenticator: authenticateUnionTechBrowser,
+      onUploadProgress: ({ event, completed, total, retries, reason }) => {
+        if (event !== 'complete' || completed === total || completed % 10 === 0) {
+          console.log(`UOS upload ${event}: ${completed}/${total}, retries=${retries}${reason ? `, reason=${reason}` : ''}`);
+        }
+      },
     });
     receipt = await publishUosStore({
       manifest,
@@ -320,6 +329,8 @@ async function main(argv) {
       process.env.UOS_STORE_USERNAME,
       process.env.UOS_STORE_PASSWORD,
     ])}`);
+    const storeResponse = describeUosAuthenticationFailure(error).storeResponse;
+    if (storeResponse) console.error(`UOS store response: ${JSON.stringify(storeResponse)}`);
     process.exitCode = 1;
     return;
   }

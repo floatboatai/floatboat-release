@@ -101,6 +101,11 @@ on:
         required: false
         default: false
         type: boolean
+      reuse_uos_run_id:
+        description: "Optional completed Release run whose verified UOS packages match this source SHA and version"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: write
@@ -247,6 +252,7 @@ jobs:
         env:
           DISPATCH_ID: ${{ inputs.dispatch_id }}
           UPLOAD_UOS_STORE: ${{ inputs.upload_uos_store }}
+          REUSE_UOS_RUN_ID: ${{ inputs.reuse_uos_run_id }}
           REPO_REF: ${{ inputs.repo_ref }}
           VERSION: ${{ inputs.version }}
           PLATFORMS: ${{ inputs.platforms }}
@@ -264,6 +270,12 @@ jobs:
           if [ -n "$DISPATCH_ID" ] && ! [[ "$DISPATCH_ID" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
             echo "::error::dispatch_id must be an RFC 4122 UUID"
             exit 1
+          fi
+
+          if [ -n "$REUSE_UOS_RUN_ID" ]; then
+            [[ "$REUSE_UOS_RUN_ID" =~ ^[1-9][0-9]{0,15}$ ]] || { echo "::error::reuse_uos_run_id must be a numeric GitHub run ID"; exit 1; }
+            [ "$UPLOAD_UOS_STORE" = "true" ] || { echo "::error::UOS artifact reuse requires upload_uos_store=true"; exit 1; }
+            [ "$PLATFORMS" = "linux" ] || { echo "::error::UOS artifact reuse requires exactly linux"; exit 1; }
           fi
 
           if [ "$UPLOAD_UOS_STORE" != "true" ]; then
@@ -1674,7 +1686,7 @@ jobs:
     name: Build Floatboat UOS Linux (${{ matrix.arch }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    if: inputs.notify_only == false && (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') && inputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
+    if: inputs.reuse_uos_run_id == '' && inputs.notify_only == false && (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') && inputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
     strategy:
       fail-fast: false
       matrix:
@@ -2087,13 +2099,101 @@ jobs:
           echo "✅ UOS amd64/arm64 packages published and installer URLs verified"
 
   # ===========================================
+  # Restore previously verified UOS packages (no Store Secrets)
+  # ===========================================
+  restore-uos-artifacts:
+    name: Restore Verified UOS Artifacts
+    needs: prepare
+    runs-on: ubuntu-latest
+    if: inputs.reuse_uos_run_id != '' && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success'
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      build_source_sha256: ${{ steps.restore.outputs.build_source_sha256 }}
+    env:
+      UOS_REUSE_RUN_ID: ${{ inputs.reuse_uos_run_id }}
+      UOS_RELEASE_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+      UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+    steps:
+      - name: Checkout trusted UOS reuse validator
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          path: release-tooling
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+
+      - name: Verify source run and select immutable artifact IDs
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node release-tooling/.github/scripts/uos-artifact-reuse.cjs select reuse/selection.json
+
+      - name: Download verified source manifest
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ steps.source.outputs.manifest_artifact_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.source_run_id }}
+          path: reuse/source-manifest
+          merge-multiple: true
+
+      - name: Download verified source x64 packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ steps.source.outputs.x64_artifact_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.source_run_id }}
+          path: reuse/source-packages/x64
+          merge-multiple: true
+
+      - name: Download verified source arm64 packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          artifact-ids: ${{ steps.source.outputs.arm64_artifact_id }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.source.outputs.source_run_id }}
+          path: reuse/source-packages/arm64
+          merge-multiple: true
+
+      - name: Revalidate source packages and preserve build provenance
+        id: restore
+        run: |
+          node release-tooling/.github/scripts/uos-artifact-reuse.cjs restore \
+            reuse/selection.json reuse/source-manifest/uos-publication-manifest.json \
+            reuse/source-packages reuse/restored
+
+      - name: Upload restored current-run x64 artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: uos-linux-x64
+          path: reuse/restored/x64/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload restored current-run arm64 artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: uos-linux-arm64
+          path: reuse/restored/arm64/
+          retention-days: 7
+          if-no-files-found: error
+
+  # ===========================================
   # Validate UOS App Store publication (no Secrets)
   # ===========================================
   validate-uos-publication:
     name: Validate UOS Store Publication
-    needs: [prepare, build-linux-uos]
+    needs: [prepare, build-linux-uos, restore-uos-artifacts]
     runs-on: ubuntu-latest
-    if: inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.build-linux-uos.result == 'success'
+    if: >-
+      ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' &&
+      ((inputs.reuse_uos_run_id == '' && needs.build-linux-uos.result == 'success' && needs.restore-uos-artifacts.result == 'skipped') ||
+      (inputs.reuse_uos_run_id != '' && needs.build-linux-uos.result == 'skipped' && needs.restore-uos-artifacts.result == 'success')) }}
     permissions:
       actions: read
       contents: read
@@ -2121,12 +2221,18 @@ jobs:
         env:
           UOS_RELEASE_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          UOS_REUSE_RUN_ID: ${{ inputs.reuse_uos_run_id }}
+          UOS_BUILD_SOURCE_SHA256: ${{ needs.restore-uos-artifacts.outputs.build_source_sha256 }}
         run: |
           set -euo pipefail
           mkdir -p verified
-          node release-tooling/.github/scripts/uos-publication-manifest.cjs \
-            artifacts/uos \
-            verified/uos-publication-manifest.json
+          if [ -n "$UOS_REUSE_RUN_ID" ]; then
+            node release-tooling/.github/scripts/uos-artifact-reuse.cjs manifest \
+              artifacts/uos verified/uos-publication-manifest.json
+          else
+            node release-tooling/.github/scripts/uos-publication-manifest.cjs \
+              artifacts/uos verified/uos-publication-manifest.json
+          fi
 
       - name: Upload verified UOS publication manifest
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -2141,9 +2247,9 @@ jobs:
   # ===========================================
   publish-uos-store:
     name: Publish UOS App Store
-    needs: [prepare, build-linux-uos, validate-uos-publication]
+    needs: [prepare, validate-uos-publication]
     runs-on: ubuntu-22.04
-    if: inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.build-linux-uos.result == 'success' && needs.validate-uos-publication.result == 'success'
+    if: ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
     environment: uos-app-store-production
     concurrency:
       group: uos-app-store-production
