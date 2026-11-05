@@ -42,6 +42,8 @@ const FAILURE = Object.freeze({
   replay: '统信浏览器阻止了重复密码提交',
   password: '统信浏览器密码提交不符合固定契约',
   response: '统信浏览器密码登录未成功',
+  passwordResponse: '统信密码接口未返回成功响应',
+  registerResponse: '统信登录中转接口未返回成功响应',
   manual: '统信浏览器登录需要人工验证或授权',
   callback: '统信浏览器商店回跳未通过校验',
   timeout: '统信浏览器等待登录完成超时',
@@ -196,6 +198,13 @@ async function authenticateUnionTechBrowser(options) {
     rejectResult(failure(reason, code, options));
   };
   const abort = async (route) => { try { await route.abort('blockedbyclient'); } catch {} };
+  const scheduleNavigation = async (route, target) => {
+    navigationRedirects += 1;
+    if (navigationRedirects > 5) { reject('redirect'); return abort(route); }
+    pendingNavigation = target.href;
+    // 204 保留旧页面，不生成会抢占下一次 goto 的 Chrome 错误页；新导航仍独立经过拦截。
+    await route.fulfill({ status: 204, headers: { 'cache-control': 'no-store' }, body: '' });
+  };
   const captureCallback = (url, isNavigation) => {
     if (![STORE_ORIGIN, 'http://appstore-dev.uniontech.com'].includes(url.origin)) return false;
     if (!isNavigation || !submitted || !authorized) {
@@ -214,7 +223,24 @@ async function authenticateUnionTechBrowser(options) {
   const inspectResponse = async (url, response, method, passwordRequest) => {
     if (url.origin !== IDENTITY_ORIGIN) return;
     if (!['/assets/config/config.json', '/api/key', '/api/oauth2/client', '/api/oauth2/authorize', '/api/oauth2/authorize/registerlogin'].includes(url.pathname)) return;
-    const payload = await response.json();
+    // 同名 GET 可能是正常中转页面；它不提供密码授信，也不按 POST 的 JSON 契约读取。
+    if (['/api/oauth2/authorize', '/api/oauth2/authorize/registerlogin'].includes(url.pathname) && method !== 'POST') return;
+    const authenticationStage = url.pathname === '/api/oauth2/authorize' ? 'password' : url.pathname === '/api/oauth2/authorize/registerlogin' ? 'registerlogin' : undefined;
+    const rejectResponse = (payload) => {
+      const rawCode = payload?.code;
+      const value = typeof rawCode === 'number' ? rawCode : typeof rawCode === 'string' && /^(?:0|[1-9]\d{0,5})$/u.test(rawCode) ? Number(rawCode) : NaN;
+      reject(authenticationStage === 'password' ? 'passwordResponse' : 'registerResponse', 'UOS_AUTH_FAILED', {
+        authenticationResponse: {
+          stage: authenticationStage, httpStatus: response.status(),
+          code: Number.isInteger(value) && value >= 0 && value <= 999999 ? value : null,
+        },
+      });
+    };
+    let payload;
+    try { payload = await response.json(); } catch {
+      if (authenticationStage) return rejectResponse();
+      throw new Error('invalid initialization response');
+    }
     if (url.pathname === '/assets/config/config.json') {
       if (payload?.NECaptcha !== false) return reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
       if (payload.JSEncrypt !== true) return reject('page');
@@ -228,9 +254,9 @@ async function authenticateUnionTechBrowser(options) {
     } else {
       if (response.status() !== 200 ||
           (url.pathname === '/api/oauth2/authorize' ? !passwordRequest : method !== 'POST' || !authorized)) {
-        return reject('response', 'UOS_AUTH_FAILED');
+        return rejectResponse(payload);
       }
-      if (Number(payload?.code) !== 200 || !payload.data || typeof payload.data !== 'object') return reject('response', 'UOS_AUTH_FAILED');
+      if (Number(payload?.code) !== 200 || !payload.data || typeof payload.data !== 'object') return rejectResponse(payload);
       if (payload.data.need_bind_contact || payload.data.cancel_unregister_key || payload.data.phone_unbind) {
         return reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
       }
@@ -259,8 +285,7 @@ async function authenticateUnionTechBrowser(options) {
           legacyBridgeConfirmed = true;
           if (url.protocol === 'http:') {
             // 官方授权响应给出旧登录域；只在本机升级导航，认证参数不经 HTTP 发送。
-            pendingNavigation = bridge.href;
-            return abort(route);
+            return scheduleNavigation(route, bridge);
           }
         }
       }
@@ -339,17 +364,16 @@ async function authenticateUnionTechBrowser(options) {
             return abort(route);
           }
           if (isNavigation && resourceType === 'document') {
-            navigationRedirects += 1;
-            if (navigationRedirects > 5) { reject('redirect'); return abort(route); }
             // 新导航重新经过完整拦截，且官方脚本看到正确的 pathname 与相对资源基准。
-            pendingNavigation = next.href;
-            return abort(route);
+            return scheduleNavigation(route, next);
           }
           url = next;
           continue;
         }
         if (status >= 400 && (passwordRequest || isNavigation)) {
-          reject(passwordRequest ? 'response' : 'page', 'UOS_AUTH_FAILED');
+          reject(passwordRequest ? 'passwordResponse' : 'page', 'UOS_AUTH_FAILED', passwordRequest ? {
+            authenticationResponse: { stage: 'password', httpStatus: status, code: null },
+          } : {});
           return abort(route);
         }
         await inspectResponse(url, response, method, passwordRequest);

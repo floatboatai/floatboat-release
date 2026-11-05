@@ -42,6 +42,8 @@ class UnionTechIdentityError extends Error {
     if (callbackShape) this.callbackShape = callbackShape;
     const navigationDiagnostic = sanitizeNavigationDiagnostic(options.navigationDiagnostic);
     if (navigationDiagnostic) this.navigationDiagnostic = navigationDiagnostic;
+    const authenticationResponse = sanitizeAuthenticationResponse(options.authenticationResponse);
+    if (authenticationResponse) this.authenticationResponse = authenticationResponse;
   }
 }
 
@@ -57,6 +59,29 @@ function describeIdentityFailure(error) {
 
 function sanitizeIdentityFailureReason(message) {
   return SAFE_IDENTITY_FAILURE_MESSAGES.has(message) ? message : '统信 Identity 未能建立自动化会话';
+}
+
+function sanitizeAuthenticationResponse(value) {
+  try {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const fields = ['stage', 'httpStatus', 'code'];
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== fields.length || keys.some((key) => !fields.includes(key))) return undefined;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    // 不读取访问器，避免诊断清洗执行第三方对象中的逻辑或带出原始异常。
+    if (fields.some((field) => !Object.hasOwn(descriptors[field], 'value'))) return undefined;
+    const stage = descriptors.stage.value;
+    const httpStatus = descriptors.httpStatus.value;
+    const code = descriptors.code.value;
+    if (!['password', 'registerlogin'].includes(stage) ||
+        !Number.isInteger(httpStatus) || httpStatus < 100 || httpStatus > 599 ||
+        (code !== null && (!Number.isInteger(code) || code < 0 || code > 999999))) return undefined;
+    return Object.freeze({ stage, httpStatus, code });
+  } catch {
+    return undefined;
+  }
 }
 
 function sanitizeCallbackShape(value) {
@@ -363,6 +388,7 @@ module.exports = {
   classifyCallbackShape,
   describeIdentityFailure,
   sanitizeIdentityFailureReason,
+  sanitizeAuthenticationResponse,
   sanitizeCallbackShape,
   normalizeIdentityEnvelope,
   validateCallback,

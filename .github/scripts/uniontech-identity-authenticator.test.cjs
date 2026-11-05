@@ -11,6 +11,7 @@ const {
   UnionTechIdentityError,
   authenticateUnionTechIdentity,
   classifyCallbackShape,
+  sanitizeAuthenticationResponse,
   sanitizeCallbackShape,
   validateCallback,
   validateOAuthLoginUrl,
@@ -316,5 +317,75 @@ test('回跳分类清洗继续拒绝额外字段、缺失字段和非法枚举',
     null,
   ]) {
     assert.equal(sanitizeCallbackShape(candidate), undefined);
+  }
+});
+
+test('认证响应摘要只保留阶段、HTTP 状态和数字业务码，并冻结重建', () => {
+  for (const stage of ['password', 'registerlogin']) {
+    for (const httpStatus of [100, 200, 599]) {
+      for (const code of [0, 200, 999999, null]) {
+        const source = { stage, httpStatus, code };
+        const result = sanitizeAuthenticationResponse(source);
+        assert.deepEqual(result, source);
+        assert.notEqual(result, source);
+        assert.ok(Object.isFrozen(result));
+        source.stage = 'private-stage';
+        assert.equal(result.stage, stage);
+      }
+    }
+  }
+  const plain = Object.assign(Object.create(null), { stage: 'password', httpStatus: 200, code: null });
+  assert.deepEqual(sanitizeAuthenticationResponse(plain), { stage: 'password', httpStatus: 200, code: null });
+});
+
+test('认证响应摘要拒绝越界、隐式转换、原始正文、描述和缺失字段', () => {
+  const valid = { stage: 'password', httpStatus: 200, code: 200 };
+  const invalid = [
+    null, undefined, [], 'private-body', new Error('private-error'),
+    { ...valid, stage: 'authorize' }, { ...valid, stage: 'private-stage' },
+    { ...valid, body: 'private-body' }, { ...valid, desc: 'private-desc' },
+    { ...valid, raw: { password: 'private-password' } },
+    { stage: 'password', httpStatus: 200 },
+    { stage: 'password', code: 200 },
+    { httpStatus: 200, code: 200 },
+  ];
+  for (const httpStatus of [99, 600, 200.5, NaN, Infinity, -Infinity, '200', null, undefined, {}]) {
+    invalid.push({ ...valid, httpStatus });
+  }
+  for (const code of [-1, 1000000, 200.5, NaN, Infinity, -Infinity, '200', undefined, {}]) {
+    invalid.push({ ...valid, code });
+  }
+  for (const candidate of invalid) assert.equal(sanitizeAuthenticationResponse(candidate), undefined);
+});
+
+test('认证响应摘要不执行访问器，并拒绝 symbol、隐藏额外字段和继承字段', () => {
+  const valid = { stage: 'registerlogin', httpStatus: 502, code: null };
+  let getterCalls = 0;
+  for (const field of ['stage', 'httpStatus', 'code']) {
+    const candidate = { ...valid };
+    Object.defineProperty(candidate, field, { enumerable: true, get() { getterCalls += 1; throw new Error('private-getter'); } });
+    assert.equal(sanitizeAuthenticationResponse(candidate), undefined);
+  }
+  assert.equal(getterCalls, 0);
+  const hidden = { ...valid };
+  Object.defineProperty(hidden, 'private-extra', { value: 'private-token' });
+  assert.equal(sanitizeAuthenticationResponse(hidden), undefined);
+  assert.equal(sanitizeAuthenticationResponse({ ...valid, [Symbol('private-extra')]: 'private-token' }), undefined);
+  assert.equal(sanitizeAuthenticationResponse(Object.create(valid)), undefined);
+  assert.equal(sanitizeAuthenticationResponse(new Proxy({}, { ownKeys() { throw new Error('private-proxy'); } })), undefined);
+});
+
+test('Identity 错误只携带清洗后的认证响应摘要，非法摘要不会进入错误对象', () => {
+  const value = { stage: 'registerlogin', httpStatus: 200, code: 10003 };
+  const error = new UnionTechIdentityError('UOS_AUTH_FAILED', '统信 Identity 登录响应无效', { authenticationResponse: value });
+  assert.deepEqual(error.authenticationResponse, value);
+  assert.notEqual(error.authenticationResponse, value);
+  assert.ok(Object.isFrozen(error.authenticationResponse));
+  value.code = 'private-code';
+  assert.equal(error.authenticationResponse.code, 10003);
+  for (const invalid of [{ ...value, body: 'private-body' }, { stage: 'private-stage', httpStatus: 200, code: 10003 }]) {
+    const rejected = new UnionTechIdentityError('UOS_AUTH_FAILED', '统信 Identity 登录响应无效', { authenticationResponse: invalid });
+    assert.equal(Object.hasOwn(rejected, 'authenticationResponse'), false);
+    assert.doesNotMatch(JSON.stringify(rejected), /private-/u);
   }
 });

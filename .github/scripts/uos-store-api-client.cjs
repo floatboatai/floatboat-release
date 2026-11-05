@@ -5,7 +5,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const { UnionTechIdentityError, sanitizeCallbackShape, sanitizeIdentityFailureReason } = require('./uniontech-identity-authenticator.cjs');
+const { UnionTechIdentityError, sanitizeCallbackShape, sanitizeIdentityFailureReason, sanitizeAuthenticationResponse } = require('./uniontech-identity-authenticator.cjs');
 const { BROWSER_FAILURE_MESSAGES } = require('./uniontech-browser-authenticator.cjs');
 const { sanitizeNavigationDiagnostic } = require('./uniontech-navigation-diagnostic.cjs');
 
@@ -63,6 +63,8 @@ class UosStoreApiError extends Error {
     if (callbackShape) this.callbackShape = callbackShape;
     const navigationDiagnostic = sanitizeNavigationDiagnostic(options.navigationDiagnostic);
     if (navigationDiagnostic) this.navigationDiagnostic = navigationDiagnostic;
+    const authenticationResponse = sanitizeAuthenticationResponse(options.authenticationResponse);
+    if (authenticationResponse) this.authenticationResponse = authenticationResponse;
   }
 }
 
@@ -84,7 +86,8 @@ function describeUosAuthenticationFailure(error) {
   const reason = sanitizeAuthenticationReason(error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '');
   const callbackShape = sanitizeCallbackShape(error.callbackShape);
   const navigationDiagnostic = sanitizeNavigationDiagnostic(error.navigationDiagnostic);
-  return Object.freeze({ code: error.code, reason, ...(callbackShape ? { callbackShape } : {}), ...(navigationDiagnostic ? { navigationDiagnostic } : {}) });
+  const authenticationResponse = sanitizeAuthenticationResponse(error.authenticationResponse);
+  return Object.freeze({ code: error.code, reason, ...(callbackShape ? { callbackShape } : {}), ...(navigationDiagnostic ? { navigationDiagnostic } : {}), ...(authenticationResponse ? { authenticationResponse } : {}) });
 }
 
 function digest(algorithm, value) {
@@ -360,6 +363,7 @@ class UosStoreApiClient {
           retryable: error.retryable,
           callbackShape: error.callbackShape,
           navigationDiagnostic: error.navigationDiagnostic,
+          authenticationResponse: error.authenticationResponse,
         });
       }
       throw new UosStoreApiError('UOS_AUTH_FAILED', '统信 Identity 未能建立自动化会话', { retryable: true });

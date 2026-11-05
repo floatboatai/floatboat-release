@@ -96,6 +96,7 @@ async function createOfflineHarness(context, mode = 'success') {
   const forwarded = [];
   const requested = [];
   const aborted = [];
+  const fulfilled = [];
   const requests = [];
   const unexpectedProxyRequests = [];
   const temporaryDirectories = [];
@@ -106,7 +107,8 @@ async function createOfflineHarness(context, mode = 'success') {
   const server = http.createServer(async (request, response) => {
     if (request.url.startsWith('/legacy/')) {
       requests.push({ method: request.method, path: request.url, body: '' });
-      response.writeHead(302, { location: mode === 'legacy-wrong-state' ? CALLBACK.replace(STATE, 'wrong-state') : CALLBACK }).end();
+      const target = mode === 'legacy-get-page' ? `${IDENTITY}/api/oauth2/authorize?transfer=offline` : mode === 'legacy-wrong-state' ? CALLBACK.replace(STATE, 'wrong-state') : CALLBACK;
+      response.writeHead(302, { location: target }).end();
       return;
     }
     if (!request.url.startsWith('/identity/')) {
@@ -131,6 +133,9 @@ async function createOfflineHarness(context, mode = 'success') {
     if (url.pathname === '/assets/config/config.json') return json({ JSEncrypt: true, NECaptcha: mode === 'captcha' });
     if (url.pathname === '/api/key') return json({ code: 200, data: 'offline-public-key' });
     if (url.pathname === '/api/oauth2/client') return json({ code: 200, data: {} });
+    if (url.pathname === '/api/oauth2/authorize' && request.method === 'GET' && mode === 'legacy-get-page') {
+      return html(`<!doctype html><html><body><script>location.assign(${JSON.stringify(CALLBACK)});</script></body></html>`);
+    }
     if (url.pathname === '/api/oauth2/authorize' && request.method === 'POST') {
       if (mode === 'redirect-307' || mode === 'redirect-308') {
         response.writeHead(mode === 'redirect-307' ? 307 : 308, { location: 'https://untrusted.invalid/collect-password' }).end();
@@ -231,6 +236,10 @@ async function createOfflineHarness(context, mode = 'success') {
                   requested.push(route.request().url());
                   const wrapped = new Proxy(route, {
                     get(target, property) {
+                      if (property === 'fulfill') return async (options) => {
+                        fulfilled.push({ url: target.request().url(), status: options.status ?? options.response?.status() });
+                        return target.fulfill(options);
+                      };
                       if (property === 'abort') return async (...args) => {
                         aborted.push({ url: target.request().url(), resourceType: target.request().resourceType() });
                         return target.abort(...args);
@@ -290,7 +299,7 @@ async function createOfflineHarness(context, mode = 'success') {
     assert.doesNotMatch(JSON.stringify(browserEnvironments), /offline-user|offline-only-password|offline-github-token/u);
     assert.ok(forwarded.every((url) => new URL(url).origin === IDENTITY || (mode.startsWith('legacy-') && new URL(url).origin === LEGACY_IDENTITY)));
   };
-  return { authenticate, requested, aborted, forwarded, requests, unexpectedProxyRequests, browserErrors, assertClean };
+  return { authenticate, requested, aborted, fulfilled, forwarded, requests, unexpectedProxyRequests, browserErrors, assertClean };
 }
 
 integration('离线真实 Chromium 完成填表、普通宣传提示和商店 API 身份衔接', async (context) => {
@@ -366,7 +375,7 @@ integration('离线真实 Chromium 拦截宣传页动态 HTTP 图片后仍完成
 integration('离线真实 Chromium 把授权确认的旧域导航升级为 HTTPS，保留查询并完成商店回跳', async (context) => {
   const harness = await createOfflineHarness(context, 'legacy-success');
   assert.deepEqual(await harness.authenticate(), { code: 'offline-code', state: STATE });
-  assert.ok(harness.aborted.some(({ url }) => url === `http:${LEGACY_REDIRECT}`));
+  assert.ok(harness.fulfilled.some(({ url, status }) => url === `http:${LEGACY_REDIRECT}` && status === 204));
   assert.deepEqual(harness.forwarded.filter((url) => new URL(url).hostname === 'login.chinauos.com'), [`https:${LEGACY_REDIRECT}`]);
   assert.ok(harness.forwarded.every((url) => url.startsWith('https:')));
   assert.equal(harness.requests.filter((request) => request.method === 'POST' && request.path === '/api/oauth2/authorize').length, 1);
@@ -378,6 +387,18 @@ integration('离线真实 Chromium 把授权确认的旧域导航升级为 HTTPS
 integration('离线真实 Chromium 旧域回跳的错误 state 仍拒绝且清理会话', async (context) => {
   const harness = await createOfflineHarness(context, 'legacy-wrong-state');
   await assert.rejects(harness.authenticate(), (error) => error.code === 'UOS_AUTH_CONTRACT_UNVERIFIED');
+  assert.ok(!harness.forwarded.some((url) => new URL(url).origin === STORE));
+  await harness.assertClean();
+});
+
+integration('离线真实 Chromium 允许主域 GET 授权中转页，且不重复提交密码', async (context) => {
+  const harness = await createOfflineHarness(context, 'legacy-get-page');
+  const result = await harness.authenticate().catch((error) => {
+    throw new Error(`${error.message}; offline browser errors: ${JSON.stringify(harness.browserErrors)}; paths: ${JSON.stringify(harness.requests.map(({ method, path }) => ({ method, path })))}`);
+  });
+  assert.deepEqual(result, { code: 'offline-code', state: STATE });
+  assert.equal(harness.requests.filter((request) => request.method === 'POST' && request.path === '/api/oauth2/authorize').length, 1);
+  assert.equal(harness.requests.filter((request) => request.method === 'GET' && request.path === '/api/oauth2/authorize').length, 1);
   assert.ok(!harness.forwarded.some((url) => new URL(url).origin === STORE));
   await harness.assertClean();
 });
