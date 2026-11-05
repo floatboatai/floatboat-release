@@ -121,7 +121,7 @@ jobs:
                 Assert (@($job.steps | Where-Object { $_.name -ceq $stepName -and $_.conclusion -ceq 'success' }).Count -eq 1) "$Label job $($job.id) lacks a successful $stepName step."
               }
               # gh run view 在 Windows 可能把步骤名全部标成 UNKNOWN STEP；直接读取绑定 job ID 的原始日志。
-              $jobLines = @(& gh api "repos/$env:GH_REPO/actions/jobs/$($job.id)/logs" 2>&1 | ForEach-Object { $_.ToString() })
+              $jobLines = @(& gh api "repos/$env:GH_REPO/actions/jobs/$($job.id)/logs" --allow-escape-sequences 2>&1 | ForEach-Object { $_.ToString() })
               $logExit = $LASTEXITCODE
               [IO.File]::WriteAllLines((Join-Path $logs "$Label-job-$($job.id).log"), $jobLines, $encoding)
               Assert ($logExit -eq 0) "Cannot retrieve $Label Windows build logs."
