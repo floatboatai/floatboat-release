@@ -94,6 +94,11 @@ function decodePublicKey(envelope) {
   let pem;
   try {
     pem = Buffer.from(encoded, 'base64').toString('utf8');
+    // 统信公开接口以非标准边框包装 SPKI，只规范已确认的整对边框。
+    pem = pem.replace(
+      /^-----BEGIN RSA Public Key-----\r?\n([A-Za-z0-9+/=\r\n]+)\r?\n-----END RSA Public Key-----(?:\r?\n)?$/u,
+      '-----BEGIN PUBLIC KEY-----\n$1\n-----END PUBLIC KEY-----\n',
+    );
     const key = crypto.createPublicKey(pem);
     if (key.asymmetricKeyType !== 'rsa') throw new Error('not RSA');
     return key;
