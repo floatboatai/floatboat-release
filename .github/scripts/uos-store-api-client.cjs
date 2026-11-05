@@ -34,6 +34,39 @@ const LIST_PAGE_SIZE = 100;
 const MAX_LIST_PAGES = 100;
 const MAX_LIST_RECORDS = LIST_PAGE_SIZE * MAX_LIST_PAGES;
 const PACKAGE_NAME = 'com.floatboat.desktop';
+const STORE_OPERATIONS = Object.freeze({
+  '发现统信登录入口': 'login_path', '完成统信商店登录': 'login_callback',
+  '验证统信开发者会话': 'developer_info', '查询已有应用': 'applications',
+  '读取版本详情': 'version_detail', '读取应用版本历史': 'version_history',
+  '读取审核状态': 'audit_status', '检测安装包': 'detect_package', '提交审核': 'submit_application',
+});
+
+function sanitizeStoreResponse(value) {
+  try {
+    if (!value || typeof value !== 'object' || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return undefined;
+    const fields = ['operation', 'httpStatus', 'status', 'code', 'reasonClass'];
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Reflect.ownKeys(value).length !== fields.length || fields.some((field) => !descriptors[field] || !Object.hasOwn(descriptors[field], 'value'))) return undefined;
+    const result = Object.fromEntries(fields.map((field) => [field, descriptors[field].value]));
+    if (!Object.values(STORE_OPERATIONS).includes(result.operation) ||
+        !Number.isInteger(result.httpStatus) || result.httpStatus < 100 || result.httpStatus > 599 ||
+        ['status', 'code'].some((field) => result[field] !== null && (!Number.isInteger(result[field]) || result[field] < 0 || result[field] > 999999)) ||
+        !['authorization_code', 'state', 'permission', 'session', 'validation', 'unknown'].includes(result.reasonClass)) return undefined;
+    return Object.freeze(result);
+  } catch { return undefined; }
+}
+
+function diagnoseStoreResponse(operation, httpStatus, payload) {
+  const numeric = (value) => {
+    const number = typeof value === 'number' ? value : typeof value === 'string' && /^(?:0|[1-9]\d{0,5})$/u.test(value) ? Number(value) : NaN;
+    return Number.isInteger(number) && number >= 0 && number <= 999999 ? number : null;
+  };
+  const description = typeof payload?.desc === 'string' ? payload.desc : typeof payload?.message === 'string' ? payload.message : '';
+  const reasonClass = /state/iu.test(description) ? 'state' : /(?:\bcode\b|授权码|认证码)/iu.test(description) ? 'authorization_code' :
+    /(?:permission|权限)/iu.test(description) ? 'permission' : /(?:token|session|登录|会话)/iu.test(description) ? 'session' :
+      /(?:param|参数|字段)/iu.test(description) ? 'validation' : 'unknown';
+  return sanitizeStoreResponse({ operation: STORE_OPERATIONS[operation], httpStatus, status: numeric(payload?.status), code: numeric(payload?.code), reasonClass });
+}
 // 公开包编辑器更新原包时继承这些适配字段；包 ID、DID 和旧包摘要不属于可继承元数据。
 const PACKAGE_ADAPTATION_FIELDS = Object.freeze([
   'supBlineVer', 'unsupportBlineVers', 'supSys', 'systemStr', 'system_platform', 'baseline', 'unsupportBaseline',
@@ -65,6 +98,8 @@ class UosStoreApiError extends Error {
     if (navigationDiagnostic) this.navigationDiagnostic = navigationDiagnostic;
     const authenticationResponse = sanitizeAuthenticationResponse(options.authenticationResponse);
     if (authenticationResponse) this.authenticationResponse = authenticationResponse;
+    const storeResponse = sanitizeStoreResponse(options.storeResponse);
+    if (storeResponse) this.storeResponse = storeResponse;
   }
 }
 
@@ -87,7 +122,8 @@ function describeUosAuthenticationFailure(error) {
   const callbackShape = sanitizeCallbackShape(error.callbackShape);
   const navigationDiagnostic = sanitizeNavigationDiagnostic(error.navigationDiagnostic);
   const authenticationResponse = sanitizeAuthenticationResponse(error.authenticationResponse);
-  return Object.freeze({ code: error.code, reason, ...(callbackShape ? { callbackShape } : {}), ...(navigationDiagnostic ? { navigationDiagnostic } : {}), ...(authenticationResponse ? { authenticationResponse } : {}) });
+  const storeResponse = sanitizeStoreResponse(error.storeResponse);
+  return Object.freeze({ code: error.code, reason: storeResponse ? '统信商店接口未接受请求' : reason, ...(callbackShape ? { callbackShape } : {}), ...(navigationDiagnostic ? { navigationDiagnostic } : {}), ...(authenticationResponse ? { authenticationResponse } : {}), ...(storeResponse ? { storeResponse } : {}) });
 }
 
 function digest(algorithm, value) {
@@ -698,7 +734,10 @@ class UosStoreApiClient {
   }
 
   async requestJson(method, endpoint, body, operation, extraHeaders = {}) {
-    const headers = { accept: 'application/json', ...extraHeaders };
+    const headers = {
+      accept: 'application/json', ...extraHeaders,
+      origin: this.baseUrl.origin, referer: `${this.baseUrl.origin}/`,
+    };
     if (this.cookies.size > 0) headers.cookie = [...this.cookies].map(([name, value]) => `${name}=${value}`).join('; ');
     let encodedBody = body;
     if (body !== undefined && !Buffer.isBuffer(body)) {
@@ -725,9 +764,18 @@ class UosStoreApiClient {
     if (!response.ok) {
       throw new UosStoreApiError('UOS_STORE_HTTP_FAILED', `${operation} HTTP ${response.status}`, {
         retryable: response.status >= 500 || response.status === 408 || response.status === 429,
+        storeResponse: diagnoseStoreResponse(operation, response.status, payload),
       });
     }
-    return normalizeEnvelope(payload, operation);
+    try {
+      return normalizeEnvelope(payload, operation);
+    } catch (error) {
+      if (error instanceof UosStoreApiError) {
+        const storeResponse = diagnoseStoreResponse(operation, response.status, payload);
+        if (storeResponse) error.storeResponse = storeResponse;
+      }
+      throw error;
+    }
   }
 
   async readJson(response, operation) {
