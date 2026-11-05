@@ -235,6 +235,9 @@ test('RC 强制 Floatboat app 范围，并允许 Linux 双包只产 Actions 制�
   assert.match(scopeStep, /"macos,windows"\) ;;/);
   assert.match(scopeStep, /"linux"\)[\s\S]*INPUT_LINUX_PACKAGE[\s\S]*deb-and-uos/);
   assert.match(scopeStep, /Linux-only RC builds Actions artifacts without publishing CDN or installer URLs/);
+  assert.match(scopeStep, /RC publishing requires exactly macos,windows/);
+  assert.match(scopeStep, /RC UOS publishing requires exactly linux/);
+  assert.match(scopeStep, /RC UOS publishing requires linux_package=uos-floatboat/);
   assert.match(packageStep, /RC publishing requires package_set=app/);
   assert.match(macX64Job, /inputs\.is_rc == false/);
   assert.match(publishStep, /desktop_variant == 'floatboat'/);
@@ -290,4 +293,75 @@ test('UOS 双架构只在固定的 V20 ABI 容器中重编 SQLite 并复核最�
   assert.match(verifyStep, /RPATH\|RUNPATH/);
   assert.match(verifyStep, /UOS ELF 架构不匹配/);
   assert.match(verifyStep, /UOS ELF 残留构建路径/);
+});
+
+test('UOS 商店上传默认关闭并保留向后兼容的 dispatch 关联输入', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  assert.match(workflow, /upload_uos_store:[\s\S]*default: false[\s\S]*type: boolean/);
+  assert.match(workflow, /dispatch_id:[\s\S]*default: ""[\s\S]*type: string/);
+  assert.match(workflow, /run-name: \$\{\{ inputs\.dispatch_id != '' && format\('Release · \{0\} · \{1\} · \{2\}', inputs\.dispatch_id, inputs\.version, inputs\.repo_ref\)/);
+  assert.doesNotMatch(workflow, /uos_publication_request_id|UOS_PUBLICATION_BACKEND|id-token: write/);
+});
+
+test('prepare 在构建前拒绝非法 UOS 自动送审组合和非法 dispatch UUID', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const validation = readNamedStep(workflow, 'Validate UOS Store dispatch');
+  assert.match(validation, /dispatch_id must be an RFC 4122 UUID/);
+  assert.match(validation, /UPLOAD_UOS_STORE.*!= "true"/);
+  assert.match(validation, /linux_package=uos-floatboat/);
+  assert.match(validation, /desktop_variant=floatboat/);
+  assert.match(validation, /build_profile=release/);
+  assert.match(validation, /package_set=app/);
+  assert.match(validation, /skip_release_notes=true/);
+  assert.match(validation, /WORKFLOW_REF.*github\.ref/);
+  assert.match(validation, /must run from floatboat-release main/);
+  assert.match(validation, /stable or RC three-part version/);
+  assert.match(validation, /RC UOS App Store publication requires is_rc=true/);
+  assert.match(validation, /immutable 40-character source SHA/);
+  assert.ok(
+    workflow.indexOf('- name: Validate UOS Store dispatch') < workflow.indexOf('- name: Checkout source repo'),
+    '自动送审输入必须在源码 checkout 和构建前失败',
+  );
+});
+
+test('无 Secret fan-in 先校验当前 run 双架构，再允许受保护发布 job', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const validationJob = readNamedJob(workflow, 'validate-uos-publication');
+  const publishingJob = readNamedJob(workflow, 'publish-uos-store');
+  const existingPublishJob = readNamedJob(workflow, 'publish-linux-uos');
+
+  assert.match(validationJob, /name: Validate UOS Store Publication/);
+  assert.match(validationJob, /needs: \[prepare, build-linux-uos\]/);
+  assert.match(validationJob, /inputs\.upload_uos_store == true/);
+  assert.match(validationJob, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(validationJob, /uos-publication-manifest\.cjs/);
+  assert.doesNotMatch(validationJob, /secrets\.|environment:/);
+  assert.match(validationJob, /manifest_sha256: \$\{\{ steps\.manifest\.outputs\.manifest_sha256 \}\}/);
+  assert.ok(
+    workflow.indexOf('  validate-uos-publication:') < workflow.indexOf('  publish-uos-store:'),
+    '无 Secret 包校验 job 必须定义在受保护发布 job 之前',
+  );
+
+  assert.match(publishingJob, /name: Publish UOS App Store/);
+  assert.match(publishingJob, /needs: \[prepare, build-linux-uos, validate-uos-publication\]/);
+  assert.match(publishingJob, /environment: uos-app-store-production/);
+  assert.match(publishingJob, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(publishingJob, /concurrency:[\s\S]*group: uos-app-store-production[\s\S]*cancel-in-progress: false/);
+  assert.match(publishingJob, /secrets\.UOS_STORE_USERNAME/);
+  assert.match(publishingJob, /secrets\.UOS_STORE_PASSWORD/);
+  assert.match(publishingJob, /needs\.validate-uos-publication\.outputs\.manifest_sha256/);
+  assert.match(publishingJob, /uos-store-publisher\.cjs/);
+  assert.doesNotMatch(publishingJob, /inputs\.repo_ref|SOURCE_REPO_PAT|id-token/);
+  assert.equal((publishingJob.match(/secrets\./gu) || []).length, 2);
+  assert.doesNotMatch(
+    `${validationJob}\n${publishingJob}`,
+    /aoe-backend|UOS_PUBLICATION_BACKEND|publication request|publication_request|OIDC|id-token/iu,
+  );
+  assert.doesNotMatch(publishingJob, /uos-publication-journal\.json[\s\S]*Upload redacted UOS publication receipt[\s\S]*path: private\/uos-publication-journal/);
+  assert.match(publishingJob, /actions\/checkout@[0-9a-f]{40}/);
+  assert.match(publishingJob, /actions\/download-artifact@[0-9a-f]{40}/);
+  assert.match(publishingJob, /actions\/upload-artifact@[0-9a-f]{40}/);
+  assert.match(publishingJob, /ref: \$\{\{ github\.sha \}\}/);
+
+  assert.match(existingPublishJob, /if: inputs\.notify_only == false && inputs\.is_rc == false && inputs\.build_profile == 'release' && inputs\.linux_package == 'uos-floatboat' && inputs\.desktop_variant == 'floatboat' && needs\.prepare\.outputs\.package_set == 'app' && contains\(inputs\.platforms, 'linux'\) && needs\.build-linux-uos\.result == 'success'/);
 });
