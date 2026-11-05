@@ -21,6 +21,7 @@ const PASSWORD = 'offline-only-password';
 const STATE = 'offline-state';
 const CALLBACK = `${STORE}/?code=offline-code&state=${STATE}`;
 const LOGIN = `${IDENTITY}/oauth2/authorize?client_id=offline-client&redirect_uri=${encodeURIComponent(STORE)}&response_type=code&scope=base&state=${STATE}`;
+const UNTRUSTED_QR_CODE = 'http://untrusted.invalid/qr.png';
 
 function loginPage(mode) {
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body>
@@ -61,10 +62,22 @@ function loginPage(mode) {
 
 function followPage(mode) {
   const label = mode === 'consent-button' ? '授权并登录' : '我已了解，立即登录';
+  const dynamicQrCode = ['untrusted-image', 'untrusted-http-document'].includes(mode);
   return `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><body>
     <app-follow><h1>欢迎加入统信官方社群</h1><p>获取使用手册与社群服务</p>
-      <button class="know">${label}</button>
+      <button class="know"${dynamicQrCode ? ' hidden' : ''}>${label}</button>
     </app-follow><script>
+      const mode = ${JSON.stringify(mode)};
+      if (${JSON.stringify(dynamicQrCode)}) {
+        fetch('/api/oauth2/qrcodeconfig').then(response => response.json()).then(response => {
+          if (mode === 'untrusted-http-document') { location.assign(response.data.url); return; }
+          const image = new Image();
+          // 等待图片请求结束再开放按钮，确保认证成功不能掩盖遗漏的资源拦截。
+          image.onload = image.onerror = () => { document.querySelector('button.know').hidden = false; };
+          image.src = response.data.url;
+          document.querySelector('app-follow').appendChild(image);
+        });
+      }
       document.querySelector('button.know').addEventListener('click', async () => {
         try {
           const response = await fetch('/api/oauth2/showqrcode', {
@@ -79,6 +92,7 @@ function followPage(mode) {
 async function createOfflineHarness(context, mode = 'success') {
   const forwarded = [];
   const requested = [];
+  const aborted = [];
   const requests = [];
   const unexpectedProxyRequests = [];
   const temporaryDirectories = [];
@@ -131,6 +145,9 @@ async function createOfflineHarness(context, mode = 'success') {
       }
       return html(followPage(mode));
     }
+    if (url.pathname === '/api/oauth2/qrcodeconfig') {
+      return json({ code: 200, data: { switch: true, url: UNTRUSTED_QR_CODE } });
+    }
     if (url.pathname === '/api/oauth2/showqrcode') {
       if (mode === 'slow-follow') await new Promise((resolve) => setTimeout(resolve, 200));
       return json({ code: 200, data: { redirect: CALLBACK } });
@@ -155,6 +172,8 @@ async function createOfflineHarness(context, mode = 'success') {
       browserEnvironments.push(options.env);
       const browser = await playwright.chromium.launch({
         ...options,
+        // 仅此离线场景关闭图片自动升级，确保拦截器实际收到待验证的 HTTP 请求。
+        args: mode === 'untrusted-image' ? [...options.args, '--disable-features=AutoupgradeMixedContent'] : options.args,
         proxy: { server: loopback, bypass: '127.0.0.1,localhost' },
       });
       return new Proxy(browser, {
@@ -204,6 +223,10 @@ async function createOfflineHarness(context, mode = 'success') {
                   requested.push(route.request().url());
                   const wrapped = new Proxy(route, {
                     get(target, property) {
+                      if (property === 'abort') return async (...args) => {
+                        aborted.push({ url: target.request().url(), resourceType: target.request().resourceType() });
+                        return target.abort(...args);
+                      };
                       if (property === 'continue') return async () => {
                         await target.abort('blockedbyclient');
                         assert.fail('离线验收禁止任何未经本机映射的浏览器网络请求');
@@ -258,7 +281,7 @@ async function createOfflineHarness(context, mode = 'success') {
     assert.doesNotMatch(JSON.stringify(browserEnvironments), /offline-user|offline-only-password|offline-github-token/u);
     assert.ok(forwarded.every((url) => new URL(url).origin === IDENTITY));
   };
-  return { authenticate, requested, forwarded, requests, unexpectedProxyRequests, browserErrors, assertClean };
+  return { authenticate, requested, aborted, forwarded, requests, unexpectedProxyRequests, browserErrors, assertClean };
 }
 
 integration('离线真实 Chromium 完成填表、普通宣传提示和商店 API 身份衔接', async (context) => {
@@ -313,6 +336,36 @@ integration('离线真实 Chromium 等待普通宣传提示的慢响应，按钮
   const harness = await createOfflineHarness(context, 'slow-follow');
   assert.deepEqual(await harness.authenticate(), { code: 'offline-code', state: STATE });
   assert.equal(harness.requests.filter((item) => item.path === '/api/oauth2/showqrcode').length, 1);
+  await harness.assertClean();
+});
+
+integration('离线真实 Chromium 拦截宣传页动态 HTTP 图片后仍完成认证并清理会话', async (context) => {
+  const harness = await createOfflineHarness(context, 'untrusted-image');
+  assert.deepEqual(await harness.authenticate(), { code: 'offline-code', state: STATE });
+  assert.ok(harness.requests.some((item) => item.path === '/api/oauth2/qrcodeconfig'));
+  assert.deepEqual(harness.aborted.filter(({ url }) => new URL(url).hostname === 'untrusted.invalid'), [
+    { url: UNTRUSTED_QR_CODE, resourceType: 'image' },
+  ]);
+  assert.ok(!harness.forwarded.some((url) => url.includes('untrusted.invalid')));
+  assert.ok(!harness.unexpectedProxyRequests.some((url) => url.includes('untrusted.invalid')));
+  assert.equal(harness.requests.filter((item) => item.path === '/api/oauth2/showqrcode').length, 1);
+  assert.ok(harness.requested.includes(CALLBACK));
+  assert.ok(!harness.forwarded.includes(CALLBACK));
+  await harness.assertClean();
+});
+
+integration('离线真实 Chromium 仍拒绝宣传页跳转到同一陌生 HTTP 地址', async (context) => {
+  const harness = await createOfflineHarness(context, 'untrusted-http-document');
+  await assert.rejects(harness.authenticate(), (error) => {
+    assert.equal(error.code, 'UOS_AUTH_CONTRACT_UNVERIFIED');
+    assert.match(error.message, /未受信/u);
+    return true;
+  });
+  assert.ok(harness.aborted.some(({ url, resourceType }) => url === UNTRUSTED_QR_CODE && resourceType === 'document'));
+  assert.ok(!harness.forwarded.some((url) => url.includes('untrusted.invalid')));
+  assert.ok(!harness.unexpectedProxyRequests.some((url) => url.includes('untrusted.invalid')));
+  assert.equal(harness.requests.filter((item) => item.path === '/api/oauth2/showqrcode').length, 0);
+  assert.ok(!harness.requested.includes(CALLBACK));
   await harness.assertClean();
 });
 

@@ -46,7 +46,12 @@ const FAILURE = Object.freeze({
   timeout: '统信浏览器等待登录完成超时',
   cleanup: '统信浏览器临时会话未能完整清理',
 });
-const BROWSER_FAILURE_MESSAGES = Object.freeze(Object.values(FAILURE));
+const REQUEST_FAILURE = Object.freeze(Object.fromEntries(
+  ['requestBeforeSubmit', 'requestSubmitted', 'requestAuthorized'].flatMap((stage) =>
+    Object.entries({ Navigation: '页面跳转', Script: '脚本', Data: '接口请求' }).map(([kind, label]) =>
+      [`${stage}${kind}`, `${FAILURE[stage]}（${label}）`])),
+));
+const BROWSER_FAILURE_MESSAGES = Object.freeze([...Object.values(FAILURE), ...Object.values(REQUEST_FAILURE)]);
 const POST_PATHS = new Set([
   '/api/oauth2/client',
   '/api/agreement',
@@ -61,7 +66,7 @@ const TMPFS_MAGIC = 0x01021994;
 let authenticating = false;
 
 function failure(stage, code = 'UOS_AUTH_CONTRACT_UNVERIFIED', options = {}) {
-  return new UnionTechIdentityError(code, FAILURE[stage], options);
+  return new UnionTechIdentityError(code, FAILURE[stage] || REQUEST_FAILURE[stage], options);
 }
 
 function isManualPath(url) {
@@ -220,6 +225,9 @@ async function authenticateUnionTechBrowser(options) {
       const method = request.method();
       const resourceType = request.resourceType();
       const isNavigation = method === 'GET' && request.isNavigationRequest() && request.frame() === page.mainFrame();
+      const optionalAsset = !request.isNavigationRequest() && ['GET', 'HEAD'].includes(method) && ['image', 'font'].includes(resourceType);
+      // 社群提示的动态二维码不是认证条件；只阻断资源，避免图片失效误报为登录失败。
+      if (optionalAsset && !isAllowedTarget(url, method, resourceType)) return abort(route);
       if (captureCallback(url, isNavigation)) return abort(route);
       if (url.origin === IDENTITY_ORIGIN && isManualPath(url)) {
         reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
@@ -227,7 +235,9 @@ async function authenticateUnionTechBrowser(options) {
       }
       if (!isAllowedTarget(url, method, resourceType)) {
         // 点击按钮不代表密码请求已发出，阶段以固定密码请求及其响应为准。
-        const reason = authorized ? 'requestAuthorized' : passwordRequests > 0 ? 'requestSubmitted' : 'requestBeforeSubmit';
+        const stage = authorized ? 'requestAuthorized' : passwordRequests > 0 ? 'requestSubmitted' : 'requestBeforeSubmit';
+        const kind = request.isNavigationRequest() ? 'Navigation' : resourceType === 'script' ? 'Script' : ['xhr', 'fetch'].includes(resourceType) ? 'Data' : '';
+        const reason = `${stage}${kind}`;
         reject(reason, 'UOS_AUTH_CONTRACT_UNVERIFIED', { callbackShape: classifyCallbackShape(url) });
         return abort(route);
       }
@@ -270,6 +280,7 @@ async function authenticateUnionTechBrowser(options) {
           const location = response.headers().location;
           if (!location || redirects === 5) { reject('redirect'); return abort(route); }
           const next = new URL(location, url);
+          if (optionalAsset && (next.origin !== IDENTITY_ORIGIN || url.origin !== IDENTITY_ORIGIN || !isAllowedTarget(next, method, resourceType))) return abort(route);
           if (captureCallback(next, isNavigation)) return abort(route);
           if (next.origin === IDENTITY_ORIGIN && isManualPath(next)) {
             reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
