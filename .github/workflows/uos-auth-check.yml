@@ -10,8 +10,8 @@ jobs:
   check-uos-authentication:
     name: Check UOS authentication
     if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
     environment: uos-app-store-production
     concurrency:
       group: uos-app-store-production
@@ -24,8 +24,24 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/scripts
 
+      - name: Setup UOS authentication package manager
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Install pinned UOS authentication browser
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/uos-browser-binaries
+        run: |
+          pnpm --dir .github/scripts/uos-browser-runtime install --frozen-lockfile --ignore-scripts
+          pnpm --dir .github/scripts/uos-browser-runtime exec playwright install --with-deps --only-shell chromium
+
       - name: Check UOS authentication
         env:
+          DEBUG: ''
+          PWDEBUG: ''
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/uos-browser-binaries
           UOS_STORE_USERNAME: ${{ secrets.UOS_STORE_USERNAME }}
           UOS_STORE_PASSWORD: ${{ secrets.UOS_STORE_PASSWORD }}
         run: node .github/scripts/uos-store-auth-check.cjs

@@ -364,6 +364,12 @@ test('无 Secret fan-in 先校验当前 run 双架构，再允许受保护发布
   assert.match(publishingJob, /actions\/download-artifact@[0-9a-f]{40}/);
   assert.match(publishingJob, /actions\/upload-artifact@[0-9a-f]{40}/);
   assert.match(publishingJob, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(publishingJob, /pnpm\/action-setup@[0-9a-f]{40}/);
+  assert.match(publishingJob, /uos-browser-runtime install --frozen-lockfile --ignore-scripts/);
+  assert.match(publishingJob, /playwright install --with-deps --only-shell chromium/);
+  assert.ok(publishingJob.indexOf('Install pinned UOS authentication browser') < publishingJob.indexOf('secrets.UOS_STORE_USERNAME'));
+  assert.match(publishingJob, /DEBUG: ''\n\s+PWDEBUG: ''/);
+  assert.doesNotMatch(publishingJob, /actions\/cache|storageState|recordHar|recordVideo/);
 
   assert.doesNotMatch(existingPublishJob, /upload_uos_store/);
   assert.match(existingPublishJob, /needs: \[prepare, build-linux, build-linux-uos, upload\]/);

@@ -1,0 +1,418 @@
+#!/usr/bin/env node
+// ABOUTME: 在 Actions 的临时浏览器中执行统信公开登录流程，只返回经过校验的商店 code/state。
+
+'use strict';
+
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const {
+  IDENTITY_ORIGIN,
+  STORE_ORIGIN,
+  UnionTechIdentityError,
+  validateCallback,
+  validateOAuthLoginUrl,
+} = require('./uniontech-identity-authenticator.cjs');
+
+const BROWSER_SELECTORS = Object.freeze({
+  username: 'app-login-web form.login-form input[formcontrolname="userName"]',
+  password: 'app-login-web form.login-form input[formcontrolname="password"]',
+  submit: 'app-login-web form.login-form button.login-form-button.login-form-margin',
+  follow: 'app-follow button.know',
+  manual: Object.freeze([
+    'app-login-web .auth-btn',
+    'input[formcontrolname="valid_code"]',
+    '.yidun_panel',
+    '.yidun_popup',
+  ]),
+});
+
+const FAILURE = Object.freeze({
+  input: '统信浏览器登录输入不符合固定契约',
+  runtime: '统信浏览器登录仅允许 Actions Linux 环境',
+  storage: '统信浏览器临时目录必须位于独立内存文件系统',
+  launch: '统信浏览器无法启动',
+  page: '统信浏览器登录页面无法完成初始化',
+  request: '统信浏览器阻止了未受信请求',
+  redirect: '统信浏览器阻止了不受支持的重定向',
+  replay: '统信浏览器阻止了重复密码提交',
+  password: '统信浏览器密码提交不符合固定契约',
+  response: '统信浏览器密码登录未成功',
+  manual: '统信浏览器登录需要人工验证或授权',
+  callback: '统信浏览器商店回跳未通过校验',
+  timeout: '统信浏览器等待登录完成超时',
+  cleanup: '统信浏览器临时会话未能完整清理',
+});
+const BROWSER_FAILURE_MESSAGES = Object.freeze(Object.values(FAILURE));
+const POST_PATHS = new Set([
+  '/api/oauth2/client',
+  '/api/agreement',
+  '/api/oauth2/authorize',
+  '/api/oauth2/authorize/registerlogin',
+  '/api/islogin',
+  '/api/oauth2/checkoauth',
+  '/api/oauth2/showqrcode',
+]);
+const OAUTH_FIELDS = ['client_id', 'redirect_uri', 'response_type', 'scope', 'state'];
+const TMPFS_MAGIC = 0x01021994;
+let authenticating = false;
+
+function failure(stage, code = 'UOS_AUTH_CONTRACT_UNVERIFIED') {
+  return new UnionTechIdentityError(code, FAILURE[stage]);
+}
+
+function isManualPath(url) {
+  return /(?:^|\/)(?:bind|revoke|mfa|captcha|verify|consent)(?:\/|$)/iu.test(url.pathname) ||
+    url.pathname.startsWith('/oauth2/client/') || url.pathname.startsWith('/m/');
+}
+
+function isAllowedTarget(url, method, resourceType) {
+  if (url.username || url.password || url.hash || url.protocol !== 'https:') return false;
+  if (url.origin === IDENTITY_ORIGIN) return ['GET', 'HEAD'].includes(method) || (method === 'POST' && POST_PATHS.has(url.pathname));
+  return url.origin === 'https://cdn-nu-common.uniontech.com' && ['GET', 'HEAD'].includes(method) && resourceType === 'image';
+}
+
+function isPasswordForm(request, loginUrl, username, password) {
+  const body = request.postData() || '';
+  if (body.length > 16 * 1024 || !/^application\/x-www-form-urlencoded(?:;|$)/iu.test(request.headers()['content-type'] || '')) return false;
+  const form = new URLSearchParams(body);
+  const allowed = new Set([...loginUrl.searchParams.keys(), 'account', 'password', 'token', 'validate', 'user_oauth', 'grunt']);
+  if ([...form.keys()].some((name) => !allowed.has(name))) return false;
+  for (const name of [...OAUTH_FIELDS, 'account', 'password', 'token', 'validate', 'user_oauth']) {
+    if (form.getAll(name).length !== 1) return false;
+  }
+  if (OAUTH_FIELDS.some((name) => form.get(name) !== loginUrl.searchParams.get(name))) return false;
+  if (form.get('token') !== 'has' || form.get('validate') !== 'random_hdh' || form.get('user_oauth') !== 'o_base') return false;
+  const account = form.get('account');
+  const encryptedPassword = form.get('password');
+  return account !== username && encryptedPassword !== password &&
+    /^[A-Za-z0-9+/]{128,}={0,2}$/u.test(account) && /^[A-Za-z0-9+/]{128,}={0,2}$/u.test(encryptedPassword);
+}
+
+function isInitializationForm(request, loginUrl) {
+  const form = new URLSearchParams(request.postData() || '');
+  return [...form].every(([name, value]) =>
+    (name === 'grunt' && value === 'true') ||
+    (loginUrl.searchParams.getAll(name).length === 1 && loginUrl.searchParams.get(name) === value));
+}
+
+function isFollowPreference(request) {
+  const raw = request.postData() || '';
+  try {
+    const value = JSON.parse(raw);
+    return value && typeof value === 'object' && !Array.isArray(value) &&
+      Object.keys(value).length === 1 && value.showQrcode === 0;
+  } catch {
+    const form = new URLSearchParams(raw);
+    return [...form].length === 1 && form.get('showQrcode') === '0';
+  }
+}
+
+function safeBrowserEnvironment(env, directory) {
+  const result = {};
+  for (const name of ['PATH', 'LANG', 'LC_ALL', 'TZ', 'LD_LIBRARY_PATH', 'DISPLAY']) {
+    if (typeof env[name] === 'string') result[name] = env[name];
+  }
+  return {
+    ...result,
+    TMPDIR: directory,
+    XDG_CACHE_HOME: path.join(directory, 'cache'),
+    XDG_CONFIG_HOME: path.join(directory, 'config'),
+    XDG_DATA_HOME: path.join(directory, 'data'),
+  };
+}
+
+async function authenticateUnionTechBrowser(options) {
+  options = options || {};
+  let loginUrl;
+  const username = String(options.username || '').trim();
+  const password = String(options.password || '');
+  try {
+    loginUrl = validateOAuthLoginUrl(options.loginUrl);
+  } catch {
+    throw failure('input');
+  }
+  if (!username || !password || username.length > 200 || password.length > 64) throw failure('input');
+  const runtime = options.runtime || {};
+  const env = runtime.env || process.env;
+  const fileSystem = runtime.fs || fs;
+  if ((runtime.platform || process.platform) !== 'linux' || env.GITHUB_ACTIONS !== 'true' || env.RUNNER_OS !== 'Linux' ||
+      env.DEBUG || env.PWDEBUG || process.env.DEBUG || process.env.PWDEBUG || authenticating) {
+    throw failure('runtime');
+  }
+  const timeoutMs = Math.min(120_000, Math.max(100, options.timeoutMs || 90_000));
+  authenticating = true;
+  let directory;
+  let browser;
+  let context;
+  let page;
+  let timer;
+  let settled = false;
+  let submitted = false;
+  let passwordRequests = 0;
+  let authorized = false;
+  let followClicked = false;
+  let followRequests = 0;
+  let pendingNavigation;
+  let navigationRedirects = 0;
+  let stage = 'storage';
+  let flow;
+  const ready = { config: false, key: false, client: false };
+  const deadline = Date.now() + timeoutMs;
+  const remaining = () => Math.max(1, deadline - Date.now());
+  let resolveResult;
+  let rejectResult;
+  const result = new Promise((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });
+  // 路由或页面事件可能先于等待者失败，提前安装处理避免未处理的拒绝输出敏感堆栈。
+  result.catch(() => {});
+  const reject = (reason, code) => {
+    if (settled) return;
+    settled = true;
+    rejectResult(failure(reason, code));
+  };
+  const abort = async (route) => { try { await route.abort('blockedbyclient'); } catch {} };
+  const captureCallback = (url, isNavigation) => {
+    if (![STORE_ORIGIN, 'http://appstore-dev.uniontech.com'].includes(url.origin)) return false;
+    if (!isNavigation || !submitted || !authorized) {
+      reject('callback');
+      return true;
+    }
+    try {
+      const callback = validateCallback(url.href, loginUrl.searchParams.get('state'));
+      if (!settled) { settled = true; resolveResult(callback); }
+    } catch {
+      reject('callback');
+    }
+    return true;
+  };
+
+  const inspectResponse = async (url, response) => {
+    if (url.origin !== IDENTITY_ORIGIN) return;
+    if (!['/assets/config/config.json', '/api/key', '/api/oauth2/client', '/api/oauth2/authorize', '/api/oauth2/authorize/registerlogin'].includes(url.pathname)) return;
+    const payload = await response.json();
+    if (url.pathname === '/assets/config/config.json') {
+      if (payload?.NECaptcha !== false) return reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+      if (payload.JSEncrypt !== true) return reject('page');
+      ready.config = true;
+    } else if (url.pathname === '/api/key') {
+      if (Number(payload?.code) !== 200 || typeof payload.data !== 'string') return reject('page');
+      ready.key = true;
+    } else if (url.pathname === '/api/oauth2/client') {
+      if (Number(payload?.code) !== 200 || !payload.data || typeof payload.data !== 'object') return reject('page');
+      ready.client = true;
+    } else {
+      if (Number(payload?.code) !== 200 || !payload.data || typeof payload.data !== 'object') return reject('response', 'UOS_AUTH_FAILED');
+      if (payload.data.need_bind_contact || payload.data.cancel_unregister_key || payload.data.phone_unbind) {
+        return reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+      }
+      if (url.pathname === '/api/oauth2/authorize') authorized = true;
+    }
+  };
+
+  const handleRoute = async (route) => {
+    try {
+      if (settled) return abort(route);
+      const request = route.request();
+      let url = new URL(request.url());
+      const method = request.method();
+      const resourceType = request.resourceType();
+      const isNavigation = method === 'GET' && request.isNavigationRequest() && request.frame() === page.mainFrame();
+      if (captureCallback(url, isNavigation)) return abort(route);
+      if (url.origin === IDENTITY_ORIGIN && isManualPath(url)) {
+        reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+        return abort(route);
+      }
+      if (!isAllowedTarget(url, method, resourceType)) {
+        reject('request');
+        return abort(route);
+      }
+      if ([...url.searchParams.keys()].some((name) => /^(?:account|password)$/iu.test(name))) {
+        reject('password');
+        return abort(route);
+      }
+      const passwordRequest = url.pathname === '/api/oauth2/authorize' && method === 'POST';
+      if (passwordRequest) {
+        passwordRequests += 1;
+        if (passwordRequests !== 1) { reject('replay'); return abort(route); }
+        if (!submitted || !ready.config || !ready.key || !ready.client || !isPasswordForm(request, loginUrl, username, password)) {
+          reject('password');
+          return abort(route);
+        }
+      } else if (method === 'POST') {
+        if (['/api/oauth2/client', '/api/islogin', '/api/oauth2/checkoauth'].includes(url.pathname) && !isInitializationForm(request, loginUrl)) {
+          reject('password');
+          return abort(route);
+        }
+        if (['/api/agreement', '/api/oauth2/authorize/registerlogin'].includes(url.pathname) &&
+            !['', '{}'].includes((request.postData() || '').trim())) {
+          reject('password');
+          return abort(route);
+        }
+      }
+      if (url.pathname === '/api/oauth2/showqrcode') {
+        followRequests += 1;
+        if (!authorized || !followClicked || followRequests !== 1 || !isFollowPreference(request)) {
+          reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+          return abort(route);
+        }
+      }
+      // 统一由 APIRequestContext 逐跳获取，浏览器永远收不到能自动重放口令的 3xx。
+      for (let redirects = 0; redirects <= 5; redirects += 1) {
+        const response = await route.fetch({ url: url.href, maxRedirects: 0, maxRetries: 0, timeout: remaining() });
+        const status = response.status();
+        if (status >= 300 && status < 400) {
+          if (!['GET', 'HEAD'].includes(method)) { reject('redirect'); return abort(route); }
+          const location = response.headers().location;
+          if (!location || redirects === 5) { reject('redirect'); return abort(route); }
+          const next = new URL(location, url);
+          if (captureCallback(next, isNavigation)) return abort(route);
+          if (next.origin === IDENTITY_ORIGIN && isManualPath(next)) {
+            reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+            return abort(route);
+          }
+          if (next.origin !== IDENTITY_ORIGIN || url.origin !== IDENTITY_ORIGIN || !isAllowedTarget(next, method, resourceType)) {
+            reject('redirect');
+            return abort(route);
+          }
+          if (isNavigation && resourceType === 'document') {
+            navigationRedirects += 1;
+            if (navigationRedirects > 5) { reject('redirect'); return abort(route); }
+            // 新导航重新经过完整拦截，且官方脚本看到正确的 pathname 与相对资源基准。
+            pendingNavigation = next.href;
+            return abort(route);
+          }
+          url = next;
+          continue;
+        }
+        if (status >= 400 && (passwordRequest || isNavigation)) {
+          reject(passwordRequest ? 'response' : 'page', 'UOS_AUTH_FAILED');
+          return abort(route);
+        }
+        await inspectResponse(url, response);
+        if (settled) return abort(route);
+        await route.fulfill({ response });
+        return;
+      }
+    } catch {
+      reject('request', 'UOS_AUTH_FAILED');
+      await abort(route);
+    }
+  };
+
+  try {
+    const directoryInfo = await fileSystem.lstat('/dev/shm');
+    const mount = await fileSystem.statfs('/dev/shm');
+    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink() || Number(mount.type) !== TMPFS_MAGIC) throw failure('storage');
+    directory = await fileSystem.mkdtemp('/dev/shm/uniontech-browser-');
+    await fileSystem.chmod(directory, 0o700);
+    stage = 'launch';
+    const chromium = options.chromium || require('./uos-browser-runtime/node_modules/playwright').chromium;
+    const previousTmpdir = process.env.TMPDIR;
+    try {
+      // Playwright 自身在父进程中创建临时 profile，单设 Chromium 子进程环境并不足够。
+      process.env.TMPDIR = directory;
+      browser = await chromium.launch({
+        headless: true,
+        chromiumSandbox: true,
+        timeout: remaining(),
+        env: safeBrowserEnvironment(env, directory),
+        downloadsPath: directory,
+        ignoreDefaultArgs: ['--disable-dev-shm-usage'],
+        args: ['--disable-breakpad', '--disable-crash-reporter', `--disk-cache-dir=${path.join(directory, 'cache')}`],
+      });
+    } finally {
+      if (previousTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previousTmpdir;
+    }
+    context = await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block', locale: 'zh-CN', viewport: { width: 1280, height: 900 } });
+    await context.route('**/*', handleRoute);
+    await context.routeWebSocket('**/*', async (socket) => {
+      reject('request');
+      try { await socket.close(); } catch {}
+    });
+    page = await context.newPage();
+    page.setDefaultTimeout(Math.min(10_000, remaining()));
+    context.on('page', (popup) => { void popup.close().catch(() => {}); reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED'); });
+    page.on('download', (download) => { void download.cancel().catch(() => {}); reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED'); });
+    page.on('dialog', (dialog) => { void dialog.dismiss().catch(() => {}); reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED'); });
+    page.on('crash', () => reject('page', 'UOS_AUTH_FAILED'));
+    timer = setTimeout(() => reject('timeout', 'UOS_AUTH_FAILED'), remaining());
+    stage = 'page';
+    flow = (async () => {
+      const act = async (action) => {
+        try { await action(); } catch (error) {
+          // 只有已验证的受控导航或最终回跳，可以解释我们主动中止引发的浏览器错误。
+          if (!pendingNavigation && !settled) throw error;
+        }
+      };
+      const navigate = (url) => act(() => page.goto(url, { waitUntil: 'domcontentloaded', timeout: remaining() }));
+      await navigate(loginUrl.href);
+      while (!settled) {
+        try {
+          if (pendingNavigation) {
+            const target = pendingNavigation;
+            pendingNavigation = undefined;
+            await navigate(target);
+            continue;
+          }
+          const current = new URL(page.url());
+          if (current.origin !== IDENTITY_ORIGIN || isManualPath(current)) {
+            reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+            break;
+          }
+          for (const selector of BROWSER_SELECTORS.manual) {
+            if (await page.locator(selector).first().isVisible()) {
+              reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+              break;
+            }
+          }
+          if (settled) break;
+          if (!submitted && Object.values(ready).every(Boolean)) {
+            const user = page.locator(BROWSER_SELECTORS.username);
+            const pass = page.locator(BROWSER_SELECTORS.password);
+            const submit = page.locator(BROWSER_SELECTORS.submit);
+            if (await user.count() === 1 && await pass.count() === 1 && await submit.count() === 1 &&
+                await user.isVisible() && await pass.isVisible()) {
+              await user.fill(username);
+              await pass.fill(password);
+              submitted = true;
+              await act(() => submit.click({ timeout: remaining() }));
+            }
+          }
+          if (!settled && authorized && !followClicked && current.pathname === '/oauth2/follow') {
+            const button = page.locator(BROWSER_SELECTORS.follow);
+            if (await button.count() === 1 && await button.isVisible()) {
+              if ((await button.innerText()).trim() !== '我已了解，立即登录') {
+                reject('manual', 'UOS_AUTH_INTERACTION_REQUIRED');
+                break;
+              }
+              followClicked = true;
+              await act(() => button.click({ timeout: remaining() }));
+            }
+          }
+          if (!settled) await new Promise((resolve) => setTimeout(resolve, Math.min(50, remaining())));
+        } catch (error) {
+          if (!pendingNavigation && !settled) throw error;
+        }
+      }
+    })().catch(() => reject(stage, 'UOS_AUTH_FAILED'));
+    return await result;
+  } catch (error) {
+    if (error instanceof UnionTechIdentityError &&
+        ['UOS_AUTH_CONTRACT_UNVERIFIED', 'UOS_AUTH_INTERACTION_REQUIRED', 'UOS_AUTH_FAILED'].includes(error.code) &&
+        error.message.startsWith(`${error.code}: `) &&
+        BROWSER_FAILURE_MESSAGES.includes(error.message.slice(`${error.code}: `.length))) throw error;
+    throw failure(stage, 'UOS_AUTH_FAILED');
+  } finally {
+    settled = true;
+    clearTimeout(timer);
+    let cleanupFailed = false;
+    try { if (context) await context.close(); } catch { cleanupFailed = true; }
+    try { if (browser) await browser.close(); } catch { cleanupFailed = true; }
+    try { if (flow) await flow; } catch {}
+    try { if (directory) await fileSystem.rm(directory, { recursive: true, force: true }); } catch { cleanupFailed = true; }
+    authenticating = false;
+    if (cleanupFailed) throw failure('cleanup', 'UOS_AUTH_FAILED');
+  }
+}
+
+module.exports = { BROWSER_FAILURE_MESSAGES, BROWSER_SELECTORS, authenticateUnionTechBrowser };

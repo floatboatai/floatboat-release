@@ -2142,7 +2142,7 @@ jobs:
   publish-uos-store:
     name: Publish UOS App Store
     needs: [prepare, build-linux-uos, validate-uos-publication]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     if: inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.build-linux-uos.result == 'success' && needs.validate-uos-publication.result == 'success'
     environment: uos-app-store-production
     concurrency:
@@ -2160,6 +2160,19 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/scripts
 
+      - name: Setup UOS authentication package manager
+        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
+        with:
+          version: 10.24.0
+          run_install: false
+
+      - name: Install pinned UOS authentication browser
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/uos-browser-binaries
+        run: |
+          pnpm --dir release-tooling/.github/scripts/uos-browser-runtime install --frozen-lockfile --ignore-scripts
+          pnpm --dir release-tooling/.github/scripts/uos-browser-runtime exec playwright install --with-deps --only-shell chromium
+
       - name: Download current-run UOS artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
@@ -2175,6 +2188,9 @@ jobs:
 
       - name: Upload both UOS packages and submit review
         env:
+          DEBUG: ''
+          PWDEBUG: ''
+          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/uos-browser-binaries
           UOS_STORE_USERNAME: ${{ secrets.UOS_STORE_USERNAME }}
           UOS_STORE_PASSWORD: ${{ secrets.UOS_STORE_PASSWORD }}
           UOS_PUBLICATION_MANIFEST_SHA256: ${{ needs.validate-uos-publication.outputs.manifest_sha256 }}

@@ -4,7 +4,7 @@
 'use strict';
 
 const { UosStoreApiClient, describeUosAuthenticationFailure } = require('./uos-store-api-client.cjs');
-const { authenticateUnionTechIdentity } = require('./uniontech-identity-authenticator.cjs');
+const { authenticateUnionTechBrowser } = require('./uniontech-browser-authenticator.cjs');
 
 const APP_ID = 'com.floatboat.desktop';
 
@@ -20,7 +20,7 @@ async function runAuthenticationCheck(options) {
   try {
     const client = options.client || new UosStoreApiClient({
       baseUrl: 'https://appstore-dev.uniontech.com',
-      identityAuthenticator: authenticateUnionTechIdentity,
+      identityAuthenticator: authenticateUnionTechBrowser,
     });
     await checkUosAuthentication({ client, credentials: options.credentials });
     log(`UOS authentication ready for ${APP_ID}`);

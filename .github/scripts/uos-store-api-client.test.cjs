@@ -78,6 +78,25 @@ test('登录检查拒绝任意错误内容及带未知字段的回跳分类', ()
   }
 });
 
+test('网页登录的固定失败阶段穿过 API 与诊断层，原始浏览器异常不进入日志', async () => {
+  for (const [cause, expected] of [
+    [new UnionTechIdentityError('UOS_AUTH_FAILED', '统信浏览器密码登录未成功'), '统信浏览器密码登录未成功'],
+    [Object.assign(new Error('private-password in locator.fill'), { code: 'UOS_AUTH_FAILED' }), '统信 Identity 未能建立自动化会话'],
+  ]) {
+    const client = new UosStoreApiClient({
+      baseUrl: 'https://appstore-dev.uniontech.com',
+      identityAuthenticator: async () => { throw cause; },
+      fetchImpl: async () => new Response(JSON.stringify({ status: 200, datas: 'https://login.uniontech.com/oauth2/authorize?state=expected-state' })),
+    });
+    await assert.rejects(client.authenticate({ username: 'private-user', password: 'private-password' }), (error) => {
+      const diagnostic = describeUosAuthenticationFailure(error);
+      assert.equal(diagnostic.reason, expected);
+      assert.doesNotMatch(JSON.stringify(diagnostic), /private-user|private-password|locator\.fill/u);
+      return true;
+    });
+  }
+});
+
 test('Identity 失败保留固定契约原因，同时拒绝输出任意异常内容', async () => {
   for (const [identityError, expectedMessage] of [
     [new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 Identity RSA 加密失败'), '统信 Identity RSA 加密失败'],
