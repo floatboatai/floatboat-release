@@ -5,7 +5,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const { describeIdentityFailure } = require('./uniontech-identity-authenticator.cjs');
+const { describeIdentityFailure, sanitizeCallbackShape, sanitizeIdentityFailureReason } = require('./uniontech-identity-authenticator.cjs');
 
 const UOS_STORE_CONTRACT = Object.freeze({
   basePath: '/devprod-api',
@@ -52,7 +52,25 @@ class UosStoreApiError extends Error {
     this.code = code;
     this.retryable = Boolean(options.retryable);
     this.outcomeUnknown = Boolean(options.outcomeUnknown);
+    const callbackShape = sanitizeCallbackShape(options.callbackShape);
+    if (callbackShape) this.callbackShape = callbackShape;
   }
+}
+
+function describeUosAuthenticationFailure(error) {
+  const allowedCodes = new Set([
+    'UOS_STORE_CREDENTIALS_MISSING', 'UOS_AUTH_CONTRACT_UNVERIFIED', 'UOS_AUTH_INTERACTION_REQUIRED',
+    'UOS_AUTH_FAILED', 'UOS_APPLICATION_IDENTITY_UNCONFIRMED', 'UOS_REMOTE_STATE_UNCONFIRMED',
+    'UOS_STORE_NETWORK_FAILED', 'UOS_STORE_HTTP_FAILED', 'UOS_STORE_REQUEST_REJECTED',
+    'UOS_STORE_RESPONSE_INVALID', 'UOS_STORE_CONFIGURATION_INVALID',
+  ]);
+  if (!(error instanceof UosStoreApiError) || !allowedCodes.has(error.code)) {
+    return Object.freeze({ code: 'UOS_AUTH_CHECK_FAILED', reason: '统信登录检查未通过' });
+  }
+  const prefix = `${error.code}: `;
+  const reason = sanitizeIdentityFailureReason(error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '');
+  const callbackShape = sanitizeCallbackShape(error.callbackShape);
+  return Object.freeze({ code: error.code, reason, ...(callbackShape ? { callbackShape } : {}) });
 }
 
 function digest(algorithm, value) {
@@ -256,7 +274,10 @@ class UosStoreApiClient {
     } catch (error) {
       if (error instanceof UosStoreApiError) throw error;
       if (typeof error?.code === 'string' && error.code.startsWith('UOS_')) {
-        throw new UosStoreApiError(error.code, describeIdentityFailure(error), { retryable: error.retryable });
+        throw new UosStoreApiError(error.code, describeIdentityFailure(error), {
+          retryable: error.retryable,
+          callbackShape: error.callbackShape,
+        });
       }
       throw new UosStoreApiError('UOS_AUTH_FAILED', '统信 Identity 未能建立自动化会话', { retryable: true });
     }
@@ -625,6 +646,7 @@ function normalizeRemoteArch(value) {
 }
 
 module.exports = {
+  describeUosAuthenticationFailure,
   UOS_STORE_CONTRACT,
   UosStoreApiClient,
   UosStoreApiError,

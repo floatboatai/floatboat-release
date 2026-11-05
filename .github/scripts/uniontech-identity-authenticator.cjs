@@ -37,6 +37,8 @@ class UnionTechIdentityError extends Error {
     this.name = 'UnionTechIdentityError';
     this.code = code;
     this.retryable = Boolean(options.retryable);
+    const callbackShape = sanitizeCallbackShape(options.callbackShape);
+    if (callbackShape) this.callbackShape = callbackShape;
   }
 }
 
@@ -47,7 +49,44 @@ function describeIdentityFailure(error) {
       !['UOS_AUTH_CONTRACT_UNVERIFIED', 'UOS_AUTH_INTERACTION_REQUIRED'].includes(error.code)) return fallback;
   const prefix = `${error.code}: `;
   const message = error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '';
-  return SAFE_IDENTITY_FAILURE_MESSAGES.has(message) ? message : fallback;
+  return sanitizeIdentityFailureReason(message);
+}
+
+function sanitizeIdentityFailureReason(message) {
+  return SAFE_IDENTITY_FAILURE_MESSAGES.has(message) ? message : '统信 Identity 未能建立自动化会话';
+}
+
+function sanitizeCallbackShape(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const enums = {
+    originClass: ['store_https', 'store_http', 'identity_https', 'identity_http', 'other'],
+    protocolClass: ['https', 'http', 'other'],
+    portClass: ['default', 'nondefault'],
+    pathClass: ['root', 'registerlogin', 'follow', 'other'],
+  };
+  const fields = [...Object.keys(enums), 'hasUserinfo', 'hasFragment'];
+  if (Object.keys(value).length !== fields.length || Object.keys(value).some((key) => !fields.includes(key))) return undefined;
+  if (Object.entries(enums).some(([key, allowed]) => !allowed.includes(value[key]))) return undefined;
+  if (typeof value.hasUserinfo !== 'boolean' || typeof value.hasFragment !== 'boolean') return undefined;
+  return Object.freeze(Object.fromEntries(fields.map((key) => [key, value[key]])));
+}
+
+function classifyCallbackShape(callback) {
+  const origins = {
+    [STORE_ORIGIN]: 'store_https',
+    'http://appstore-dev.uniontech.com': 'store_http',
+    [IDENTITY_ORIGIN]: 'identity_https',
+    'http://login.uniontech.com': 'identity_http',
+  };
+  const paths = { '/': 'root', '/api/oauth2/authorize/registerlogin': 'registerlogin', '/oauth2/follow': 'follow' };
+  return sanitizeCallbackShape({
+    originClass: origins[callback.origin] || 'other',
+    protocolClass: callback.protocol === 'https:' ? 'https' : callback.protocol === 'http:' ? 'http' : 'other',
+    portClass: callback.port ? 'nondefault' : 'default',
+    pathClass: paths[callback.pathname] || 'other',
+    hasUserinfo: Boolean(callback.username || callback.password),
+    hasFragment: Boolean(callback.hash),
+  });
 }
 
 class IdentityCookieJar {
@@ -72,8 +111,8 @@ class IdentityCookieJar {
   }
 }
 
-function interactionRequired(message) {
-  return new UnionTechIdentityError('UOS_AUTH_INTERACTION_REQUIRED', message);
+function interactionRequired(message, options = {}) {
+  return new UnionTechIdentityError('UOS_AUTH_INTERACTION_REQUIRED', message, options);
 }
 
 function validateOAuthLoginUrl(rawUrl) {
@@ -167,28 +206,30 @@ function validateCallback(rawRedirect, expectedState) {
   } catch {
     throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳地址无效');
   }
+  const callbackShape = classifyCallbackShape(callback);
+  const invalidCallback = (message) => new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', message, { callbackShape });
   if (callback.username || callback.password) {
-    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳包含用户信息');
+    throw invalidCallback('统信 OAuth 回跳包含用户信息');
   }
   if (callback.hash) {
-    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳包含 fragment');
+    throw invalidCallback('统信 OAuth 回跳包含 fragment');
   }
   if (callback.origin === IDENTITY_ORIGIN && callback.pathname === '/api/oauth2/authorize/registerlogin') {
-    throw interactionRequired('统信 OAuth 返回额外登录中转，需要人工处理');
+    throw interactionRequired('统信 OAuth 返回额外登录中转，需要人工处理', { callbackShape });
   }
   // 回跳仅提供 code/state，不访问该 URL；兑换始终走固定 HTTPS 商店 API。
   // 先匹配原始 origin，避免修改协议时吞掉原本不受信的显式端口。
   if (callback.origin === 'http://appstore-dev.uniontech.com') callback.protocol = 'https:';
   if (callback.origin !== STORE_ORIGIN) {
-    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳不属于固定开发者平台');
+    throw invalidCallback('统信 OAuth 回跳不属于固定开发者平台');
   }
   if (callback.pathname !== '/') {
-    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳路径不是商店根路径');
+    throw invalidCallback('统信 OAuth 回跳路径不是商店根路径');
   }
   const codes = callback.searchParams.getAll('code');
   const states = callback.searchParams.getAll('state');
   if (codes.length !== 1 || states.length !== 1 || !codes[0] || states[0] !== expectedState) {
-    throw new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳 code/state 无法确认');
+    throw invalidCallback('统信 OAuth 回跳 code/state 无法确认');
   }
   return Object.freeze({ code: codes[0], state: states[0] });
 }
@@ -307,6 +348,8 @@ module.exports = {
   UnionTechIdentityError,
   authenticateUnionTechIdentity,
   describeIdentityFailure,
+  sanitizeIdentityFailureReason,
+  sanitizeCallbackShape,
   normalizeIdentityEnvelope,
   validateCallback,
   validateOAuthLoginUrl,
