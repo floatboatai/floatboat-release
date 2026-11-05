@@ -1,257 +1,30 @@
-name: Windows installer comparison
-
-run-name: Windows installer comparison · ${{ inputs.old_run_id }} → ${{ inputs.candidate_run_id }}
-
+name: Windows upgrade guard probe
+run-name: Windows upgrade guard probe
 on:
   workflow_dispatch:
-    inputs:
-      old_run_id:
-        description: "Successful RC7 release run containing the Windows artifact"
-        required: true
-        default: "41835195141"
-        type: string
-      candidate_run_id:
-        description: "Successful candidate RC release run containing the Windows artifact"
-        required: true
-        type: string
-      source_ref:
-        description: "Immutable 40-character source SHA used to build the candidate"
-        required: true
-        type: string
-
 permissions:
   contents: read
-  actions: read
-
 jobs:
-  compare-windows:
-    name: Compare signed Windows installers
+  probe:
+    name: Verify external hardlink guard
     runs-on: windows-2022
-    timeout-minutes: 100
-    defaults:
-      run:
-        shell: pwsh
+    timeout-minutes: 10
     steps:
-      - name: Validate runs, artifacts, and source provenance
-        id: provenance
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          GH_API_URL: ${{ github.api_url }}
-          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
-          OLD_RUN_ID: ${{ inputs.old_run_id }}
-          CANDIDATE_RUN_ID: ${{ inputs.candidate_run_id }}
-          SOURCE_REF: ${{ inputs.source_ref }}
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $evidence = Join-Path $env:GITHUB_WORKSPACE 'evidence'
-          $metadata = Join-Path $evidence 'metadata'
-          $logs = Join-Path $evidence 'release-build-logs'
-          [IO.Directory]::CreateDirectory($metadata) | Out-Null
-          [IO.Directory]::CreateDirectory($logs) | Out-Null
-          $encoding = [Text.UTF8Encoding]::new($false)
-          function Save-Json([string]$Path, $Value) {
-            [IO.File]::WriteAllText($Path, (ConvertTo-Json -InputObject $Value -Depth 64), $encoding)
-          }
-          function Assert([bool]$Condition, [string]$Message) {
-            if (-not $Condition) { throw $Message }
-          }
-          function Read-Api([string]$Path) {
-            Invoke-RestMethod -Uri ($env:GH_API_URL.TrimEnd('/') + $Path) -Headers @{
-              Authorization = "Bearer $env:GH_TOKEN"
-              Accept = 'application/vnd.github+json'
-              'X-GitHub-Api-Version' = '2022-11-28'
-            }
-          }
-          function Read-Pages([string]$Path, [string]$Property) {
-            $separator = if ($Path.Contains('?')) { '&' } else { '?' }
-            for ($page = 1; $page -le 20; $page++) {
-              $response = Read-Api ($Path + $separator + "per_page=100&page=$page")
-              $items = @($response.$Property)
-              foreach ($item in $items) { $item }
-              if ($items.Count -lt 100) { return }
-            }
-            throw "Pagination limit exceeded for $Path"
-          }
-          function Read-StepMessages([string[]]$Lines, [string]$Step) {
-            foreach ($line in $Lines) {
-              $parts = $line -split "`t", 3
-              if ($parts.Count -eq 3 -and $parts[1] -ceq $Step -and $parts[2] -match '^\S+\s+(?<message>.*)$') {
-                $Matches.message.Trim()
-              }
-            }
-          }
-          function Resolve-Run([string]$Label, [string]$RunId) {
-            $run = Read-Api "/repos/$env:GH_REPO/actions/runs/$RunId"
-            Save-Json (Join-Path $metadata "$Label-run.json") $run
-            Assert ($run.id.ToString() -ceq $RunId) 'The API returned a different run.'
-            Assert ($run.status -ceq 'completed' -and $run.conclusion -ceq 'success') "$Label release run must have completed successfully."
-            Assert ($run.path -ceq '.github/workflows/release.yml') "$Label must be a release.yml run."
-            $artifacts = @(Read-Pages "/repos/$env:GH_REPO/actions/runs/$RunId/artifacts" 'artifacts')
-            Save-Json (Join-Path $metadata "$Label-artifacts.json") $artifacts
-            $selected = @($artifacts | Where-Object { $_.name -ceq 'desktop-windows-x64-floatboat' })
-            Assert ($selected.Count -eq 1) "$Label must contain exactly one Floatboat Windows artifact."
-            $artifact = $selected[0]
-            Assert (-not $artifact.expired -and [DateTimeOffset]::Parse($artifact.expires_at) -gt [DateTimeOffset]::UtcNow) "$Label Windows artifact has expired."
-            Assert ($artifact.size_in_bytes -gt 0 -and $artifact.digest -match '^sha256:[0-9a-f]{64}$') "$Label artifact metadata is incomplete."
-            $jobs = @(Read-Pages "/repos/$env:GH_REPO/actions/runs/$RunId/jobs?filter=all" 'jobs')
-            Save-Json (Join-Path $metadata "$Label-jobs.json") $jobs
-            $buildJobs = @($jobs | Where-Object { $_.name -ceq 'Build Floatboat Windows (x64)' -and $_.conclusion -ceq 'success' })
-            Assert ($buildJobs.Count -gt 0) "$Label has no successful Floatboat Windows build job."
-            $bindings = [Collections.Generic.List[object]]::new()
-            foreach ($job in $buildJobs) {
-              foreach ($stepName in @('Checkout source repo', 'Build and package Floatboat (Windows x64)', 'Upload Windows artifacts')) {
-                Assert (@($job.steps | Where-Object { $_.name -ceq $stepName -and $_.conclusion -ceq 'success' }).Count -eq 1) "$Label job $($job.id) lacks a successful $stepName step."
-              }
-              $jobLines = @(& gh run view $RunId --repo $env:GH_REPO --job $job.id --log 2>&1 | ForEach-Object { $_.ToString() })
-              $logExit = $LASTEXITCODE
-              [IO.File]::WriteAllLines((Join-Path $logs "$Label-job-$($job.id).log"), $jobLines, $encoding)
-              Assert ($logExit -eq 0) "Cannot retrieve $Label Windows build logs."
-              $upload = @(Read-StepMessages $jobLines 'Upload Windows artifacts')
-              $artifactPattern = '^Artifact desktop-windows-x64-floatboat\.zip successfully finalized\. Artifact ID ' + [regex]::Escape($artifact.id.ToString()) + '$'
-              if (@($upload | Where-Object { $_ -match $artifactPattern }).Count -ne 1) { continue }
-              $checkout = @(Read-StepMessages $jobLines 'Checkout source repo')
-              $repositories = @($checkout | ForEach-Object { if ($_ -match '^repository:\s*(\S+)$') { $Matches[1] } } | Select-Object -Unique)
-              Assert ($repositories.Count -eq 1 -and $repositories[0] -ieq $env:SOURCE_REPO) "$Label source checkout repository does not match SOURCE_REPO."
-              $actualHeads = [Collections.Generic.List[string]]::new()
-              for ($index = 0; $index -lt $checkout.Count - 1; $index++) {
-                if ($checkout[$index] -match '^\[command\].*\slog -1 --format=%H$' -and $checkout[$index + 1] -match '^[0-9a-fA-F]{40}$') {
-                  $actualHeads.Add($checkout[$index + 1].ToLowerInvariant())
-                }
-              }
-              $resolvedHeads = @($actualHeads.ToArray() | Select-Object -Unique)
-              Assert ($resolvedHeads.Count -eq 1) "$Label lacks an unambiguous actual source checkout SHA."
-              $build = @(Read-StepMessages $jobLines 'Build and package Floatboat (Windows x64)')
-              $identityLines = @($build | Where-Object { $_ -match '^\[Package\] Build source identity: .+ \(head=[0-9a-fA-F]{40}, dirty=(true|false)\)$' })
-              Assert ($identityLines.Count -gt 0) "$Label lacks the packaging source-identity log."
-              foreach ($line in $identityLines) {
-                Assert ($line -match '\(head=([0-9a-fA-F]{40}), dirty=(true|false)\)$') 'Cannot parse packaging identity.'
-                Assert ($Matches[1].ToLowerInvariant() -ceq $resolvedHeads[0]) "$Label packaging source HEAD differs from checkout."
-              }
-              $bindings.Add([pscustomobject]@{
-                runId = $RunId; jobId = $job.id; jobName = $job.name; artifactId = $artifact.id
-                artifactName = $artifact.name; artifactDigest = $artifact.digest; sourceRepository = $repositories[0]
-                sourceSha = $resolvedHeads[0]; packagingIdentityLines = $identityLines
-                checkoutEvidence = @($checkout | Where-Object { $_ -match '^repository:|^ref:|^\[command\].*\slog -1 --format=%H$|^[0-9a-fA-F]{40}$' })
-                uploadEvidence = @($upload | Where-Object { $_ -match $artifactPattern })
-                releaseWorkflowSha = $run.head_sha
-                note = 'Source HEAD is established by checkout and packaging logs from the same job that uploaded this artifact ID. Version injection can make the release working tree dirty; the release workflow SHA is not the source SHA.'
-              })
-            }
-            Assert ($bindings.Count -eq 1) "$Label artifact cannot be bound to exactly one successful Windows build job."
-            Save-Json (Join-Path $metadata "$Label-source-binding.json") $bindings[0]
-            return $bindings[0]
-          }
-          try {
-            foreach ($runId in @($env:OLD_RUN_ID, $env:CANDIDATE_RUN_ID)) {
-              Assert ($runId -match '^[1-9][0-9]{0,19}$') 'Run IDs must be positive decimal integers.'
-            }
-            Assert ($env:OLD_RUN_ID -cne $env:CANDIDATE_RUN_ID) 'Baseline and candidate runs must be different.'
-            Assert ($env:SOURCE_REF -match '^[0-9a-fA-F]{40}$') 'source_ref must be an immutable 40-character source SHA.'
-            Assert ($env:SOURCE_REPO -match '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') 'Configure the existing SOURCE_REPO repository variable.'
-            $baseline = Resolve-Run 'baseline' $env:OLD_RUN_ID
-            $candidate = Resolve-Run 'candidate' $env:CANDIDATE_RUN_ID
-            $sourceSha = $env:SOURCE_REF.ToLowerInvariant()
-            Assert ($candidate.sourceSha -ceq $sourceSha) 'Candidate Windows artifact was built from a different source SHA.'
-            Save-Json (Join-Path $metadata 'comparison-inputs.json') @{
-              sourceRepository = $env:SOURCE_REPO; sourceSha = $sourceSha; baseline = $baseline; candidate = $candidate
-              comparisonRunId = $env:GITHUB_RUN_ID; comparisonRunAttempt = $env:GITHUB_RUN_ATTEMPT
-            }
-            "source_sha=$sourceSha" >> $env:GITHUB_OUTPUT
-            "baseline_artifact_id=$($baseline.artifactId)" >> $env:GITHUB_OUTPUT
-            "candidate_artifact_id=$($candidate.artifactId)" >> $env:GITHUB_OUTPUT
-          } catch {
-            Save-Json (Join-Path $metadata 'validation-failure.json') @{ passed = $false; error = $_.Exception.Message }
-            throw
-          }
-
-      - name: Checkout the verified source commit
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          repository: ${{ vars.SOURCE_REPO }}
-          token: ${{ secrets.SOURCE_REPO_PAT }}
-          ref: ${{ steps.provenance.outputs.source_sha }}
-          path: source
           persist-credentials: false
-          fetch-depth: 1
-          submodules: false
-          lfs: false
-          show-progress: false
-
-      - name: Verify checked-out comparison script
-        env:
-          EXPECTED_SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
-          SOURCE_REPO: ${{ vars.SOURCE_REPO }}
+      - name: Run native file guard experiment
+        shell: powershell
         run: |
-          Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
-          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
-          $actual = (& git -C $source rev-parse HEAD).Trim().ToLowerInvariant()
-          if ($LASTEXITCODE -ne 0 -or $actual -cne $env:EXPECTED_SOURCE_SHA) { throw 'Checked-out source SHA differs from the verified candidate source.' }
-          $script = Join-Path $source 'tests/fixtures/windows-installer-upgrade-main/compare-release.ps1'
-          if (-not [IO.File]::Exists($script)) { throw 'The verified source commit does not contain compare-release.ps1.' }
-          @{
-            repository = $env:SOURCE_REPO; requestedSha = $env:EXPECTED_SOURCE_SHA; actualSha = $actual
-            scriptPath = 'tests/fixtures/windows-installer-upgrade-main/compare-release.ps1'
-            scriptSha256 = (Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash
-          } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'evidence/metadata/source-checkout.json') -Encoding utf8
-
-      - name: Download the verified baseline Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.old_run_id }}
-          artifact-ids: ${{ steps.provenance.outputs.baseline_artifact_id }}
-          path: installers/baseline
-
-      - name: Download the verified candidate Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.candidate_run_id }}
-          artifact-ids: ${{ steps.provenance.outputs.candidate_artifact_id }}
-          path: installers/candidate
-
-      - name: Compare signed Windows installers on this runner
-        run: |
-          Set-StrictMode -Version Latest
-          $ErrorActionPreference = 'Stop'
-          $evidence = Join-Path $env:GITHUB_WORKSPACE 'evidence'
-          $script = Join-Path $env:GITHUB_WORKSPACE 'source/tests/fixtures/windows-installer-upgrade-main/compare-release.ps1'
-          $baseline = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'installers/baseline') -File -Recurse -Filter 'Floatboat-Setup-*-x64.exe')
-          $candidate = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'installers/candidate') -File -Recurse -Filter 'Floatboat-Setup-*-x64.exe')
-          if ($baseline.Count -ne 1 -or $candidate.Count -ne 1) { throw 'Each Windows artifact must contain exactly one Floatboat x64 installer.' }
-          $output = Join-Path $evidence 'comparison'
-          $exitCode = $null
-          Start-Transcript -LiteralPath (Join-Path $evidence 'comparison-transcript.txt') -Force
-          try {
-            & pwsh -NoLogo -NoProfile -NonInteractive -File $script -BaselineInstaller $baseline[0].FullName -CandidateInstaller $candidate[0].FullName -OutputDirectory $output
-            $exitCode = $LASTEXITCODE
-            if ($exitCode -ne 0) { throw "Signed-installer comparison failed with exit code $exitCode." }
-            $reportPath = Join-Path $output 'report.json'
-            if (-not [IO.File]::Exists($reportPath)) { throw 'The comparison did not produce report.json.' }
-            $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
-            if ($report.passed -isnot [bool] -or -not $report.passed -or @($report.measurements).Count -ne 6) { throw 'The comparison report is not a complete passing result.' }
-            foreach ($mode in @('baseline', 'candidate')) {
-              $samples = @($report.measurements | Where-Object { $_.mode -ceq $mode })
-              $rounds = ($samples | ForEach-Object { [int]$_.round } | Sort-Object) -join ','
-              if ($samples.Count -ne 3 -or $rounds -cne '1,2,3') { throw "The report does not contain three complete $mode samples." }
-            }
-            'Six signed-release comparison samples passed.' >> $env:GITHUB_STEP_SUMMARY
-          } finally {
-            @{ exitCode = $exitCode; baselinePath = $baseline[0].FullName; candidatePath = $candidate[0].FullName } |
-              ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'comparison-invocation.json') -Encoding utf8
-            Stop-Transcript
-          }
-
-      - name: Upload comparison evidence
+          $output = Join-Path $env:GITHUB_WORKSPACE 'evidence'
+          & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File './scripts/diagnostics/windows-upgrade-guard-probe.ps1' -OutputDirectory $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload native probe evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-upgrade-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          name: windows-upgrade-guard-probe-${{ github.run_id }}
           path: evidence/
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
