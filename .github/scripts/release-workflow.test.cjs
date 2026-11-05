@@ -464,3 +464,49 @@ test('UOS复用输入在源码checkout之前拒绝非送审或混合平台范围
   }
   assert.equal(spawnSync('bash', ['-c', script], { env: { ...base, REUSE_UOS_RUN_ID: '', UPLOAD_UOS_STORE: 'false' } }).status, 0);
 });
+
+test('工作台上传只在完整送审门禁后准备CDN，默认Actions路径保留', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  assert.match(workflow, /uos_upload_location:[\s\S]*?default: "actions"[\s\S]*?options:\n\s+- "actions"\n\s+- "workbench"/);
+  const publish = readNamedJob(workflow, 'publish-uos-store');
+  const stage = readNamedJob(workflow, 'stage-uos-review');
+  assert.match(publish, /inputs\.uos_upload_location != 'workbench'/);
+  assert.match(readNamedJob(workflow, 'publish-linux-uos'), /inputs\.uos_upload_location != 'workbench'/);
+  assert.match(stage, /inputs\.uos_upload_location == 'workbench'/);
+  assert.match(stage, /needs: \[prepare, validate-uos-publication\]/);
+  assert.match(stage, /!cancelled\(\)/);
+  assert.match(stage, /github\.ref == 'refs\/heads\/main'/);
+  assert.match(stage, /inputs\.upload_uos_store == true/);
+  assert.match(stage, /needs\.validate-uos-publication\.result == 'success'/);
+  assert.doesNotMatch(stage, /UOS_STORE_USERNAME|UOS_STORE_PASSWORD|uos-store-publisher|installer-urls|INSTALLER_URLS_API|pnpm.*build|SOURCE_REPO_PAT/);
+  assert.deepEqual([...stage.matchAll(/secrets\.([A-Z_]+)/gu)].map((match) => match[1]), ['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY']);
+});
+
+test('CDN任务先无Secret重验当前run清单，后配置AWS并发布精确身份的下载索引', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8'); const stage = readNamedJob(workflow, 'stage-uos-review');
+  assert.match(stage, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(stage, /persist-credentials: false/);
+  assert.match(stage, /UOS_STAGE_MANIFEST_SHA256: \$\{\{ needs\.validate-uos-publication\.outputs\.manifest_sha256 \}\}/);
+  assert.match(stage, /uos-publication-manifest-\$\{\{ needs\.validate-uos-publication\.outputs\.package_version \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(stage, /uos-review-downloads-\$\{\{ needs\.validate-uos-publication\.outputs\.package_version \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(stage, /path: uos-review-downloads\.json/);
+  assert.ok(stage.indexOf('uos-stage.cjs verify') < stage.indexOf('aws-actions/configure-aws-credentials@'));
+  assert.ok(stage.indexOf('aws-actions/configure-aws-credentials@') < stage.indexOf('uos-stage.cjs publish'));
+  assert.doesNotMatch(stage, /run-id:|repository:/);
+});
+
+test('工作台位置不能绕过送审开关、main及既有包范围检查', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8'); const step = readNamedStep(workflow, 'Validate UOS Store dispatch');
+  const marker = '        run: |\n';
+  const script = step.slice(step.indexOf(marker) + marker.length).split('\n').map((line) => line.replace(/^          /, '')).join('\n');
+  const base = { ...process.env, DISPATCH_ID: '', UPLOAD_UOS_STORE: 'true', REUSE_UOS_RUN_ID: '', UOS_UPLOAD_LOCATION: 'workbench',
+    REPO_REF: 'a'.repeat(40), VERSION: '0.6.3-rc.6', PLATFORMS: 'linux', LINUX_PACKAGE: 'uos-floatboat',
+    DESKTOP_VARIANT: 'floatboat', IS_RC: 'true', NOTIFY_ONLY: 'false', BUILD_PROFILE: 'release', PACKAGE_SET: 'app',
+    SKIP_RELEASE_NOTES: 'true', WORKFLOW_REF: 'refs/heads/main' };
+  assert.equal(spawnSync('bash', ['-c', script], { env: base }).status, 0);
+  for (const override of [{ UPLOAD_UOS_STORE: 'false' }, { UOS_UPLOAD_LOCATION: 'other' }, { WORKFLOW_REF: 'refs/heads/feature' },
+    { LINUX_PACKAGE: 'deb-and-uos' }, { REPO_REF: 'main' }, { BUILD_PROFILE: 'test' }]) {
+    assert.notEqual(spawnSync('bash', ['-c', script], { env: { ...base, ...override } }).status, 0, JSON.stringify(override));
+  }
+  assert.equal(spawnSync('bash', ['-c', script], { env: { ...base, UOS_UPLOAD_LOCATION: 'actions' } }).status, 0);
+});

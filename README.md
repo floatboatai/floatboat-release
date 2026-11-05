@@ -84,6 +84,8 @@ Playwright 使用 `.github/scripts/uos-browser-runtime` 中固定版本及锁文
 
 `upload_uos_store=true` 登录成功后会继续上传双架构包并提交审核。首次真实运行前可按团队流程配置 Environment required reviewers，由发布负责人核对版本与无凭证校验 Job 后批准；本地 mock 测试证明协议形状、幂等状态机和脱敏边界，不替代真实账号资格与平台联调。
 
+内部 UOS 工作台使用 `uos_upload_location=workbench`：云端构建或复用双包后，只进行校验并发布到 `https://release.aoe.chat/uos/review/`，不进入统信账号任务、不修改官网正式下载指针。包、清单和下载索引均按版本、来源 SHA 与完整内容 SHA 寻址；已有对象只有摘要和大小相同时才能复用。CDN 完整下载回验后，输出 `uos-review-downloads-<UOS版本>-<run>-<attempt>` 制品。工作台所在机器核验并下载双包，由用户在官方页面登录一次，再从本机上传、提交和回读；本机不保存密码，结束时清理内存会话。默认 `uos_upload_location=actions` 保留受保护 Actions 发布方式。
+
 登录联调使用独立的 **UOS Authentication Check**（`uos-auth-check.yml`），手动从 `main` 发起。它使用与送审相同的网页登录适配器、受保护 Environment 与互斥组，只验证开发者会话和 `com.floatboat.desktop` 的应用身份，不构建、下载、上传或提交安装包。先通过真实认证检查，再发起完整送审；本地离线测试不代表真实账号已登录。失败只输出固定错误码、白名单静态原因和受限分类，不输出实际 URL、Cookie、令牌、页面内容、Playwright 原始异常或 code/state 值。
 
 网页契约依据（2026-11-05）：[统信登录页面脚本](https://login.uniontech.com/main-es2015.c2432283df9f5420074a.js) 的 `toLogin`、`oauth2/follow` 与 `registerlogin`，以及[官方中文文案](https://login.uniontech.com/assets/i18n/zh.json)。固定 follow 页的“我已了解，立即登录”仅关闭社群宣传提示，允许点击一次；“授权并登录”等账号授权操作不自动确认。离线浏览器回归只使用假页面和假凭证，通过 `UOS_BROWSER_OFFLINE_TEST=true` 显式运行 `uniontech-browser-authenticator.integration.test.cjs`，不访问真实统信账号。
