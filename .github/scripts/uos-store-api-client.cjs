@@ -5,7 +5,8 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
-const { describeIdentityFailure, sanitizeCallbackShape, sanitizeIdentityFailureReason } = require('./uniontech-identity-authenticator.cjs');
+const { UnionTechIdentityError, sanitizeCallbackShape, sanitizeIdentityFailureReason } = require('./uniontech-identity-authenticator.cjs');
+const { BROWSER_FAILURE_MESSAGES } = require('./uniontech-browser-authenticator.cjs');
 
 const UOS_STORE_CONTRACT = Object.freeze({
   basePath: '/devprod-api',
@@ -57,6 +58,10 @@ class UosStoreApiError extends Error {
   }
 }
 
+function sanitizeAuthenticationReason(message) {
+  return BROWSER_FAILURE_MESSAGES.includes(message) ? message : sanitizeIdentityFailureReason(message);
+}
+
 function describeUosAuthenticationFailure(error) {
   const allowedCodes = new Set([
     'UOS_STORE_CREDENTIALS_MISSING', 'UOS_AUTH_CONTRACT_UNVERIFIED', 'UOS_AUTH_INTERACTION_REQUIRED',
@@ -68,7 +73,7 @@ function describeUosAuthenticationFailure(error) {
     return Object.freeze({ code: 'UOS_AUTH_CHECK_FAILED', reason: '统信登录检查未通过' });
   }
   const prefix = `${error.code}: `;
-  const reason = sanitizeIdentityFailureReason(error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '');
+  const reason = sanitizeAuthenticationReason(error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '');
   const callbackShape = sanitizeCallbackShape(error.callbackShape);
   return Object.freeze({ code: error.code, reason, ...(callbackShape ? { callbackShape } : {}) });
 }
@@ -274,7 +279,10 @@ class UosStoreApiClient {
     } catch (error) {
       if (error instanceof UosStoreApiError) throw error;
       if (typeof error?.code === 'string' && error.code.startsWith('UOS_')) {
-        throw new UosStoreApiError(error.code, describeIdentityFailure(error), {
+        const prefix = `${error.code}: `;
+        const message = error instanceof UnionTechIdentityError && error.message.startsWith(prefix)
+          ? error.message.slice(prefix.length) : '';
+        throw new UosStoreApiError(error.code, sanitizeAuthenticationReason(message), {
           retryable: error.retryable,
           callbackShape: error.callbackShape,
         });

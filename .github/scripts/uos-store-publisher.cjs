@@ -13,7 +13,7 @@ const {
   normalizeRemoteArch,
   redactMessage,
 } = require('./uos-store-api-client.cjs');
-const { authenticateUnionTechIdentity } = require('./uniontech-identity-authenticator.cjs');
+const { authenticateUnionTechBrowser } = require('./uniontech-browser-authenticator.cjs');
 
 const APP_ID = 'com.floatboat.desktop';
 const RECEIPT_SCHEMA_VERSION = 1;
@@ -286,7 +286,7 @@ async function main(argv) {
     });
     const client = new UosStoreApiClient({
       baseUrl: 'https://appstore-dev.uniontech.com',
-      identityAuthenticator: authenticateUnionTechIdentity,
+      identityAuthenticator: authenticateUnionTechBrowser,
     });
     receipt = await publishUosStore({
       manifest,

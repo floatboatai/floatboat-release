@@ -74,10 +74,14 @@ Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使
 - Environment Secrets 只配置 `UOS_STORE_USERNAME` 与 `UOS_STORE_PASSWORD`，不要把明文写入 workflow、仓库变量、安装包、日志或制品。
 - 可按需要为 Environment 配置 required reviewers，审批通过前 Job 无法读取 Secrets。
 
-发布器按统信公开前端的当前契约在内存中完成 RSA 加密与 OAuth 登录，再用一次性 `code/state` 建立开发者平台短期会话；不会把 Identity Cookie、商店 Token 或账号密码写入磁盘、日志、安装包与回执。遇到 CAPTCHA、MFA、账号绑定、授权确认、身份选择或 SSO 契约变化时会失败关闭，不会绕过交互认证。
+发布器在受保护 Actions Job 内启动临时 Chromium，填写统信官方密码登录页并点击一次登录，由官网脚本执行加密、会话及后续中转；只有浏览器最终到达固定商店回跳且 `state` 匹配，才提取一次性 `code/state`，交给固定 HTTPS 商店接口建立短期会话。不会再把密码接口返回的第一个 `redirect` 当作最终商店回跳。浏览器不导出 Cookie 或登录状态，临时目录仅位于 Linux 内存文件系统，退出时关闭并删除；密码、Cookie、Token 不进入日志、安装包或回执。遇到 CAPTCHA、MFA、账号绑定、撤销注销、授权确认或其他人工提示时停止，不自动点击这些页面。
+
+Playwright 使用 `.github/scripts/uos-browser-runtime` 中固定版本及锁文件，依赖和 Chromium 在注入 Secret 前安装；浏览器子进程不继承 UOS 凭证，认证步骤关闭调试日志，不启用截图、trace、video、HAR、持久 profile 或跨运行缓存。原有 API 模拟登录代码仅保留作协议测试，生产认证统一使用网页登录适配器。
 
 `upload_uos_store=true` 登录成功后会继续上传双架构包并提交审核。首次真实运行前可按团队流程配置 Environment required reviewers，由发布负责人核对版本与无凭证校验 Job 后批准；本地 mock 测试证明协议形状、幂等状态机和脱敏边界，不替代真实账号资格与平台联调。
 
-登录联调使用独立的 **UOS Authentication Check**（`uos-auth-check.yml`），手动从 `main` 发起。它使用相同受保护 Environment 与互斥组，只验证开发者会话和 `com.floatboat.desktop` 的应用身份，不构建、下载、上传或提交安装包。凭证和会话仅存在于该 Job 内存中，不生成认证 artifact/cache；失败只输出固定错误码、白名单静态原因，以及回跳的协议/来源/路径类别和布尔标志，不输出实际 URL、Cookie、令牌或 code/state 值。
+登录联调使用独立的 **UOS Authentication Check**（`uos-auth-check.yml`），手动从 `main` 发起。它使用与送审相同的网页登录适配器、受保护 Environment 与互斥组，只验证开发者会话和 `com.floatboat.desktop` 的应用身份，不构建、下载、上传或提交安装包。先通过真实认证检查，再发起完整送审；本地离线测试不代表真实账号已登录。失败只输出固定错误码、白名单静态原因和受限分类，不输出实际 URL、Cookie、令牌、页面内容、Playwright 原始异常或 code/state 值。
+
+网页契约依据（2026-11-05）：[统信登录页面脚本](https://login.uniontech.com/main-es2015.c2432283df9f5420074a.js) 的 `toLogin`、`oauth2/follow` 与 `registerlogin`，以及[官方中文文案](https://login.uniontech.com/assets/i18n/zh.json)。固定 follow 页的“我已了解，立即登录”仅关闭社群宣传提示，允许点击一次；“授权并登录”等账号授权操作不自动确认。离线浏览器回归只使用假页面和假凭证，通过 `UOS_BROWSER_OFFLINE_TEST=true` 显式运行 `uniontech-browser-authenticator.integration.test.cjs`，不访问真实统信账号。
 
 UOS 包版本遵循四段规则：稳定来源 `X.Y.Z` 生成 `X.Y.Z.0`，RC 来源 `X.Y.Z-rc.N` 生成 `X.Y.Z.N`。发布器会在上传前读取商店版本历史，拒绝低于商店最高版本的候选；同版本必须通过 amd64/arm64 SHA-256 内容一致性检查后才允许幂等恢复或提交审核。
