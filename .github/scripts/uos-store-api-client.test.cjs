@@ -9,6 +9,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { UnionTechIdentityError } = require('./uniontech-identity-authenticator.cjs');
 
 const {
   UOS_STORE_CONTRACT,
@@ -24,6 +25,36 @@ async function readBody(request) {
   for await (const chunk of request) chunks.push(chunk);
   return Buffer.concat(chunks);
 }
+
+test('Identity 失败保留固定契约原因，同时拒绝输出任意异常内容', async () => {
+  for (const [identityError, expectedMessage] of [
+    [new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 Identity RSA 加密失败'), '统信 Identity RSA 加密失败'],
+    [new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', '统信 OAuth 回跳 code/state 无法确认'), '统信 OAuth 回跳 code/state 无法确认'],
+    [new UnionTechIdentityError('UOS_AUTH_CONTRACT_UNVERIFIED', 'release-user release-password token=private-token'), '统信 Identity 未能建立自动化会话'],
+    [Object.assign(new Error('release-user release-password token=private-token'), { code: 'UOS_AUTH_CONTRACT_UNVERIFIED' }), '统信 Identity 未能建立自动化会话'],
+  ]) {
+    const requests = [];
+    const client = new UosStoreApiClient({
+      baseUrl: 'https://appstore-dev.uniontech.com',
+      identityAuthenticator: async () => { throw identityError; },
+      fetchImpl: async (url, options) => {
+        requests.push({ url: String(url), method: options.method });
+        return new Response(JSON.stringify({ status: 200, datas: 'https://login.uniontech.com/oauth2/authorize?state=private-state' }));
+      },
+    });
+    await assert.rejects(
+      () => client.authenticate({ username: 'release-user', password: 'release-password' }),
+      (error) => {
+        assert.equal(error.code, 'UOS_AUTH_CONTRACT_UNVERIFIED');
+        assert.equal(error.message, `UOS_AUTH_CONTRACT_UNVERIFIED: ${expectedMessage}`);
+        assert.doesNotMatch(error.message, /release-user|release-password|private-token|private-state/u);
+        return true;
+      },
+    );
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].method, 'GET');
+  }
+});
 
 async function startServer(handler) {
   const server = http.createServer((request, response) => void handler(request, response));

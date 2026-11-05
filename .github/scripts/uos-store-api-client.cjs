@@ -5,6 +5,7 @@
 
 const crypto = require('node:crypto');
 const fs = require('node:fs');
+const { describeIdentityFailure } = require('./uniontech-identity-authenticator.cjs');
 
 const UOS_STORE_CONTRACT = Object.freeze({
   basePath: '/devprod-api',
@@ -255,7 +256,7 @@ class UosStoreApiClient {
     } catch (error) {
       if (error instanceof UosStoreApiError) throw error;
       if (typeof error?.code === 'string' && error.code.startsWith('UOS_')) {
-        throw new UosStoreApiError(error.code, '统信 Identity 未能建立自动化会话', { retryable: error.retryable });
+        throw new UosStoreApiError(error.code, describeIdentityFailure(error), { retryable: error.retryable });
       }
       throw new UosStoreApiError('UOS_AUTH_FAILED', '统信 Identity 未能建立自动化会话', { retryable: true });
     }

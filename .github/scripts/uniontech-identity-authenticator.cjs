@@ -9,6 +9,23 @@ const IDENTITY_ORIGIN = 'https://login.uniontech.com';
 const STORE_ORIGIN = 'https://appstore-dev.uniontech.com';
 const REQUIRED_OAUTH_FIELDS = Object.freeze(['client_id', 'redirect_uri', 'response_type', 'scope', 'state']);
 const RESERVED_LOGIN_FIELDS = new Set(['account', 'password', 'token', 'validate', 'user_oauth']);
+const SAFE_IDENTITY_FAILURE_MESSAGES = new Set([
+  '统信 OAuth 登录地址无效',
+  '统信 OAuth 登录入口不符合受信契约',
+  '统信 OAuth response_type 不是 code',
+  '统信 OAuth redirect_uri 无效',
+  '统信 OAuth redirect_uri 不是固定开发者平台',
+  '统信 Identity 未返回可用 RSA 公钥',
+  '统信 Identity RSA 公钥无效',
+  '统信 Identity RSA 加密失败',
+  '统信 Identity 未启用受支持的 RSA 登录',
+  '统信 OAuth 初始化响应无效',
+  '统信 Identity 登录响应无效',
+  '统信 OAuth 未返回回跳地址',
+  '统信 OAuth 回跳地址无效',
+  '统信 OAuth 回跳不属于固定开发者平台',
+  '统信 OAuth 回跳 code/state 无法确认',
+]);
 
 class UnionTechIdentityError extends Error {
   constructor(code, message, options = {}) {
@@ -17,6 +34,15 @@ class UnionTechIdentityError extends Error {
     this.code = code;
     this.retryable = Boolean(options.retryable);
   }
+}
+
+function describeIdentityFailure(error) {
+  // 只输出源码声明的静态原因，第三方响应和任意异常文本继续隐藏。
+  const fallback = '统信 Identity 未能建立自动化会话';
+  if (!(error instanceof UnionTechIdentityError) || error.code !== 'UOS_AUTH_CONTRACT_UNVERIFIED') return fallback;
+  const prefix = `${error.code}: `;
+  const message = error.message.startsWith(prefix) ? error.message.slice(prefix.length) : '';
+  return SAFE_IDENTITY_FAILURE_MESSAGES.has(message) ? message : fallback;
 }
 
 class IdentityCookieJar {
@@ -260,6 +286,7 @@ module.exports = {
   STORE_ORIGIN,
   UnionTechIdentityError,
   authenticateUnionTechIdentity,
+  describeIdentityFailure,
   normalizeIdentityEnvelope,
   validateCallback,
   validateOAuthLoginUrl,
