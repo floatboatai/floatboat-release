@@ -136,6 +136,7 @@ jobs:
       desktop_matrix: ${{ steps.release_scope.outputs.desktop_matrix }}
       linux_matrix: ${{ steps.release_scope.outputs.linux_matrix }}
       release_tag: ${{ steps.release_scope.outputs.release_tag }}
+      is_test: ${{ steps.release_scope.outputs.is_test }}
       source_sha: ${{ steps.source.outputs.source_sha }}
       source_release_tag: ${{ steps.source.outputs.release_tag }}
       floatboat_version: ${{ steps.desktop_versions.outputs.floatboat_version }}
@@ -160,6 +161,18 @@ jobs:
           INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
         run: |
           set -euo pipefail
+
+          is_test=false
+          if [[ "$INPUT_VERSION" =~ -test\.[0-9]+$ ]]; then
+            is_test=true
+            [ "$INPUT_IS_RC" = "false" ] || { echo "::error::test versions require is_rc=false"; exit 1; }
+            [ "$INPUT_BUILD_PROFILE" = "release" ] || { echo "::error::test versions require build_profile=release to keep signing and production environment"; exit 1; }
+            [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::test versions require desktop_variant=floatboat"; exit 1; }
+            [ "$INPUT_PLATFORMS" = "windows" ] || { echo "::error::test versions require platforms=windows"; exit 1; }
+            [ "$INPUT_UPLOAD_UOS_STORE" = "false" ] || { echo "::error::test versions do not support UOS publication"; exit 1; }
+            [ "$INPUT_PROMOTE_MERGED_BUGS" = "false" ] || { echo "::error::test versions do not promote merged bugs"; exit 1; }
+            echo "::notice::test build uses release profile, signed Windows artifact only; no tag, Release, feed, or notification will be published."
+          fi
 
           if [ "$INPUT_IS_RC" = "true" ]; then
             [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::RC publishing requires desktop_variant=floatboat"; exit 1; }
@@ -186,7 +199,11 @@ jobs:
 
           case "$INPUT_DESKTOP_VARIANT" in
             floatboat)
-              release_tag="v${INPUT_VERSION}"
+              if [ "$is_test" = "true" ]; then
+                release_tag="test-v${INPUT_VERSION}"
+              else
+                release_tag="v${INPUT_VERSION}"
+              fi
               desktop_matrix='{"include":[{"variant":"floatboat","display_name":"Floatboat","artifact_base":"Floatboat","app_name":"Floatboat"}]}'
               ;;
             all)
@@ -227,6 +244,7 @@ jobs:
           echo "desktop_matrix=${desktop_matrix}" >> "$GITHUB_OUTPUT"
           echo "linux_matrix=${linux_matrix}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
+          echo "is_test=${is_test}" >> "$GITHUB_OUTPUT"
           echo "🎯 Desktop release scope: ${INPUT_DESKTOP_VARIANT} (${release_tag})"
           echo "🐧 Linux matrix: ${linux_matrix}"
 
@@ -425,6 +443,7 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_IS_RC: ${{ inputs.is_rc }}
           INPUT_REPO_REF: ${{ inputs.repo_ref }}
+          INPUT_IS_TEST: ${{ steps.release_scope.outputs.is_test }}
           RELEASE_TAG: ${{ steps.release_scope.outputs.release_tag }}
         run: |
           set -euo pipefail
@@ -433,6 +452,11 @@ jobs:
           echo "source_sha=${SOURCE_SHA}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${RELEASE_TAG}" >> "$GITHUB_OUTPUT"
           echo "🔒 Source commit: ${SOURCE_SHA}"
+
+          if [ "$INPUT_IS_TEST" = "true" ]; then
+            echo "🔖 test build keeps source ref ${INPUT_REPO_REF}; no source tag is created."
+            exit 0
+          fi
 
           if [ "$INPUT_IS_RC" != "false" ]; then
             echo "🔖 RC build keeps source ref ${INPUT_REPO_REF}; no official source tag is created."
@@ -494,12 +518,16 @@ jobs:
           set -e
           VERSION="${{ inputs.version }}"
           IS_RC="${{ inputs.is_rc }}"
+          IS_TEST="${{ steps.release_scope.outputs.is_test }}"
           DESKTOP_VARIANT="${{ steps.release_scope.outputs.desktop_variant }}"
           CURRENT_TAG="${{ steps.release_scope.outputs.release_tag }}"
+          SOURCE_SHA="${{ steps.source.outputs.source_sha }}"
 
-          echo "🔍 Finding previous tag for ${CURRENT_TAG} (is_rc=${IS_RC})"
+          echo "🔍 Finding previous tag for ${CURRENT_TAG} (is_rc=${IS_RC}, is_test=${IS_TEST})"
 
-          if [ "$IS_RC" == "true" ]; then
+          if [ "$IS_TEST" = "true" ]; then
+            PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          elif [ "$IS_RC" == "true" ]; then
             # Extract base version (e.g., 0.4.1 from 0.4.1-rc.12)
             BASE_VERSION=$(echo "$VERSION" | sed 's/-rc\.[0-9]*$//')
             # Find previous RC for this base version
@@ -534,6 +562,8 @@ jobs:
           {
             if [ "$IS_RC" == "true" ]; then
               echo "# Release Candidate ${CURRENT_TAG}"
+            elif [ "$IS_TEST" = "true" ]; then
+              echo "# Test Build ${CURRENT_TAG}"
             else
               echo "# Release ${CURRENT_TAG}"
             fi
@@ -542,7 +572,11 @@ jobs:
             if [ -n "$PREV_TAG" ]; then
               echo "**Changes since ${PREV_TAG}:**"
               echo ""
-              CHANGES=$(git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200)
+              if [ "$IS_TEST" = "true" ]; then
+                CHANGES=$(git log "$SOURCE_SHA" --no-merges --format="- %s" -200)
+              else
+                CHANGES=$(git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200)
+              fi
               if [ -n "$CHANGES" ]; then
                 echo "$CHANGES"
               else
@@ -2888,6 +2922,12 @@ jobs:
           (!contains(inputs.platforms, 'windows') || needs.build-test-launcher-windows.result == 'success')
         ) ||
         (
+          needs.prepare.outputs.is_test == 'true' &&
+          inputs.platforms == 'windows' &&
+          needs.prepare.outputs.package_set == 'app' &&
+          needs.build-windows.result == 'success'
+        ) ||
+        (
           needs.prepare.outputs.package_set != 'launcher' &&
           contains(inputs.platforms, 'macos') &&
           contains(inputs.platforms, 'windows') &&
@@ -3012,7 +3052,8 @@ jobs:
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           LINUX_REQUESTED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') }}
-          INCLUDE_MACOS_X64: ${{ inputs.is_rc == false }}
+          INCLUDE_MACOS_X64: ${{ inputs.is_rc == false && needs.prepare.outputs.is_test != 'true' }}
+          IS_TEST: ${{ needs.prepare.outputs.is_test }}
         run: |
           set -euo pipefail
 
@@ -3027,6 +3068,17 @@ jobs:
           }
 
           echo "🔎 Verifying Desktop release set for ${DESKTOP_VARIANT}"
+          if [ "$IS_TEST" = "true" ]; then
+            require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "signed Floatboat Windows x64 test installer"
+            main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
+            updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
+            if [ "$main_installer_count" -ne 1 ] || [ "$updater_zip_count" -ne 0 ]; then
+              echo "::error::Unexpected test artifact counts: main=$main_installer_count (expected 1), mac_zip=$updater_zip_count (expected 0)"
+              exit 1
+            fi
+            echo "✅ Windows-only test artifact set verified; no public release metadata will be generated."
+            exit 0
+          fi
           if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
             require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-arm64.dmg" "Floatboat macOS arm64 DMG"
             if [ "$INCLUDE_MACOS_X64" = "true" ]; then
@@ -3110,7 +3162,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Generate macOS Update Metadata
-        if: needs.prepare.outputs.package_set != 'launcher'
+        if: needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.is_test != 'true'
         env:
           DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
@@ -3130,7 +3182,7 @@ jobs:
           fi
 
       - name: Generate Windows Update Metadata
-        if: needs.prepare.outputs.package_set != 'launcher'
+        if: needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.is_test != 'true'
         env:
           DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
@@ -3150,7 +3202,7 @@ jobs:
           fi
 
       - name: Inject canonical release notes into stable metadata
-        if: needs.prepare.outputs.release_notes_enabled == 'true'
+        if: needs.prepare.outputs.release_notes_enabled == 'true' && needs.prepare.outputs.is_test != 'true'
         shell: bash
         env:
           DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
@@ -3168,7 +3220,7 @@ jobs:
           done
 
       - name: Verify generated update metadata
-        if: needs.prepare.outputs.package_set != 'launcher'
+        if: needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.is_test != 'true'
         shell: bash
         env:
           DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
@@ -3249,6 +3301,7 @@ jobs:
           : > /tmp/empty-release-body.md
 
       - name: Create GitHub Release
+        if: needs.prepare.outputs.is_test != 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.release_tag }}
@@ -3472,7 +3525,7 @@ jobs:
       # S3 Deploy (official releases only)
       # ===========================================
       - name: Configure AWS Credentials
-        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.is_test != 'true' && needs.prepare.outputs.package_set != 'launcher'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -3480,7 +3533,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Publish and verify stable updater feeds
-        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.is_test != 'true' && needs.prepare.outputs.package_set != 'launcher'
         shell: bash
         env:
           DESKTOP_VARIANT: ${{ needs.prepare.outputs.desktop_variant }}
@@ -3494,7 +3547,7 @@ jobs:
         run: bash release-tooling/.github/scripts/publish-stable-updater.sh
 
       - name: Sync Floatboat website installer URLs
-        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all'
+        if: inputs.is_rc == false && inputs.build_profile == 'release' && needs.prepare.outputs.is_test != 'true' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'all'
         env:
           INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
           INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
@@ -3631,7 +3684,7 @@ jobs:
     name: Release Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload, publish-linux-uos]
     runs-on: ubuntu-latest
-    if: always() && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
+    if: always() && needs.prepare.outputs.is_test != 'true' && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
 
     steps:
       - name: Download changelog
