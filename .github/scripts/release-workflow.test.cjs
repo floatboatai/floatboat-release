@@ -257,6 +257,7 @@ test('test 版本只构建签名 Windows 包，不创建 tag、Release、feed �
   const releaseStep = readNamedStep(uploadJob, 'Create GitHub Release');
   const stableStep = readNamedStep(uploadJob, 'Publish and verify stable updater feeds');
   const notifyJob = readNamedJob(workflow, 'notify');
+  const releaseNotesStep = readNamedStep(workflow, 'Generate canonical release notes payload');
 
   assert.ok(scopeStep.includes('if [[ "$INPUT_VERSION" =~ -test\\.[0-9]+$ ]]; then'));
   assert.match(scopeStep, /test versions require build_profile=release/);
@@ -272,6 +273,8 @@ test('test 版本只构建签名 Windows 包，不创建 tag、Release、feed �
   assert.match(uploadJob, /Inject canonical release notes into stable metadata[\s\S]*if: needs\.prepare\.outputs\.release_notes_enabled == 'true' && needs\.prepare\.outputs\.is_test != 'true'/);
   assert.match(metadataVerifyStep, /if: needs\.prepare\.outputs\.package_set != 'launcher' && needs\.prepare\.outputs\.is_test != 'true'/);
   assert.match(notifyJob, /needs\.prepare\.outputs\.is_test != 'true'/);
+  assert.match(releaseNotesStep, /IS_TEST: \$\{\{ steps\.release_scope\.outputs\.is_test \}\}/);
+  assert.match(releaseNotesStep, /PACKAGE_SET.*IS_TEST.*!= "true"/s);
 });
 
 test('Floatboat-only 飞书通知只列 Floatboat 制品并隐藏 DeepSeek 版本', () => {

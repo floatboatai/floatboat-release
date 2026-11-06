@@ -391,11 +391,12 @@ jobs:
           BUILD_PROFILE: ${{ inputs.build_profile }}
           NOTIFY_ONLY: ${{ inputs.notify_only }}
           PACKAGE_SET: ${{ steps.package_set.outputs.package_set }}
+          IS_TEST: ${{ steps.release_scope.outputs.is_test }}
         run: |
           set -euo pipefail
           mkdir -p /tmp/release-notes
           is_stable_app_release=false
-          if [ "$NOTIFY_ONLY" = "false" ] && [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ] && [ "$PACKAGE_SET" != "launcher" ]; then
+          if [ "$NOTIFY_ONLY" = "false" ] && [ "$IS_RC" = "false" ] && [ "$BUILD_PROFILE" = "release" ] && [ "$PACKAGE_SET" != "launcher" ] && [ "$IS_TEST" != "true" ]; then
             is_stable_app_release=true
           fi
 
