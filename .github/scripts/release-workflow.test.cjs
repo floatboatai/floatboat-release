@@ -247,6 +247,33 @@ test('RC 强制 Floatboat app 范围，并允许 Linux 双包只产 Actions 制�
   assert.match(workflow, /publish-linux-uos:[\s\S]*inputs\.is_rc == false/);
 });
 
+test('test 版本只构建签名 Windows 包，不创建 tag、Release、feed 或通知', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const scopeStep = readNamedStep(workflow, 'Resolve release scope');
+  const sourceStep = readNamedStep(workflow, 'Resolve source release tag');
+  const uploadJob = readNamedJob(workflow, 'upload');
+  const verifyStep = readNamedStep(uploadJob, 'Verify required artifacts');
+  const metadataVerifyStep = readNamedStep(uploadJob, 'Verify generated update metadata');
+  const releaseStep = readNamedStep(uploadJob, 'Create GitHub Release');
+  const stableStep = readNamedStep(uploadJob, 'Publish and verify stable updater feeds');
+  const notifyJob = readNamedJob(workflow, 'notify');
+
+  assert.ok(scopeStep.includes('if [[ "$INPUT_VERSION" =~ -test\\.[0-9]+$ ]]; then'));
+  assert.match(scopeStep, /test versions require build_profile=release/);
+  assert.match(scopeStep, /platforms=windows/);
+  assert.match(scopeStep, /is_test=\$\{is_test\}/);
+  assert.match(sourceStep, /INPUT_IS_TEST/);
+  assert.match(sourceStep, /test build keeps source ref/);
+  assert.match(uploadJob, /needs\.prepare\.outputs\.is_test == 'true'/);
+  assert.match(uploadJob, /inputs\.platforms == 'windows'/);
+  assert.match(verifyStep, /signed Floatboat Windows x64 test installer/);
+  assert.match(releaseStep, /if: needs\.prepare\.outputs\.is_test != 'true'/);
+  assert.match(stableStep, /needs\.prepare\.outputs\.is_test != 'true'/);
+  assert.match(uploadJob, /Inject canonical release notes into stable metadata[\s\S]*if: needs\.prepare\.outputs\.release_notes_enabled == 'true' && needs\.prepare\.outputs\.is_test != 'true'/);
+  assert.match(metadataVerifyStep, /if: needs\.prepare\.outputs\.package_set != 'launcher' && needs\.prepare\.outputs\.is_test != 'true'/);
+  assert.match(notifyJob, /needs\.prepare\.outputs\.is_test != 'true'/);
+});
+
 test('Floatboat-only 飞书通知只列 Floatboat 制品并隐藏 DeepSeek 版本', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const notifyStep = readNamedStep(workflow, 'Send Feishu notification');
