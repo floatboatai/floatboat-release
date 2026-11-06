@@ -199,6 +199,7 @@ jobs:
           show-progress: false
 
       - name: Verify checked-out comparison script
+        id: source_scripts
         env:
           EXPECTED_SOURCE_SHA: ${{ steps.provenance.outputs.source_sha }}
           SOURCE_REPO: ${{ vars.SOURCE_REPO }}
@@ -210,10 +211,14 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $actual -cne $env:EXPECTED_SOURCE_SHA) { throw 'Checked-out source SHA differs from the verified candidate source.' }
           $script = Join-Path $source 'tests/fixtures/windows-installer-upgrade-main/compare-release.ps1'
           if (-not [IO.File]::Exists($script)) { throw 'The verified source commit does not contain compare-release.ps1.' }
+          $volumeScript = Join-Path $source 'tests/fixtures/windows-installer-volume/manage-volume.ps1'
+          if (-not [IO.File]::Exists($volumeScript)) { throw 'The verified source commit does not contain the test-volume manager.' }
           @{
             repository = $env:SOURCE_REPO; requestedSha = $env:EXPECTED_SOURCE_SHA; actualSha = $actual
             scriptPath = 'tests/fixtures/windows-installer-upgrade-main/compare-release.ps1'
             scriptSha256 = (Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash
+            volumeScriptPath = 'tests/fixtures/windows-installer-volume/manage-volume.ps1'
+            volumeScriptSha256 = (Get-FileHash -LiteralPath $volumeScript -Algorithm SHA256).Hash
           } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'evidence/metadata/source-checkout.json') -Encoding utf8
 
       - name: Download the verified baseline Windows artifact
@@ -234,12 +239,34 @@ jobs:
           artifact-ids: ${{ steps.provenance.outputs.candidate_artifact_id }}
           path: installers/candidate
 
+      - name: Create an owned NTFS volume for cross-volume installation
+        id: comparison_volume
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:GITHUB_WORKSPACE 'source/tests/fixtures/windows-installer-volume/manage-volume.ps1'
+          $statePath = Join-Path $env:GITHUB_WORKSPACE 'evidence/metadata/comparison-volume.json'
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script -Action Create -StatePath $statePath -MaximumMegabytes 8192
+          if ($LASTEXITCODE -ne 0) { throw "Test-volume creation failed with exit code $LASTEXITCODE." }
+          $state = Get-Content -LiteralPath $statePath -Raw -Encoding utf8 | ConvertFrom-Json
+          if ($state.schemaVersion -ne 1 -or $state.fixture -cne 'floatboat-installer-test-volume' -or $state.phase -cne 'ready' -or $state.maximumMegabytes -ne 8192) { throw 'The test-volume manager did not produce a ready owned volume.' }
+          if ($state.volumeRoot -notmatch '^[A-Z]:\\$' -or $state.volumeRoot -ieq 'C:\' -or $state.volumeRoot -ine ($state.driveLetter + ':\') -or -not [IO.Directory]::Exists($state.volumeRoot)) { throw 'The owned test volume has no usable separate drive root.' }
+          foreach ($field in @('imagePath', 'diskUniqueId', 'volumeUniqueId')) {
+            if ([string]::IsNullOrWhiteSpace([string]$state.$field)) { throw "The owned test volume lacks $field." }
+          }
+          Copy-Item -LiteralPath $statePath -Destination (Join-Path $env:GITHUB_WORKSPACE 'evidence/metadata/comparison-volume-ready.json') -ErrorAction Stop
+          "root=$($state.volumeRoot)" >> $env:GITHUB_OUTPUT
+
       - name: Compare signed Windows installers on this runner
+        env:
+          CROSS_VOLUME_ROOT: ${{ steps.comparison_volume.outputs.root }}
         run: |
           Set-StrictMode -Version Latest
           $ErrorActionPreference = 'Stop'
           $evidence = Join-Path $env:GITHUB_WORKSPACE 'evidence'
           $script = Join-Path $env:GITHUB_WORKSPACE 'source/tests/fixtures/windows-installer-upgrade-main/compare-release.ps1'
+          $volumeScript = Join-Path $env:GITHUB_WORKSPACE 'source/tests/fixtures/windows-installer-volume/manage-volume.ps1'
+          $volumeStatePath = Join-Path $evidence 'metadata/comparison-volume.json'
           $baseline = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'installers/baseline') -File -Recurse -Filter 'Floatboat-Setup-*-x64.exe')
           $candidate = @(Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'installers/candidate') -File -Recurse -Filter 'Floatboat-Setup-*-x64.exe')
           if ($baseline.Count -ne 1 -or $candidate.Count -ne 1) { throw 'Each Windows artifact must contain exactly one Floatboat x64 installer.' }
@@ -247,7 +274,7 @@ jobs:
           $exitCode = $null
           Start-Transcript -LiteralPath (Join-Path $evidence 'comparison-transcript.txt') -Force
           try {
-            & pwsh -NoLogo -NoProfile -NonInteractive -File $script -BaselineInstaller $baseline[0].FullName -CandidateInstaller $candidate[0].FullName -OutputDirectory $output
+            & pwsh -NoLogo -NoProfile -NonInteractive -File $script -BaselineInstaller $baseline[0].FullName -CandidateInstaller $candidate[0].FullName -OutputDirectory $output -CrossVolumeRoot $env:CROSS_VOLUME_ROOT
             $exitCode = $LASTEXITCODE
             if ($exitCode -ne 0) { throw "Signed-installer comparison failed with exit code $exitCode." }
             $reportPath = Join-Path $output 'report.json'
@@ -259,12 +286,31 @@ jobs:
               $rounds = ($samples | ForEach-Object { [int]$_.round } | Sort-Object) -join ','
               if ($samples.Count -ne 3 -or $rounds -cne '1,2,3') { throw "The report does not contain three complete $mode samples." }
             }
-            'Six signed-release comparison samples passed.' >> $env:GITHUB_STEP_SUMMARY
+            $relocationKinds = (@($report.relocations) | ForEach-Object { $_.kind } | Sort-Object) -join ','
+            if (@($report.relocations).Count -ne 2 -or $relocationKinds -cne 'cross-volume,same-volume') { throw 'The report does not contain both complete relocation scenarios.' }
+            'Six signed-release comparison samples and two relocation scenarios passed.' >> $env:GITHUB_STEP_SUMMARY
           } finally {
-            @{ exitCode = $exitCode; baselinePath = $baseline[0].FullName; candidatePath = $candidate[0].FullName } |
-              ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'comparison-invocation.json') -Encoding utf8
-            Stop-Transcript
+            try {
+              @{ exitCode = $exitCode; baselinePath = $baseline[0].FullName; candidatePath = $candidate[0].FullName; crossVolumeRoot = $env:CROSS_VOLUME_ROOT } |
+                ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence 'comparison-invocation.json') -Encoding utf8
+            } finally {
+              try {
+                & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $volumeScript -Action Remove -StatePath $volumeStatePath
+                if ($LASTEXITCODE -ne 0) { throw "Owned test-volume cleanup failed with exit code $LASTEXITCODE." }
+              } finally { Stop-Transcript }
+            }
           }
+
+      - name: Ensure the owned test volume is detached
+        if: always() && steps.source_scripts.outcome == 'success'
+        run: |
+          Set-StrictMode -Version Latest
+          $ErrorActionPreference = 'Stop'
+          $script = Join-Path $env:GITHUB_WORKSPACE 'source/tests/fixtures/windows-installer-volume/manage-volume.ps1'
+          $statePath = Join-Path $env:GITHUB_WORKSPACE 'evidence/metadata/comparison-volume.json'
+          # Create 半途失败或比较步骤被终止时，仍仅按本次身份回执拆卸；已移除可重复执行。
+          & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $script -Action Remove -StatePath $statePath
+          if ($LASTEXITCODE -ne 0) { throw "Owned test-volume cleanup failed with exit code $LASTEXITCODE." }
 
       - name: Diagnose installed uninstaller signature after failure
         if: failure()
