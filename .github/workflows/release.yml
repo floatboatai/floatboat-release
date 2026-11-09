@@ -81,11 +81,6 @@ on:
           - "release"
           - "test"
           - "internal-test"
-      compare_install_speed:
-        description: "Compare signed Windows test installers using the same packaged payload"
-        required: false
-        default: false
-        type: boolean
       package_set:
         description: "Package set to build (auto: DeepSeek-only/non-release=app, full release=all)"
         required: false
@@ -164,9 +159,6 @@ jobs:
           INPUT_LINUX_PACKAGE: ${{ inputs.linux_package }}
           INPUT_UPLOAD_UOS_STORE: ${{ inputs.upload_uos_store }}
           INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
-          INPUT_COMPARE_INSTALL_SPEED: ${{ inputs.compare_install_speed }}
-          INPUT_PACKAGE_SET: ${{ inputs.package_set }}
-          INPUT_NOTIFY_ONLY: ${{ inputs.notify_only }}
         run: |
           set -euo pipefail
 
@@ -180,12 +172,6 @@ jobs:
             [ "$INPUT_UPLOAD_UOS_STORE" = "false" ] || { echo "::error::test versions do not support UOS publication"; exit 1; }
             [ "$INPUT_PROMOTE_MERGED_BUGS" = "false" ] || { echo "::error::test versions do not promote merged bugs"; exit 1; }
             echo "::notice::test build uses release profile, signed Windows artifact only; no tag, Release, feed, or notification will be published."
-          fi
-
-          if [ "${INPUT_COMPARE_INSTALL_SPEED:-false}" = "true" ]; then
-            [ "$is_test" = "true" ] || { echo "::error::Installation comparison requires a signed Windows test.N build"; exit 1; }
-            [ "$INPUT_NOTIFY_ONLY" = "false" ] || { echo "::error::Installation comparison requires an actual build"; exit 1; }
-            [ "$INPUT_PACKAGE_SET" = "app" ] || { echo "::error::Installation comparison requires package_set=app"; exit 1; }
           fi
 
           if [ "$INPUT_IS_RC" = "true" ]; then
@@ -1327,40 +1313,11 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Checkout Electron cache verification tooling
-        if: inputs.compare_install_speed == true
-        uses: actions/checkout@v4
-        with:
-          path: electron-cache-tooling
-          sparse-checkout: .github/scripts/install-speed
-          persist-credentials: false
-
-      - name: Verify comparison registry cleanup on Windows PowerShell
-        if: inputs.compare_install_speed == true
-        shell: pwsh
-        run: |
-          & electron-cache-tooling/.github/scripts/install-speed/Test-BuildRegistry.ps1
-
-      - name: Isolate Electron cache verification tooling
-        if: inputs.compare_install_speed == true
-        shell: pwsh
-        run: |
-          Move-Item -LiteralPath 'electron-cache-tooling/.github/scripts/install-speed/verify-electron-cache.cjs' -Destination "$env:RUNNER_TEMP/verify-electron-cache.cjs"
-          Remove-Item -LiteralPath 'electron-cache-tooling' -Recurse -Force
-
       - name: Install dependencies
         env:
-          npm_config_electron_mirror: ${{ inputs.compare_install_speed == true && 'https://npmmirror.com/mirrors/electron/' || '' }}
-          npm_config_electron_custom_dir: ${{ inputs.compare_install_speed == true && '{{ version }}' || '' }}
+          npm_config_electron_mirror: ${{ needs.prepare.outputs.is_test == 'true' && 'https://npmmirror.com/mirrors/electron/' || '' }}
+          npm_config_electron_custom_dir: ${{ needs.prepare.outputs.is_test == 'true' && '{{ version }}' || '' }}
         run: pnpm install --frozen-lockfile
-
-      - name: Verify Electron mirror cache for installation comparison
-        if: inputs.compare_install_speed == true
-        env:
-          npm_config_electron_mirror: https://npmmirror.com/mirrors/electron/
-          npm_config_electron_custom_dir: '{{ version }}'
-        shell: pwsh
-        run: node "$env:RUNNER_TEMP/verify-electron-cache.cjs"
 
       - name: Setup FFmpeg build toolchain
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
@@ -1526,57 +1483,6 @@ jobs:
             dist/windows/*.exe
           retention-days: 3
           if-no-files-found: error
-
-      - name: Checkout installation comparison tooling
-        if: inputs.compare_install_speed == true
-        uses: actions/checkout@v4
-        with:
-          path: performance-tooling
-          sparse-checkout: .github/scripts/install-speed
-          persist-credentials: false
-
-      - name: Build baseline installer from the same signed payload
-        if: inputs.compare_install_speed == true
-        shell: pwsh
-        timeout-minutes: 20
-        env:
-          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
-          SIGNTOOL_ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
-          SIGNTOOL_ACCESS_SECRET: ${{ secrets.ACCESS_SECRET }}
-          SIGNTOOL_CERT_CODE: ${{ secrets.CERT_CODE }}
-        run: |
-          node performance-tooling/.github/scripts/install-speed/build-baseline.cjs `
-            "$env:GITHUB_WORKSPACE" `
-            "$env:GITHUB_WORKSPACE/out/install-speed-build" `
-            "$env:GITHUB_WORKSPACE/dist/windows/Floatboat-Setup-$env:VERSION-x64.exe" `
-            "$env:VERSION"
-          if ($LASTEXITCODE -ne 0) { throw 'Same-payload baseline preparation failed.' }
-          if (-not (Test-Path -LiteralPath './out/install-speed-build/build-receipt.json' -PathType Leaf)) { throw 'Same-payload baseline receipt was not produced.' }
-
-      - name: Compare full installation time in AB BA AB BA order
-        if: inputs.compare_install_speed == true
-        shell: pwsh
-        timeout-minutes: 90
-        env:
-          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
-        run: |
-          & performance-tooling/.github/scripts/install-speed/Compare-Installers.ps1 `
-            -BuildReceipt './out/install-speed-build/build-receipt.json' `
-            -PayloadManifest './out/install-speed-build/payload-manifest.json' `
-            -ExpectedVersion "$env:VERSION" `
-            -OutputDirectory './out/install-speed-results'
-
-      - name: Upload installation comparison evidence
-        if: always() && inputs.compare_install_speed == true
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-install-speed-${{ github.run_id }}-${{ github.run_attempt }}
-          path: |
-            out/install-speed-build/*.json
-            out/install-speed-build/baseline-installer/*.exe
-            out/install-speed-results/**/*.json
-          retention-days: 7
-          if-no-files-found: warn
 
   # ===========================================
   # Desktop App - Linux x64 / arm64 (.deb)
