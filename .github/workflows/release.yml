@@ -1335,6 +1335,12 @@ jobs:
           sparse-checkout: .github/scripts/install-speed
           persist-credentials: false
 
+      - name: Verify comparison registry cleanup on Windows PowerShell
+        if: inputs.compare_install_speed == true
+        shell: pwsh
+        run: |
+          & electron-cache-tooling/.github/scripts/install-speed/Test-BuildRegistry.ps1
+
       - name: Isolate Electron cache verification tooling
         if: inputs.compare_install_speed == true
         shell: pwsh
@@ -1545,6 +1551,7 @@ jobs:
             "$env:GITHUB_WORKSPACE/dist/windows/Floatboat-Setup-$env:VERSION-x64.exe" `
             "$env:VERSION"
           if ($LASTEXITCODE -ne 0) { throw 'Same-payload baseline preparation failed.' }
+          if (-not (Test-Path -LiteralPath './out/install-speed-build/build-receipt.json' -PathType Leaf)) { throw 'Same-payload baseline receipt was not produced.' }
 
       - name: Compare full installation time in AB BA AB BA order
         if: inputs.compare_install_speed == true

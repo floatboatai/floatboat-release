@@ -155,5 +155,10 @@ async function main() {
   console.log(`比较基线已生成；同载荷摘要 ${manifest.payloadDigest}`);
 }
 
-if (require.main === module) main().catch((error) => { console.error(error.stack); process.exitCode = 1; });
+if (require.main === module) main().catch((error) => {
+  console.error(error.stack);
+  process.exitCode = 1;
+  // 与 electron-builder CLI 一致：临时目录清理的 exit(0) 不能覆盖真实构建失败。
+  process.on('exit', () => { process.exitCode = 1; });
+});
 module.exports = { files, hash, within, asarVersion, addGeneratedFile };

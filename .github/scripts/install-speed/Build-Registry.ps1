@@ -22,8 +22,15 @@ try {
   }
   if ($Action -eq 'Cleanup') {
     if ([string]::IsNullOrWhiteSpace($OwnedBuildDirectory) -or [string]::IsNullOrWhiteSpace($BeforeReceipt)) { throw 'Cleanup requires an owned directory and the before receipt.' }
-    $before = @(Get-Content -LiteralPath $BeforeReceipt -Raw | ConvertFrom-Json)
-    if ($before.Count -ne 2 -or @($before | Where-Object { $_.exists -or $_.path -notin $paths }).Count) { throw 'Before receipt does not prove both exact keys were absent.' }
+    # Windows PowerShell 5.1 将 JSON 顶层数组作为单个管道对象输出，先接收再展开才能按记录计数。
+    $beforeJson = Get-Content -LiteralPath $BeforeReceipt -Raw | ConvertFrom-Json
+    $before = @($beforeJson)
+    $validBefore = $before.Count -eq $paths.Count
+    foreach ($keyPath in $paths) {
+      $matchingRecords = @($before | Where-Object { $_.path -is [string] -and $_.path -ceq $keyPath })
+      if ($matchingRecords.Count -ne 1 -or $matchingRecords[0].exists -isnot [bool] -or $matchingRecords[0].exists -ne $false) { $validBefore = $false }
+    }
+    if (-not $validBefore) { throw 'Before receipt does not prove both exact keys were absent.' }
     $owned = [IO.Path]::GetFullPath($OwnedBuildDirectory).TrimEnd('\')
     # 先验证全部键再删除；卸载键不一定有 InstallLocation，按其标准 UninstallString 绑定实际输出目录。
     foreach ($record in $records) {

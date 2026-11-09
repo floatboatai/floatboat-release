@@ -14,6 +14,17 @@ function temporary(t) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   return root;
 }
+test('构建失败不会被依赖的退出清理回调改成成功', (t) => {
+  const root = temporary(t);
+  const preload = path.join(root, 'cleanup-hook.cjs');
+  // async-exit-hook 在 beforeExit 后显式 exit(0)，重现构建器临时目录清理的退出行为。
+  fs.writeFileSync(preload, "process.once('beforeExit', () => process.exit(0));\n");
+  const result = spawnSync(process.execPath, ['--require', preload, path.join(__dirname, 'build-baseline.cjs')], {
+    env: { ...process.env, GITHUB_ACTIONS: 'false' }, encoding: 'utf8',
+  });
+  assert.match(result.stderr, /GitHub-hosted Windows runner/);
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+});
 test('载荷变化改变摘要，路径边界拒绝同前缀外部目录', (t) => {
   const root = temporary(t);
   const payload = path.join(root, 'payload'); fs.mkdirSync(payload);
