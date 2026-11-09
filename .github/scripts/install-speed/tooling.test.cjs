@@ -7,6 +7,7 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const { files, hash, within, asarVersion, addGeneratedFile } = require('./build-baseline.cjs');
+const { verifyArchive } = require('./verify-electron-cache.cjs');
 
 function temporary(t) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'floatboat-performance-tooling-'));
@@ -51,7 +52,58 @@ test('NSIS 生成图标可复用同字节载荷，拒绝覆盖不同内容', (t)
   assert.throws(() => addGeneratedFile(manifest, 'resources/markdown.ico', source, root), /冲突/);
 });
 
+test('Electron 缓存按包内摘要复核，成功时保留原文件', async (t) => {
+  const root = temporary(t);
+  const archive = path.join(root, 'electron.zip');
+  const payload = Buffer.from([0, 1, 2, 3, 4]);
+  fs.writeFileSync(archive, payload);
+  const expected = hash(payload);
+  assert.equal(await verifyArchive(archive, expected), expected);
+  assert.deepEqual(fs.readFileSync(archive), payload);
+});
+
+test('Electron 缓存摘要不匹配必须失败且不改写文件', async (t) => {
+  const root = temporary(t);
+  const archive = path.join(root, 'electron.zip');
+  fs.writeFileSync(archive, 'unexpected bytes');
+  await assert.rejects(verifyArchive(archive, hash('official bytes')), /SHA256 不匹配/);
+  assert.equal(fs.readFileSync(archive, 'utf8'), 'unexpected bytes');
+});
+
+test('Electron 缓存缺失或包内摘要无效均拒绝继续', async (t) => {
+  const root = temporary(t);
+  const archive = path.join(root, 'missing.zip');
+  await assert.rejects(verifyArchive(archive, hash('official bytes')), /ENOENT/);
+  for (const digest of [undefined, '', 'abc', 'z'.repeat(64)]) {
+    await assert.rejects(verifyArchive(archive, digest), /缺少有效 SHA256/);
+  }
+  assert.deepEqual(fs.readdirSync(root), []);
+});
+
 const workflow = fs.readFileSync(path.join(__dirname, '../../workflows/release.yml'), 'utf8');
+test('镜像恢复仅作用于 Windows 对照任务，验证工具在依赖安装前移出源码目录', () => {
+  const windows = workflow.split('\n  build-windows:\n')[1].split('\n  build-')[0];
+  assert.equal((windows.match(/name: Checkout installation comparison tooling/g) || []).length, 1);
+  assert.equal((windows.match(/name: Checkout Electron cache verification tooling/g) || []).length, 1);
+  const checkout = windows.indexOf('name: Checkout Electron cache verification tooling');
+  const isolate = windows.indexOf('name: Isolate Electron cache verification tooling');
+  const install = windows.indexOf('name: Install dependencies');
+  const verify = windows.indexOf('name: Verify Electron mirror cache for installation comparison');
+  const build = windows.indexOf('name: Build and package');
+  assert.ok(checkout < isolate && isolate < install && install < verify && verify < build);
+  const isolation = windows.slice(isolate, install);
+  assert.match(isolation, /Move-Item -LiteralPath 'electron-cache-tooling\/\.github\/scripts\/install-speed\/verify-electron-cache\.cjs' -Destination "\$env:RUNNER_TEMP\/verify-electron-cache\.cjs"/);
+  assert.match(isolation, /Remove-Item -LiteralPath 'electron-cache-tooling' -Recurse -Force/);
+  assert.ok(windows.indexOf('name: Checkout installation comparison tooling') > windows.indexOf('name: Upload Windows artifacts'));
+  const installation = windows.slice(install, verify);
+  assert.match(installation, /npm_config_electron_mirror: \$\{\{ inputs\.compare_install_speed == true && 'https:\/\/npmmirror\.com\/mirrors\/electron\/' \|\| '' \}\}/);
+  assert.match(installation, /npm_config_electron_custom_dir: \$\{\{ inputs\.compare_install_speed == true && '\{\{ version \}\}' \|\| '' \}\}/);
+  assert.match(installation, /run: pnpm install --frozen-lockfile/);
+  const verification = windows.slice(verify).split('\n      - name:')[0];
+  assert.match(verification, /if: inputs\.compare_install_speed == true/);
+  assert.match(verification, /run: node "\$env:RUNNER_TEMP\/verify-electron-cache\.cjs"/);
+  assert.doesNotMatch(workflow.replace(windows, ''), /npm_config_electron_mirror/);
+});
 const scope = workflow.split('      - name: Resolve release scope\n')[1].split('\n      - name:')[0];
 const script = scope.split('        run: |\n')[1].split('\n').map((line) => line.replace(/^          /, '')).join('\n');
 const defaultInputs = {

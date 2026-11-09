@@ -1327,8 +1327,34 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Checkout Electron cache verification tooling
+        if: inputs.compare_install_speed == true
+        uses: actions/checkout@v4
+        with:
+          path: electron-cache-tooling
+          sparse-checkout: .github/scripts/install-speed
+          persist-credentials: false
+
+      - name: Isolate Electron cache verification tooling
+        if: inputs.compare_install_speed == true
+        shell: pwsh
+        run: |
+          Move-Item -LiteralPath 'electron-cache-tooling/.github/scripts/install-speed/verify-electron-cache.cjs' -Destination "$env:RUNNER_TEMP/verify-electron-cache.cjs"
+          Remove-Item -LiteralPath 'electron-cache-tooling' -Recurse -Force
+
       - name: Install dependencies
+        env:
+          npm_config_electron_mirror: ${{ inputs.compare_install_speed == true && 'https://npmmirror.com/mirrors/electron/' || '' }}
+          npm_config_electron_custom_dir: ${{ inputs.compare_install_speed == true && '{{ version }}' || '' }}
         run: pnpm install --frozen-lockfile
+
+      - name: Verify Electron mirror cache for installation comparison
+        if: inputs.compare_install_speed == true
+        env:
+          npm_config_electron_mirror: https://npmmirror.com/mirrors/electron/
+          npm_config_electron_custom_dir: '{{ version }}'
+        shell: pwsh
+        run: node "$env:RUNNER_TEMP/verify-electron-cache.cjs"
 
       - name: Setup FFmpeg build toolchain
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
