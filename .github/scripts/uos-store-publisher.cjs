@@ -59,10 +59,22 @@ function validateManifest(manifest) {
   return manifest;
 }
 
+function executionGithubIdentity(runtime) {
+  const runId = String(runtime?.runId || '');
+  const runAttempt = Number(runtime?.runAttempt);
+  return /^\d+$/u.test(runId) && Number.isSafeInteger(runAttempt) && runAttempt > 0
+    ? Object.freeze({ runId, runAttempt }) : undefined;
+}
+
 function validateRuntimeIdentity(manifest, runtime) {
+  const executionGithub = executionGithubIdentity(runtime);
+  const manifestRunAttempt = Number(runtime.manifestRunAttempt);
+  // 重跑只接受无凭证校验任务明确给出的清单代次，不自行选择历史清单。
   if (
+    !executionGithub || !Number.isSafeInteger(manifestRunAttempt) || manifestRunAttempt < 1 ||
+    manifestRunAttempt > executionGithub.runAttempt ||
     String(manifest.github?.runId) !== String(runtime.runId) ||
-    Number(manifest.github?.runAttempt) !== Number(runtime.runAttempt) ||
+    manifest.github?.runAttempt !== manifestRunAttempt ||
     manifest.sourceSha !== runtime.sourceSha
   ) {
     throw new UosStorePublisherError('UOS_MANIFEST_RUN_IDENTITY_MISMATCH', '送审清单不属于当前 GitHub run/source', {
@@ -124,6 +136,7 @@ class JsonPublicationJournal {
 
 function createReceipt(manifest, overrides = {}) {
   const buildSource = sanitizeBuildSource(manifest.buildSource);
+  const executionGithub = executionGithubIdentity(overrides.executionGithub);
   return Object.freeze({
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     appid: manifest.appid,
@@ -131,6 +144,7 @@ function createReceipt(manifest, overrides = {}) {
     packageVersion: manifest.packageVersion,
     sourceSha: manifest.sourceSha,
     github: manifest.github,
+    ...(executionGithub ? { executionGithub } : {}),
     ...(buildSource ? { buildSource } : {}),
     packages: manifest.packages.map(({ arch, filename, sha256, size }) => ({ arch, filename, sha256, size })),
     stage: overrides.stage || 'created',
@@ -176,6 +190,7 @@ async function publishUosStore(options) {
   if (existing.state === 'submitted') {
     saveStage('confirmed');
     return createReceipt(manifest, {
+      executionGithub: options.executionGithub,
       stage: 'confirmed',
       status: 'submitted',
       idempotent: true,
@@ -254,6 +269,7 @@ async function publishUosStore(options) {
   }
   saveStage('confirmed');
   return createReceipt(manifest, {
+    executionGithub: options.executionGithub,
     stage: 'confirmed',
     status: 'submitted',
     submittedAt: options.now(),
@@ -275,6 +291,13 @@ async function main(argv) {
   }
   let manifest = null;
   let receipt;
+  const runtime = {
+    runId: process.env.GITHUB_RUN_ID,
+    runAttempt: process.env.GITHUB_RUN_ATTEMPT,
+    manifestRunAttempt: process.env.UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT,
+    sourceSha: process.env.UOS_SOURCE_SHA,
+  };
+  const executionGithub = executionGithubIdentity(runtime);
   try {
     manifest = validateManifest(JSON.parse(fs.readFileSync(manifestPath, 'utf8')));
     const expectedManifestSha256 = String(process.env.UOS_PUBLICATION_MANIFEST_SHA256 || '').trim();
@@ -283,11 +306,7 @@ async function main(argv) {
         stage: 'validate',
       });
     }
-    validateRuntimeIdentity(manifest, {
-      runId: process.env.GITHUB_RUN_ID,
-      runAttempt: process.env.GITHUB_RUN_ATTEMPT,
-      sourceSha: process.env.UOS_SOURCE_SHA,
-    });
+    validateRuntimeIdentity(manifest, runtime);
     const client = new UosStoreApiClient({
       baseUrl: 'https://appstore-dev.uniontech.com',
       identityAuthenticator: authenticateUnionTechBrowser,
@@ -299,6 +318,7 @@ async function main(argv) {
     });
     receipt = await publishUosStore({
       manifest,
+      executionGithub,
       artifactsDir,
       credentials: { username: process.env.UOS_STORE_USERNAME, password: process.env.UOS_STORE_PASSWORD },
       client,
@@ -311,6 +331,7 @@ async function main(argv) {
     const diagnosticCode = safeDiagnostic(error);
     receipt = manifest
       ? createReceipt(manifest, {
+          executionGithub,
           stage: error && typeof error.stage === 'string' ? error.stage : 'failed',
           status: 'failed',
           diagnosticCode,
@@ -319,6 +340,7 @@ async function main(argv) {
       : {
           schemaVersion: RECEIPT_SCHEMA_VERSION,
           appid: APP_ID,
+          ...(executionGithub ? { executionGithub } : {}),
           status: 'failed',
           stage: 'validate',
           diagnosticCode,

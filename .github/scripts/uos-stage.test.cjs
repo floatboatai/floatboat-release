@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const zlib = require('node:zlib');
+const { spawnSync } = require('node:child_process');
 const { buildUosPublicationManifest, sha256 } = require('./uos-publication-manifest.cjs');
 const { buildStagePlan, ensureImmutableObject, verifyCdnObject, publishStage, UosStageError } = require('./uos-stage.cjs');
 
@@ -58,7 +59,7 @@ function fixture(context) {
   const manifest = buildUosPublicationManifest({ artifactsDir, releaseVersion: expected.releaseVersion, sourceSha: expected.sourceSha, runId: '200', runAttempt: 2 });
   const manifestPath = path.join(artifactsDir, 'uos-publication-manifest.json');
   const write = (value) => { fs.writeFileSync(manifestPath, `${JSON.stringify(value, null, 2)}\n`); return sha256(fs.readFileSync(manifestPath)); };
-  return { root, artifactsDir, expected, manifest, manifestPath, currentRunAttempt: 2, manifestSha256: write(manifest), write };
+  return { root, artifactsDir, expected, manifest, manifestPath, currentRunAttempt: 2, manifestRunAttempt: 2, manifestSha256: write(manifest), write };
 }
 function remote(object) {
   return { ContentLength: object.size, ChecksumSHA256: Buffer.from(object.sha256, 'hex').toString('base64'), ChecksumType: 'FULL_OBJECT' };
@@ -92,6 +93,57 @@ test('复用清单保留来源证明，源run和当前run不能互相替代', (c
   assert.throws(() => buildStagePlan({ ...input, expected: { ...input.expected, runId: '101' } }), /source_run_mismatch/u);
   const incorrect = { ...manifest, github: { runId: '100', runAttempt: 2 } };
   assert.throws(() => buildStagePlan({ ...input, manifestSha256: f.write(incorrect) }), /manifest_content_mismatch/u);
+});
+
+test('staging 重跑保留清单生成身份并单独记录执行身份，拒绝非可信或未来清单', async (context) => {
+  const f = fixture(context);
+  const manifest = { ...f.manifest, buildSource: sourceProof() };
+  const input = { ...f, manifestSha256: f.write(manifest), currentRunAttempt: 3, expected: { ...f.expected, runId: '100' } };
+  const metadataPath = path.join(f.artifactsDir, 'uos-build-source.json');
+  fs.writeFileSync(metadataPath, JSON.stringify({ schemaVersion: 1, buildSource: manifest.buildSource,
+    releaseVersion: manifest.releaseVersion, packageVersion: manifest.packageVersion,
+    sourceSha: manifest.sourceSha, packages: manifest.packages }));
+  input.metadataSha256 = sha256(fs.readFileSync(metadataPath));
+  const plan = buildStagePlan(input);
+  assert.deepEqual(plan.github, { runId: '200', runAttempt: 2 });
+  assert.deepEqual(plan.executionGithub, { runId: '200', runAttempt: 3 });
+  assert.deepEqual(plan.buildSource, sourceProof());
+  const published = await publishStage(plan, { indexPath: path.join(f.root, 'index.json'),
+    aws: async (args) => {
+      if (args[1] === 'create-invalidation') return {};
+      const object = [...plan.packages, plan.manifest].find((item) => item.key === args[args.indexOf('--key') + 1]);
+      if (object) return remote(object);
+      const bytes = fs.readFileSync(path.join(f.root, 'index.json'));
+      return { ContentLength: bytes.length, ChecksumSHA256: Buffer.from(sha256(bytes), 'hex').toString('base64') };
+    },
+    fetchImpl: async (url) => {
+      const object = [...plan.packages, plan.manifest].find((item) => item.url === url);
+      return new Response(fs.readFileSync(object?.filePath || path.join(f.root, 'index.json')));
+    },
+  });
+  assert.deepEqual(published.index.executionGithub, { runId: '200', runAttempt: 3 });
+  assert.deepEqual(published.index.github, manifest.github);
+  for (const change of [
+    { manifestRunAttempt: undefined }, { manifestRunAttempt: 1 }, { manifestRunAttempt: 0 },
+    { manifestRunAttempt: 2.5 }, { currentRunAttempt: 1 }, { currentRunAttempt: NaN },
+  ]) assert.throws(() => buildStagePlan({ ...input, ...change }), /manifest_run_identity_mismatch/);
+});
+
+test('staging CLI 从可信上游环境读取生成 attempt，缺失时在 AWS 访问前失败', (context) => {
+  const f = fixture(context);
+  const env = { ...process.env, GITHUB_REF: 'refs/heads/main', GITHUB_EVENT_NAME: 'workflow_dispatch',
+    GITHUB_REPOSITORY: f.expected.repository, GITHUB_RUN_ID: '200', GITHUB_RUN_ATTEMPT: '3',
+    UOS_SOURCE_SHA: f.expected.sourceSha, UOS_RELEASE_VERSION: f.expected.releaseVersion, UOS_REUSE_RUN_ID: '',
+    UOS_BUILD_SOURCE_SHA256: '', UOS_STAGE_MANIFEST_SHA256: f.manifestSha256, UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: '2' };
+  const accepted = spawnSync(process.execPath, [require.resolve('./uos-stage.cjs'), 'verify', f.artifactsDir, f.manifestPath],
+    { env, encoding: 'utf8' });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stdout, /UOS_STAGE_VERIFIED/);
+  const rejected = spawnSync(process.execPath, [require.resolve('./uos-stage.cjs'), 'publish', f.artifactsDir, f.manifestPath,
+    path.join(f.root, 'unexpected-index.json')], { env: { ...env, UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: '' }, encoding: 'utf8' });
+  assert.equal(rejected.status, 1);
+  assert.match(rejected.stderr, /manifest_run_identity_mismatch/);
+  assert.equal(fs.existsSync(path.join(f.root, 'unexpected-index.json')), false);
 });
 
 test('S3同名正确内容复用，不同大小、摘要或多段摘要都拒绝且不覆盖', async (context) => {

@@ -9,6 +9,8 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const zlib = require('node:zlib');
+const { spawnSync } = require('node:child_process');
+const { createHash } = require('node:crypto');
 
 const {
   buildUosPublicationManifest,
@@ -140,6 +142,24 @@ test('稳定版本统一转换为 UOS 四段版本', () => {
   assert.equal(toUosVersion('0.6.3'), '0.6.3.0');
   assert.equal(toUosVersion('0.6.3.4'), '0.6.3.4');
   assert.equal(toUosVersion('0.6.3-rc.1'), '0.6.3.1');
+});
+
+test('标准清单 CLI 将落盘清单的生成 attempt 和摘要输出给下游', (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'uos-manifest-cli-'));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const arch of ['amd64', 'arm64']) writeFixture(root, '0.6.3', arch);
+  const manifestPath = path.join(root, 'manifest.json');
+  const outputPath = path.join(root, 'outputs');
+  const result = spawnSync(process.execPath, [require.resolve('./uos-publication-manifest.cjs'), root, manifestPath], {
+    env: { ...process.env, GITHUB_RUN_ID: '200', GITHUB_RUN_ATTEMPT: '3', UOS_SOURCE_SHA: 'a'.repeat(40),
+      UOS_RELEASE_VERSION: '0.6.3', GITHUB_OUTPUT: outputPath }, encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const bytes = fs.readFileSync(manifestPath);
+  const manifest = JSON.parse(bytes);
+  const output = Object.fromEntries(fs.readFileSync(outputPath, 'utf8').trim().split('\n').map((line) => line.split('=')));
+  assert.equal(output.manifest_run_attempt, String(manifest.github.runAttempt));
+  assert.equal(output.manifest_sha256, createHash('sha256').update(bytes).digest('hex'));
 });
 
 test('安全路径拒绝绝对路径、反斜杠和父目录越界', () => {
