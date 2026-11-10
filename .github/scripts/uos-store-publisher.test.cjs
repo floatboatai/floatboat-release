@@ -9,7 +9,6 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { spawnSync } = require('node:child_process');
 const { UosStoreApiClient } = require('./uos-store-api-client.cjs');
 
 const {
@@ -110,7 +109,6 @@ function createHarness(context, options = {}) {
 async function runHarness(harness) {
   return publishUosStore({
     manifest: harness.manifest,
-    executionGithub: { runId: '123', runAttempt: 2 },
     artifactsDir: harness.root,
     credentials: { username: 'internal-user', password: 'very-secret' },
     client: harness.client,
@@ -125,8 +123,6 @@ test('双架构全部上传后只提交一次并回读确认', async (context) =
   const harness = createHarness(context);
   const receipt = await runHarness(harness);
   assert.equal(receipt.status, 'submitted');
-  assert.deepEqual(receipt.github, { runId: '123', runAttempt: 1 });
-  assert.deepEqual(receipt.executionGithub, { runId: '123', runAttempt: 2 });
   assert.deepEqual(harness.calls, [
     'authenticate', 'resolve-app', 'inspect', 'template',
     'detect-amd64', 'upload-amd64', 'detect-arm64', 'upload-arm64',
@@ -269,7 +265,6 @@ test('已提交的精确双架构版本直接幂等成功', async (context) => {
   const harness = createHarness(context, { inspectStates: ['submitted'] });
   const receipt = await runHarness(harness);
   assert.equal(receipt.idempotent, true);
-  assert.deepEqual(receipt.executionGithub, { runId: '123', runAttempt: 2 });
   assert.deepEqual(harness.calls, ['authenticate', 'resolve-app', 'inspect']);
 });
 
@@ -322,52 +317,11 @@ test('提交返回任意错误时先回读，已受理则不重复提交', async
   assert.equal(harness.calls.filter((item) => item === 'inspect').length, 3);
 });
 
-test('重跑只接受同 run/source 且由可信上游指定的已生成清单', () => {
-  const manifest = { github: { runId: '123', runAttempt: 1 }, sourceSha: 'b'.repeat(40) };
-  const runtime = { runId: '123', runAttempt: '2', manifestRunAttempt: '1', sourceSha: manifest.sourceSha };
-  assert.doesNotThrow(() => validateRuntimeIdentity(manifest, runtime));
-  assert.doesNotThrow(() => validateRuntimeIdentity(manifest, { ...runtime, runAttempt: '1' }));
-  for (const change of [
-    { runId: '124' }, { sourceSha: 'c'.repeat(40) }, { manifestRunAttempt: '2' },
-    { manifestRunAttempt: undefined }, { manifestRunAttempt: '' }, { manifestRunAttempt: '0' },
-    { manifestRunAttempt: '1.5' }, { manifestRunAttempt: 'Infinity' }, { runAttempt: '0' },
-    { runAttempt: '1.5' }, { runAttempt: '9007199254740992' },
-  ]) assert.throws(() => validateRuntimeIdentity(manifest, { ...runtime, ...change }), /UOS_MANIFEST_RUN_IDENTITY_MISMATCH/);
-  assert.throws(() => validateRuntimeIdentity({ ...manifest, github: { runId: '123', runAttempt: 3 } },
-    { ...runtime, manifestRunAttempt: '3' }), /UOS_MANIFEST_RUN_IDENTITY_MISMATCH/);
-});
-
-test('真实 CLI 在认证前验证上游 attempt、运行身份与摘要，并记录当前执行身份', (context) => {
-  const harness = createHarness(context);
-  const manifestPath = path.join(harness.root, 'manifest.json');
-  const receiptPath = path.join(harness.root, 'receipt.json');
-  const marker = path.join(harness.root, 'authenticated');
-  const preload = path.join(harness.root, 'auth-sentinel.cjs');
-  fs.writeFileSync(manifestPath, JSON.stringify(harness.manifest));
-  fs.writeFileSync(preload, `const fs = require('node:fs');\nconst { UosStoreApiClient } = require(${JSON.stringify(require.resolve('./uos-store-api-client.cjs'))});\nUosStoreApiClient.prototype.authenticate = async () => { fs.writeFileSync(${JSON.stringify(marker)}, 'called'); throw new Error('AUTH_SENTINEL'); };\n`);
-  const env = { ...process.env, GITHUB_RUN_ID: '123', GITHUB_RUN_ATTEMPT: '2',
-    UOS_SOURCE_SHA: harness.manifest.sourceSha, UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: '1',
-    UOS_PUBLICATION_MANIFEST_SHA256: sha256(fs.readFileSync(manifestPath)),
-    UOS_STORE_USERNAME: '', UOS_STORE_PASSWORD: '' };
-  for (const [change, expected] of [
-    [{ UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: '' }, 'UOS_MANIFEST_RUN_IDENTITY_MISMATCH'],
-    [{ UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: '2' }, 'UOS_MANIFEST_RUN_IDENTITY_MISMATCH'],
-    [{ GITHUB_RUN_ID: '124' }, 'UOS_MANIFEST_RUN_IDENTITY_MISMATCH'],
-    [{ UOS_SOURCE_SHA: 'b'.repeat(40) }, 'UOS_MANIFEST_RUN_IDENTITY_MISMATCH'],
-    [{ UOS_PUBLICATION_MANIFEST_SHA256: '0'.repeat(64) }, 'UOS_MANIFEST_DIGEST_MISMATCH'],
-  ]) {
-    const result = spawnSync(process.execPath, ['--require', preload, require.resolve('./uos-store-publisher.cjs'),
-      harness.root, manifestPath, receiptPath, harness.journalPath], { env: { ...env, ...change }, encoding: 'utf8' });
-    assert.equal(result.status, 1, result.stderr);
-    const receipt = JSON.parse(fs.readFileSync(receiptPath));
-    assert.equal(receipt.diagnosticCode, expected);
-    assert.deepEqual(receipt.github, { runId: '123', runAttempt: 1 });
-    assert.deepEqual(receipt.executionGithub, { runId: change.GITHUB_RUN_ID || '123', runAttempt: 2 });
-    assert.equal(fs.existsSync(marker), false);
-  }
-  const accepted = spawnSync(process.execPath, ['--require', preload, require.resolve('./uos-store-publisher.cjs'),
-    harness.root, manifestPath, receiptPath, harness.journalPath], { env, encoding: 'utf8' });
-  assert.equal(accepted.status, 1);
-  assert.match(accepted.stderr, /AUTH_SENTINEL/);
-  assert.equal(fs.readFileSync(marker, 'utf8'), 'called');
+test('manifest 的 run/source identity 必须属于当前 Secret job', () => {
+  const manifest = { github: { runId: '123', runAttempt: 2 }, sourceSha: 'b'.repeat(40) };
+  assert.doesNotThrow(() => validateRuntimeIdentity(manifest, { runId: '123', runAttempt: '2', sourceSha: 'b'.repeat(40) }));
+  assert.throws(
+    () => validateRuntimeIdentity(manifest, { runId: '124', runAttempt: '2', sourceSha: 'b'.repeat(40) }),
+    /UOS_MANIFEST_RUN_IDENTITY_MISMATCH/,
+  );
 });

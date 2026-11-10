@@ -356,56 +356,23 @@ test('prepare 在构建前拒绝非法 UOS 自动送审组合和非法 dispatch 
   );
 });
 
-test('无 Secret fan-in 先校验当前 run 双架构，再允许受保护发布 job', () => {
+test('无凭证校验后只准备工作台下载，release 不再执行统信上传', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const validationJob = readNamedJob(workflow, 'validate-uos-publication');
-  const publishingJob = readNamedJob(workflow, 'publish-uos-store');
+  const stagingJob = readNamedJob(workflow, 'stage-uos-review');
   const existingPublishJob = readNamedJob(workflow, 'publish-linux-uos');
-
-  assert.match(validationJob, /name: Validate UOS Store Publication/);
   assert.match(validationJob, /needs: \[prepare, build-linux-uos, restore-uos-artifacts\]/);
   assert.match(validationJob, /inputs\.upload_uos_store == true/);
   assert.match(validationJob, /github\.ref == 'refs\/heads\/main'/);
   assert.match(validationJob, /uos-publication-manifest\.cjs/);
   assert.doesNotMatch(validationJob, /secrets\.|environment:/);
-  assert.match(validationJob, /manifest_sha256: \$\{\{ steps\.manifest\.outputs\.manifest_sha256 \}\}/);
-  assert.ok(
-    workflow.indexOf('  validate-uos-publication:') < workflow.indexOf('  publish-uos-store:'),
-    '无 Secret 包校验 job 必须定义在受保护发布 job 之前',
-  );
-
-  assert.match(publishingJob, /name: Publish UOS App Store/);
-  assert.match(publishingJob, /needs: \[prepare, validate-uos-publication\]/);
-  assert.match(publishingJob, /environment: uos-app-store-production/);
-  assert.match(publishingJob, /github\.ref == 'refs\/heads\/main'/);
-  assert.match(publishingJob, /concurrency:[\s\S]*group: uos-app-store-production[\s\S]*cancel-in-progress: false/);
-  assert.match(publishingJob, /secrets\.UOS_STORE_USERNAME/);
-  assert.match(publishingJob, /secrets\.UOS_STORE_PASSWORD/);
-  assert.match(publishingJob, /needs\.validate-uos-publication\.outputs\.manifest_sha256/);
-  assert.match(publishingJob, /uos-store-publisher\.cjs/);
-  assert.doesNotMatch(publishingJob, /inputs\.repo_ref|SOURCE_REPO_PAT|id-token/);
-  assert.equal((publishingJob.match(/secrets\./gu) || []).length, 2);
-  assert.doesNotMatch(
-    `${validationJob}\n${publishingJob}`,
-    /aoe-backend|UOS_PUBLICATION_BACKEND|publication request|publication_request|OIDC|id-token/iu,
-  );
-  assert.doesNotMatch(publishingJob, /uos-publication-journal\.json[\s\S]*Upload redacted UOS publication receipt[\s\S]*path: private\/uos-publication-journal/);
-  assert.match(publishingJob, /actions\/checkout@[0-9a-f]{40}/);
-  assert.match(publishingJob, /actions\/download-artifact@[0-9a-f]{40}/);
-  assert.match(publishingJob, /actions\/upload-artifact@[0-9a-f]{40}/);
-  assert.match(publishingJob, /ref: \$\{\{ github\.sha \}\}/);
-  assert.match(publishingJob, /pnpm\/action-setup@[0-9a-f]{40}/);
-  assert.match(publishingJob, /uos-browser-runtime install --frozen-lockfile --ignore-scripts/);
-  assert.match(publishingJob, /playwright install --with-deps --only-shell chromium/);
-  assert.ok(publishingJob.indexOf('Install pinned UOS authentication browser') < publishingJob.indexOf('secrets.UOS_STORE_USERNAME'));
-  assert.match(publishingJob, /DEBUG: ''\n\s+PWDEBUG: ''/);
-  assert.doesNotMatch(publishingJob, /actions\/cache|storageState|recordHar|recordVideo/);
-
-  assert.doesNotMatch(existingPublishJob, /upload_uos_store/);
+  assert.match(stagingJob, /needs: \[prepare, validate-uos-publication\]/);
+  assert.ok(workflow.indexOf('  validate-uos-publication:') < workflow.indexOf('  stage-uos-review:'));
+  assert.doesNotMatch(workflow, /publish-uos-store:|uos-store-publisher\.cjs|UOS_STORE_USERNAME|UOS_STORE_PASSWORD|uos-app-store-production/);
+  assert.match(existingPublishJob, /inputs\.upload_uos_store != true/);
   assert.match(existingPublishJob, /needs: \[prepare, build-linux, build-linux-uos, upload\]/);
   assert.match(existingPublishJob, /inputs\.is_rc == false/);
 });
-
 
 test('RC 范围脚本允许 UOS 双包仅构建，保留普通双平台和 Linux 四包路径', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
@@ -451,7 +418,7 @@ test('送审校验和发布消费构建任务实际产出的独立 UOS artifacts
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const producer = readNamedStep(readNamedJob(workflow, 'build-linux-uos'), 'Upload UOS artifacts');
   assert.match(producer, /name: uos-linux-\$\{\{ matrix\.arch \}\}/);
-  for (const name of ['validate-uos-publication', 'publish-uos-store']) {
+  for (const name of ['validate-uos-publication', 'stage-uos-review']) {
     const consumer = readNamedJob(workflow, name);
     assert.match(consumer, /pattern: uos-linux-\*/);
     assert.doesNotMatch(consumer, /desktop-linux-uos/);
@@ -467,7 +434,6 @@ test('UOS 下游重跑沿用校验任务的清单 ID 与生成轮次', () => {
   assert.match(validate, /manifest_run_attempt: \$\{\{ steps\.manifest\.outputs\.manifest_run_attempt \}\}/);
 
   for (const [jobName, stepName] of [
-    ['publish-uos-store', 'Download verified UOS publication manifest'],
     ['stage-uos-review', 'Download current-run UOS staging manifest'],
   ]) {
     const job = readNamedJob(workflow, jobName);
@@ -518,14 +484,12 @@ test('UOS复用输入在源码checkout之前拒绝非送审或混合平台范围
   assert.equal(spawnSync('bash', ['-c', script], { env: { ...base, REUSE_UOS_RUN_ID: '', UPLOAD_UOS_STORE: 'false' } }).status, 0);
 });
 
-test('工作台上传只在完整送审门禁后准备CDN，默认Actions路径保留', () => {
+test('默认工作台路径只在完整门禁后准备CDN，普通分发不受默认位置影响', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
-  assert.match(workflow, /uos_upload_location:[\s\S]*?default: "actions"[\s\S]*?options:\n\s+- "actions"\n\s+- "workbench"/);
-  const publish = readNamedJob(workflow, 'publish-uos-store');
+  assert.match(workflow, /uos_upload_location:[\s\S]*?default: "workbench"[\s\S]*?options:\n\s+- "workbench"/);
   const stage = readNamedJob(workflow, 'stage-uos-review');
-  assert.match(publish, /inputs\.uos_upload_location != 'workbench'/);
-  assert.match(readNamedJob(workflow, 'publish-linux-uos'), /inputs\.uos_upload_location != 'workbench'/);
-  assert.match(stage, /inputs\.uos_upload_location == 'workbench'/);
+  assert.match(readNamedJob(workflow, 'publish-linux-uos'), /inputs\.upload_uos_store != true/);
+  assert.doesNotMatch(stage, /inputs\.uos_upload_location/);
   assert.match(stage, /needs: \[prepare, validate-uos-publication\]/);
   assert.match(stage, /!cancelled\(\)/);
   assert.match(stage, /github\.ref == 'refs\/heads\/main'/);
@@ -557,9 +521,14 @@ test('工作台位置不能绕过送审开关、main及既有包范围检查', (
     DESKTOP_VARIANT: 'floatboat', IS_RC: 'true', NOTIFY_ONLY: 'false', BUILD_PROFILE: 'release', PACKAGE_SET: 'app',
     SKIP_RELEASE_NOTES: 'true', WORKFLOW_REF: 'refs/heads/main' };
   assert.equal(spawnSync('bash', ['-c', script], { env: base }).status, 0);
-  for (const override of [{ UPLOAD_UOS_STORE: 'false' }, { UOS_UPLOAD_LOCATION: 'other' }, { WORKFLOW_REF: 'refs/heads/feature' },
+  for (const override of [{ UOS_UPLOAD_LOCATION: 'actions' }, { UOS_UPLOAD_LOCATION: 'other' }, { WORKFLOW_REF: 'refs/heads/feature' },
     { LINUX_PACKAGE: 'deb-and-uos' }, { REPO_REF: 'main' }, { BUILD_PROFILE: 'test' }]) {
     assert.notEqual(spawnSync('bash', ['-c', script], { env: { ...base, ...override } }).status, 0, JSON.stringify(override));
   }
-  assert.equal(spawnSync('bash', ['-c', script], { env: { ...base, UOS_UPLOAD_LOCATION: 'actions' } }).status, 0);
+  for (const override of [
+    { UOS_UPLOAD_LOCATION: '' },
+    { UPLOAD_UOS_STORE: 'false' },
+    { UPLOAD_UOS_STORE: 'false', PLATFORMS: 'macos,windows', LINUX_PACKAGE: 'deb-and-uos' },
+    { UPLOAD_UOS_STORE: 'false', WORKFLOW_REF: 'refs/heads/codex/packaging' },
+  ]) assert.equal(spawnSync('bash', ['-c', script], { env: { ...base, ...override } }).status, 0, JSON.stringify(override));
 });
