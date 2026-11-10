@@ -183,14 +183,17 @@ jobs:
               case "$INPUT_PLATFORMS" in
                 "macos,windows") ;;
                 "linux")
-                  [ "$INPUT_LINUX_PACKAGE" = "deb-and-uos" ] || {
-                    echo "::error::Linux-only RC artifact validation requires linux_package=deb-and-uos"
-                    exit 1
-                  }
+                  case "$INPUT_LINUX_PACKAGE" in
+                    "deb-and-uos"|"uos-floatboat") ;;
+                    *)
+                      echo "::error::Linux-only RC artifact validation requires linux_package=deb-and-uos or uos-floatboat"
+                      exit 1
+                      ;;
+                  esac
                   echo "::notice::Linux-only RC builds Actions artifacts without publishing CDN or installer URLs."
                   ;;
                 *)
-                  echo "::error::RC publishing requires exactly macos,windows; Linux artifact validation requires exactly linux with linux_package=deb-and-uos"
+                  echo "::error::RC publishing requires exactly macos,windows; Linux artifact validation requires exactly linux with linux_package=deb-and-uos or uos-floatboat"
                   exit 1
                   ;;
               esac
@@ -2253,6 +2256,8 @@ jobs:
     outputs:
       manifest_sha256: ${{ steps.manifest.outputs.manifest_sha256 }}
       package_version: ${{ steps.manifest.outputs.package_version }}
+      manifest_run_attempt: ${{ steps.manifest.outputs.manifest_run_attempt }}
+      manifest_artifact_id: ${{ steps.manifest_artifact.outputs.artifact-id }}
     steps:
       - name: Checkout trusted UOS publication tooling
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -2296,6 +2301,7 @@ jobs:
           fi
 
       - name: Upload verified UOS publication manifest
+        id: manifest_artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: uos-publication-manifest-${{ steps.manifest.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -2350,8 +2356,9 @@ jobs:
       - name: Download verified UOS publication manifest
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: uos-publication-manifest-${{ needs.validate-uos-publication.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.validate-uos-publication.outputs.manifest_artifact_id }}
           path: verified
+          merge-multiple: true
 
       - name: Upload both UOS packages and submit review
         env:
@@ -2361,6 +2368,7 @@ jobs:
           UOS_STORE_USERNAME: ${{ secrets.UOS_STORE_USERNAME }}
           UOS_STORE_PASSWORD: ${{ secrets.UOS_STORE_PASSWORD }}
           UOS_PUBLICATION_MANIFEST_SHA256: ${{ needs.validate-uos-publication.outputs.manifest_sha256 }}
+          UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: ${{ needs.validate-uos-publication.outputs.manifest_run_attempt }}
           UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
         run: |
           set -euo pipefail
@@ -2405,6 +2413,7 @@ jobs:
       UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
       UOS_REUSE_RUN_ID: ${{ inputs.reuse_uos_run_id }}
       UOS_STAGE_MANIFEST_SHA256: ${{ needs.validate-uos-publication.outputs.manifest_sha256 }}
+      UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: ${{ needs.validate-uos-publication.outputs.manifest_run_attempt }}
     steps:
       - name: Checkout trusted UOS staging scripts
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -2429,8 +2438,9 @@ jobs:
       - name: Download current-run UOS staging manifest
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: uos-publication-manifest-${{ needs.validate-uos-publication.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.validate-uos-publication.outputs.manifest_artifact_id }}
           path: verified
+          merge-multiple: true
 
       - name: Revalidate UOS staging content before AWS access
         run: node release-tooling/.github/scripts/uos-stage.cjs verify artifacts/uos verified/uos-publication-manifest.json

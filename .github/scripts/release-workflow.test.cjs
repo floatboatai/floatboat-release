@@ -407,7 +407,7 @@ test('无 Secret fan-in 先校验当前 run 双架构，再允许受保护发布
 });
 
 
-test('RC 范围脚本保留普通双平台和 Linux 四包路径，仅显式送审接受 UOS 专包', () => {
+test('RC 范围脚本允许 UOS 双包仅构建，保留普通双平台和 Linux 四包路径', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const step = readNamedStep(workflow, 'Resolve release scope');
   const marker = '        run: |\n';
@@ -419,7 +419,8 @@ test('RC 范围脚本保留普通双平台和 Linux 四包路径，仅显式送�
       ['macos,windows', 'deb-and-uos', 'false', 0],
       ['linux', 'deb-and-uos', 'false', 0],
       ['linux', 'uos-floatboat', 'true', 0],
-      ['linux', 'uos-floatboat', 'false', 1],
+      ['linux', 'uos-floatboat', 'false', 0],
+      ['linux', 'deb', 'false', 1],
       ['linux', 'deb-and-uos', 'true', 1],
       ['macos,windows', 'uos-floatboat', 'true', 1],
     ];
@@ -454,6 +455,28 @@ test('送审校验和发布消费构建任务实际产出的独立 UOS artifacts
     const consumer = readNamedJob(workflow, name);
     assert.match(consumer, /pattern: uos-linux-\*/);
     assert.doesNotMatch(consumer, /desktop-linux-uos/);
+  }
+});
+
+test('UOS 下游重跑沿用校验任务的清单 ID 与生成轮次', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const validate = readNamedJob(workflow, 'validate-uos-publication');
+  const producer = readNamedStep(validate, 'Upload verified UOS publication manifest');
+  assert.match(producer, /id: manifest_artifact/);
+  assert.match(validate, /manifest_artifact_id: \$\{\{ steps\.manifest_artifact\.outputs\.artifact-id \}\}/);
+  assert.match(validate, /manifest_run_attempt: \$\{\{ steps\.manifest\.outputs\.manifest_run_attempt \}\}/);
+
+  for (const [jobName, stepName] of [
+    ['publish-uos-store', 'Download verified UOS publication manifest'],
+    ['stage-uos-review', 'Download current-run UOS staging manifest'],
+  ]) {
+    const job = readNamedJob(workflow, jobName);
+    const download = readNamedStep(job, stepName);
+    assert.match(download, /artifact-ids: \$\{\{ needs\.validate-uos-publication\.outputs\.manifest_artifact_id \}\}/);
+    assert.match(download, /merge-multiple: true/);
+    assert.match(download, /path: verified/);
+    assert.doesNotMatch(download, /github\.run_attempt|uos-publication-manifest-/);
+    assert.match(job, /UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: \$\{\{ needs\.validate-uos-publication\.outputs\.manifest_run_attempt \}\}/);
   }
 });
 
@@ -517,7 +540,7 @@ test('CDN任务先无Secret重验当前run清单，后配置AWS并发布精确�
   assert.match(stage, /ref: \$\{\{ github\.sha \}\}/);
   assert.match(stage, /persist-credentials: false/);
   assert.match(stage, /UOS_STAGE_MANIFEST_SHA256: \$\{\{ needs\.validate-uos-publication\.outputs\.manifest_sha256 \}\}/);
-  assert.match(stage, /uos-publication-manifest-\$\{\{ needs\.validate-uos-publication\.outputs\.package_version \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(stage, /artifact-ids: \$\{\{ needs\.validate-uos-publication\.outputs\.manifest_artifact_id \}\}/);
   assert.match(stage, /uos-review-downloads-\$\{\{ needs\.validate-uos-publication\.outputs\.package_version \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(stage, /path: uos-review-downloads\.json/);
   assert.ok(stage.indexOf('uos-stage.cjs verify') < stage.indexOf('aws-actions/configure-aws-credentials@'));

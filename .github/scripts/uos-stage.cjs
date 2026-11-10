@@ -28,8 +28,13 @@ function buildStagePlan(input) {
   const bytes = fs.readFileSync(input.manifestPath);
   requireValid(/^[0-9a-f]{64}$/u.test(input.manifestSha256 || '') && sha256(bytes) === input.manifestSha256, 'manifest_digest_mismatch');
   const manifest = JSON.parse(bytes.toString('utf8'));
+  const manifestRunAttempt = Number(input.manifestRunAttempt);
+  const currentRunAttempt = Number(input.currentRunAttempt);
+  requireValid(Number.isSafeInteger(manifestRunAttempt) && manifestRunAttempt > 0 &&
+    Number.isSafeInteger(currentRunAttempt) && currentRunAttempt >= manifestRunAttempt &&
+    manifest.github?.runAttempt === manifestRunAttempt, 'manifest_run_identity_mismatch');
   const verified = buildUosPublicationManifest({ artifactsDir: input.artifactsDir, releaseVersion: input.expected.releaseVersion,
-    sourceSha: input.expected.sourceSha, runId: input.expected.currentRunId, runAttempt: input.currentRunAttempt });
+    sourceSha: input.expected.sourceSha, runId: input.expected.currentRunId, runAttempt: manifestRunAttempt });
   for (const field of ['schemaVersion', 'appid', 'releaseVersion', 'packageVersion', 'sourceSha', 'github', 'packages']) {
     requireValid(JSON.stringify(manifest[field]) === JSON.stringify(verified[field]), 'manifest_content_mismatch');
   }
@@ -37,7 +42,7 @@ function buildStagePlan(input) {
   requireValid(manifest.buildSource === undefined || buildSource, 'build_source_invalid');
   if (input.expected.runId) requireValid(buildSource?.runId === input.expected.runId, 'source_run_mismatch');
   if (input.metadataSha256) {
-    const reused = buildReusedManifest(input);
+    const reused = buildReusedManifest({ ...input, currentRunAttempt: manifestRunAttempt });
     requireValid(JSON.stringify(reused.buildSource) === JSON.stringify(buildSource), 'build_source_mismatch');
   }
   requireValid(typeof manifest.generatedAt === 'string' && Number.isFinite(Date.parse(manifest.generatedAt)), 'manifest_time_invalid');
@@ -50,7 +55,9 @@ function buildStagePlan(input) {
     item.size, item.sha256, 'application/vnd.debian.binary-package', item.arch));
   const manifestObject = object(input.manifestPath, 'uos-publication-manifest.json', bytes.length, input.manifestSha256, 'application/json');
   return Object.freeze({ schemaVersion: 1, appid: manifest.appid, releaseVersion: manifest.releaseVersion, packageVersion: manifest.packageVersion,
-    sourceSha: manifest.sourceSha, github: manifest.github, ...(buildSource ? { buildSource } : {}),
+    sourceSha: manifest.sourceSha, github: manifest.github,
+    executionGithub: Object.freeze({ runId: String(input.expected.currentRunId), runAttempt: currentRunAttempt }),
+    ...(buildSource ? { buildSource } : {}),
     packages: Object.freeze(packages), manifest: manifestObject });
 }
 
@@ -124,7 +131,8 @@ async function publishStage(plan, options = {}) {
   const aws = options.aws || runAws;
   requireValid(typeof options.indexPath === 'string' && options.indexPath.length > 0, 'output_path_missing');
   const index = Object.freeze({ schemaVersion: 1, appid: plan.appid, releaseVersion: plan.releaseVersion, packageVersion: plan.packageVersion,
-    sourceSha: plan.sourceSha, github: plan.github, ...(plan.buildSource ? { buildSource: plan.buildSource } : {}),
+    sourceSha: plan.sourceSha, github: plan.github, executionGithub: plan.executionGithub,
+    ...(plan.buildSource ? { buildSource: plan.buildSource } : {}),
     packages: Object.freeze(plan.packages.map(publicObject)), manifestUrl: plan.manifest.url, manifestSha256: plan.manifest.sha256 });
   const indexBytes = Buffer.from(`${JSON.stringify(index, null, 2)}\n`);
   fs.writeFileSync(options.indexPath, indexBytes, { mode: 0o600 });
@@ -155,6 +163,7 @@ async function main(argv) {
   const expected = { repository: process.env.GITHUB_REPOSITORY, runId: process.env.UOS_REUSE_RUN_ID,
     currentRunId: process.env.GITHUB_RUN_ID, sourceSha: process.env.UOS_SOURCE_SHA, releaseVersion: process.env.UOS_RELEASE_VERSION };
   const plan = buildStagePlan({ artifactsDir, manifestPath, expected, currentRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+    manifestRunAttempt: process.env.UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT,
     metadataSha256: process.env.UOS_BUILD_SOURCE_SHA256, manifestSha256: process.env.UOS_STAGE_MANIFEST_SHA256 });
   if (operation === 'verify') { console.log('UOS_STAGE_VERIFIED: 来源、当前运行身份与双包内容一致'); return; }
   requireValid(typeof outputPath === 'string' && outputPath.length > 0, 'output_path_missing');

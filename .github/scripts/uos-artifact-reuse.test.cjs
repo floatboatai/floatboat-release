@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+const { spawnSync } = require('node:child_process');
 const zlib = require('node:zlib');
 const { buildUosPublicationManifest, sha256 } = require('./uos-publication-manifest.cjs');
 const { validateSourceRun, selectSourceRun, restoreArtifacts, buildReusedManifest, sanitizeBuildSource } = require('./uos-artifact-reuse.cjs');
@@ -168,6 +169,20 @@ test('复用双包完整重验后生成当前run清单，保留源清单文件�
   assert.equal(manifest.buildSource.manifestSha256, sha256(fs.readFileSync(input.sourceManifestPath)));
   assert.equal(manifest.buildSource.manifestArtifactDigest, `sha256:${'3'.repeat(64)}`);
   assert.deepEqual(sanitizeBuildSource(manifest.buildSource), manifest.buildSource);
+  const manifestPath = path.join(input.root, 'current-manifest.json');
+  const outputsPath = path.join(input.root, 'manifest-outputs');
+  const result = spawnSync(process.execPath, [require.resolve('./uos-artifact-reuse.cjs'), 'manifest', current, manifestPath], {
+    env: { ...process.env, GITHUB_REPOSITORY: EXPECTED.repository, GITHUB_RUN_ID: EXPECTED.currentRunId,
+      GITHUB_RUN_ATTEMPT: '3', UOS_REUSE_RUN_ID: EXPECTED.runId, UOS_SOURCE_SHA: EXPECTED.sourceSha,
+      UOS_RELEASE_VERSION: EXPECTED.releaseVersion, UOS_BUILD_SOURCE_SHA256: restored.metadataSha256, GITHUB_OUTPUT: outputsPath },
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const written = fs.readFileSync(manifestPath);
+  const outputs = Object.fromEntries(fs.readFileSync(outputsPath, 'utf8').trim().split('\n').map((line) => line.split('=')));
+  assert.equal(outputs.manifest_run_attempt, String(JSON.parse(written).github.runAttempt));
+  assert.equal(outputs.manifest_sha256, sha256(written));
+  assert.deepEqual(JSON.parse(written).buildSource, manifest.buildSource);
   assert.throws(() => buildReusedManifest({ artifactsDir: current, expected: EXPECTED, currentRunAttempt: 3, metadataSha256: '0'.repeat(64) }), /来源记录摘要/u);
   const packagePath = path.join(current, manifest.packages[0].filename);
   fs.appendFileSync(packagePath, 'changed');

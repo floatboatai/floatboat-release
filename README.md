@@ -38,6 +38,8 @@
 
 需要在发布前只验证四个 Linux 包时，使用 `is_rc=true`、`platforms=linux`、`linux_package=deb-and-uos`、`desktop_variant=floatboat` 和 `package_set=app`。该组合使用 release 构建配置，只生成 Actions artifacts，不创建 CDN 对象或更新官网安装包地址。
 
+只需要 UOS 的 amd64、arm64 两个安装包时，将上述组合的 `linux_package` 改为 `uos-floatboat`，并保持 `upload_uos_store=false`。双包分别保存在 `uos-linux-x64`、`uos-linux-arm64` Actions artifacts 中，保留 7 天；不会上传统信商店、创建 GitHub Release 或更新自动更新通道。
+
 Linux 仅构建 Floatboat，不构建 Floatboat DeepSeek Agent。未在 `platforms` 中选择 `linux` 时，现有 macOS 与 Windows 流程不受影响。
 
 ## macOS 签名后运行门禁
@@ -71,6 +73,8 @@ Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使
 `reuse_uos_run_id` 默认为空，正常发布继续构建双包。修复上传器后可填入本仓 `main` 上已完成的 `release.yml` 运行 ID，复用其已成功构建并校验的两个 UOS 包；必须同时指定原来的 `version`、`repo_ref`，且 `upload_uos_store=true`、`desktop_variant=floatboat`、`platforms=linux`、`linux_package=uos-floatboat`、`build_profile=release`、`package_set=app`、`skip_release_notes=true`。恢复任务会核对来源运行、成功任务、唯一未过期制品、原清单、源码 SHA、包版本、架构、大小和摘要，再上传为当前运行的制品；当前清单及回执使用真实的新运行身份，并在 `buildSource` 保留原来源。任何来源不一致都在读取统信凭证前失败，不允许复用普通 Linux 包或缺少任一架构的包。
 
 分片上传最多 4 并发，每次 PUT 最多 300 秒；仅暂时网络错误及 HTTP 408/429/5xx 对相同 URL 和相同字节最多尝试 3 次。TLS、重定向和普通 4xx 直接失败；一个分片终止失败后取消其余请求，不执行完成上传或送审。日志只记录分片数量、重试次数和固定原因，不记录签名 URL 或响应正文。
+
+只重跑失败的上传或审核下载准备任务时，沿用无凭证校验任务输出的清单 artifact ID、摘要及生成轮次。清单必须属于同一次 workflow run 和源码，生成轮次必须与上游输出一致且不晚于当前执行轮次；回执和下载索引的 `github` 保留清单来源，`executionGithub` 记录本次实际执行。修改工作流后应发起新运行，旧运行的重跑仍使用原来的工作流提交。
 
 仓库管理员需要创建 GitHub Actions Environment `uos-app-store-production`：
 

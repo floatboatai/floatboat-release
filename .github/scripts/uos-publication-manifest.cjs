@@ -423,10 +423,13 @@ function main(argv) {
     runAttempt: process.env.GITHUB_RUN_ATTEMPT,
   });
   fs.writeFileSync(outputPath, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-  const manifestSha256 = sha256(fs.readFileSync(outputPath));
+  const manifestBytes = fs.readFileSync(outputPath);
+  const writtenManifest = JSON.parse(manifestBytes);
+  const manifestSha256 = sha256(manifestBytes);
   if (process.env.GITHUB_OUTPUT) {
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `manifest_sha256=${manifestSha256}\n`);
     fs.appendFileSync(process.env.GITHUB_OUTPUT, `package_version=${manifest.packageVersion}\n`);
+    fs.appendFileSync(process.env.GITHUB_OUTPUT, `manifest_run_attempt=${writtenManifest.github.runAttempt}\n`);
   }
   console.log(`UOS_PUBLICATION_MANIFEST_SHA256=${manifestSha256}`);
 }

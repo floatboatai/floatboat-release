@@ -216,7 +216,10 @@ async function main(argv) {
     const manifest = buildReusedManifest({ artifactsDir: first, expected, currentRunAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
       metadataSha256: process.env.UOS_BUILD_SOURCE_SHA256 });
     fs.writeFileSync(second, `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
-    appendOutputs({ manifest_sha256: sha256(fs.readFileSync(second)), package_version: manifest.packageVersion });
+    const manifestBytes = fs.readFileSync(second);
+    const writtenManifest = JSON.parse(manifestBytes);
+    appendOutputs({ manifest_sha256: sha256(manifestBytes), package_version: manifest.packageVersion,
+      manifest_run_attempt: writtenManifest.github.runAttempt });
   } else throw new Error('UOS_REUSE_INVALID: 未知复用校验操作');
 }
 
