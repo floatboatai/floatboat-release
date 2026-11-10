@@ -34,7 +34,7 @@
 | 普通 Linux DEB | `Floatboat-<version>-amd64.deb` | `Floatboat-<version>-arm64.deb` | 通用 Debian 系发行与手动下载 |
 | UOS 送审 DEB | `Floatboat-<version>-amd64.deb` | `Floatboat-<version>-arm64.deb` | 统信应用商店送审，固定使用 `control.tar.gz` 与 `data.tar.gz` |
 
-两套包使用独立的 Actions artifact 名称；正式完整发布时，普通 Linux 包进入 CDN 根路径，UOS 送审包进入 `/uos/` 路径并单独更新官网 UOS 下载地址。仅运行 Linux 平台的正式 release-profile 时，普通包保留为 Actions artifact，UOS 包在普通与 UOS 两组双架构构建都成功后发布。
+两套包使用独立的 Actions artifact 名称。在 `upload_uos_store=false` 的正式完整发布中，普通 Linux 包进入 CDN 根路径，UOS 送审包进入 `/uos/` 路径并单独更新官网 UOS 下载地址。仅运行 Linux 平台的正式 release-profile 时，普通包保留为 Actions artifact，UOS 包沿用原有的构建成功条件发布。`uos_upload_location` 默认值不影响这条普通分发路径。
 
 需要在发布前只验证四个 Linux 包时，使用 `is_rc=true`、`platforms=linux`、`linux_package=deb-and-uos`、`desktop_variant=floatboat` 和 `package_set=app`。该组合使用 release 构建配置，只生成 Actions artifacts，不创建 CDN 对象或更新官网安装包地址。
 
@@ -66,34 +66,26 @@ Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使
 
 内部发布采用失败关闭门禁：任何缺失制品、版本/文件集合/大小/SHA512 不匹配、DeepSeek 污染、S3 属性异常、CloudFront 后公网内容未收敛，都会令发布步骤失败；策略文件不会在轨道内容完成验证前上传。
 
-## UOS 商店自动送审
+## UOS 工作台审核包准备
 
-`release.yml` 的 `upload_uos_store` 默认是 `false`。只有 `com.floatboat.desktop` 的稳定或 RC UOS Floatboat 构建、amd64/arm64 两个包均构建成功或经来源校验恢复，并通过无凭证校验后，才会进入统信商店上传并自动提交审核；RC 送审使用 `platforms=linux`、`is_rc=true`，稳定版沿用包含 Linux 的正式构建。普通 Linux、Windows、macOS、DeepSeek 与默认发布流程不会读取统信凭证。该流程完全运行在 GitHub Actions 中，不依赖 Desktop Backend 或其他发布请求服务。
+统信商店的包上传、提交审核和状态回读由 **UOS 工作台** 执行。`release.yml` 负责构建或复用 amd64/arm64 双包、校验内容，以及准备工作台可下载的 CDN 制品；它不登录统信平台，不读取统信账号凭证，也不执行商店发布器。Actions 运行成功只表示审核下载已准备好，不表示已经送审。
 
-`reuse_uos_run_id` 默认为空，正常发布继续构建双包。修复上传器后可填入本仓 `main` 上已完成的 `release.yml` 运行 ID，复用其已成功构建并校验的两个 UOS 包；必须同时指定原来的 `version`、`repo_ref`，且 `upload_uos_store=true`、`desktop_variant=floatboat`、`platforms=linux`、`linux_package=uos-floatboat`、`build_profile=release`、`package_set=app`、`skip_release_notes=true`。恢复任务会核对来源运行、成功任务、唯一未过期制品、原清单、源码 SHA、包版本、架构、大小和摘要，再上传为当前运行的制品；当前清单及回执使用真实的新运行身份，并在 `buildSource` 保留原来源。任何来源不一致都在读取统信凭证前失败，不允许复用普通 Linux 包或缺少任一架构的包。
+为兼容现有调用，输入名 `upload_uos_store` 保留，默认仍为 `false`。设为 `true` 的含义是“准备工作台审核下载”。`uos_upload_location` 默认且唯一支持的执行位置是 `workbench`；旧调用显式传入 `actions` 并开启 `upload_uos_store` 会在构建前明确失败，避免旧客户端将成功结果误认为已经自动送审。`upload_uos_store=false` 的普通发布与仅出包任务不受默认 `workbench` 影响；稳定版官网 CDN 分发沿用原有条件。
 
-分片上传最多 4 并发，每次 PUT 最多 300 秒；仅暂时网络错误及 HTTP 408/429/5xx 对相同 URL 和相同字节最多尝试 3 次。TLS、重定向和普通 4xx 直接失败；一个分片终止失败后取消其余请求，不执行完成上传或送审。日志只记录分片数量、重试次数和固定原因，不记录签名 URL 或响应正文。
+准备审核下载时，使用 `desktop_variant=floatboat`、`linux_package=uos-floatboat`、`build_profile=release`、`package_set=app`、`skip_release_notes=true`，并提供不可变的源码 SHA。RC 使用 `platforms=linux`、`is_rc=true`；稳定版使用 `is_rc=false` 且平台包含 Linux。仅当 `com.floatboat.desktop` 的双架构包均成功构建或经来源校验恢复，并通过无凭证校验后，才发布审核下载。
 
-只重跑失败的上传或审核下载准备任务时，沿用无凭证校验任务输出的清单 artifact ID、摘要及生成轮次。清单必须属于同一次 workflow run 和源码，生成轮次必须与上游输出一致且不晚于当前执行轮次；回执和下载索引的 `github` 保留清单来源，`executionGithub` 记录本次实际执行。修改工作流后应发起新运行，旧运行的重跑仍使用原来的工作流提交。
+`reuse_uos_run_id` 默认为空，正常流程构建双包。需要复用时，填入本仓 `main` 上已完成的 `release.yml` 运行 ID，并指定与来源相同的 `version`、`repo_ref`；复用还要求 `upload_uos_store=true` 和 `platforms=linux`。恢复任务核对来源运行、成功任务、唯一未过期制品、原清单、源码 SHA、包版本、架构、大小和摘要，再保存为当前运行的制品。当前清单使用真实的新运行身份，并在 `buildSource` 保留原来源；任何来源不一致都会在准备 CDN 下载前失败。
 
-仓库管理员需要创建 GitHub Actions Environment `uos-app-store-production`：
+审核包、清单和下载索引发布到 `https://release.aoe.chat/uos/review/`，按版本、来源 SHA 与完整内容 SHA 寻址，不修改官网正式下载指针。已有对象只有摘要和大小相同时才能复用。CDN 完整下载回验后，输出 `uos-review-downloads-<UOS版本>-<run>-<attempt>` 制品。工作台核验并下载双包，用户在官方页面登录后，由工作台所在机器完成上传、提交和回读。
 
-- Environment deployment branch 只允许 `main`。
-- Environment Secrets 只配置 `UOS_STORE_USERNAME` 与 `UOS_STORE_PASSWORD`，不要把明文写入 workflow、仓库变量、安装包、日志或制品。
-- 可按需要为 Environment 配置 required reviewers，审批通过前 Job 无法读取 Secrets。
+只重跑失败的审核下载准备任务时，沿用无凭证校验任务输出的清单 artifact ID、摘要及生成轮次。清单必须属于同一次 workflow run 和源码，生成轮次必须与上游输出一致且不晚于当前执行轮次。下载索引的 `github` 保留清单来源，`executionGithub` 记录本次实际执行。修改工作流后应发起新运行，旧运行的重跑仍使用原来的工作流提交。
 
-发布器在受保护 Actions Job 内启动临时 Chromium，填写统信官方密码登录页并点击一次登录，由官网脚本执行加密、会话及后续中转；只有浏览器最终到达固定商店回跳且 `state` 匹配，才提取一次性 `code/state`，交给固定 HTTPS 商店接口建立短期会话。不会再把密码接口返回的第一个 `redirect` 当作最终商店回跳。浏览器不导出 Cookie 或登录状态，临时目录仅位于 Linux 内存文件系统，退出时关闭并删除；密码、Cookie、Token 不进入日志、安装包或回执。遇到 CAPTCHA、MFA、账号绑定、撤销注销、授权确认或其他人工提示时停止，不自动点击这些页面。
+UOS 包版本遵循四段规则：稳定来源 `X.Y.Z` 生成 `X.Y.Z.0`，RC 来源 `X.Y.Z-rc.N` 生成 `X.Y.Z.N`。仅需两个安装包、不准备审核下载时，使用前述 Linux 双通道打包章节的 UOS 仅出包参数。
 
-Playwright 使用 `.github/scripts/uos-browser-runtime` 中固定版本及锁文件，依赖和 Chromium 在注入 Secret 前安装；浏览器子进程不继承 UOS 凭证，认证步骤关闭调试日志，不启用截图、trace、video、HAR、持久 profile 或跨运行缓存。原有 API 模拟登录代码仅保留作协议测试，生产认证统一使用网页登录适配器。
+## UOS 独立登录诊断
 
-`upload_uos_store=true` 登录成功后会继续上传双架构包并提交审核。首次真实运行前可按团队流程配置 Environment required reviewers，由发布负责人核对版本与无凭证校验 Job 后批准；本地 mock 测试证明协议形状、幂等状态机和脱敏边界，不替代真实账号资格与平台联调。
+**UOS Authentication Check**（`uos-auth-check.yml`）是手动从 `main` 发起的独立诊断入口，仅验证开发者会话和 `com.floatboat.desktop` 的应用身份，不构建、下载、上传或提交安装包。它不由 `release.yml` 调用，也不代表工作台已经登录或已经送审。
 
-内部 UOS 工作台使用 `uos_upload_location=workbench`：云端构建或复用双包后，只进行校验并发布到 `https://release.aoe.chat/uos/review/`，不进入统信账号任务、不修改官网正式下载指针。包、清单和下载索引均按版本、来源 SHA 与完整内容 SHA 寻址；已有对象只有摘要和大小相同时才能复用。CDN 完整下载回验后，输出 `uos-review-downloads-<UOS版本>-<run>-<attempt>` 制品。工作台所在机器核验并下载双包，由用户在官方页面登录一次，再从本机上传、提交和回读；本机不保存密码，结束时清理内存会话。默认 `uos_upload_location=actions` 保留受保护 Actions 发布方式。
+该诊断使用 `uos-app-store-production` Environment：部署分支只允许 `main`，Environment Secrets 保存 `UOS_STORE_USERNAME` 与 `UOS_STORE_PASSWORD`，可按需配置 required reviewers。凭证不写入 workflow、仓库变量、安装包、日志或制品。临时浏览器会话在任务结束时清理；遇到 CAPTCHA、MFA、账号绑定或授权确认等人工交互时停止。失败只输出固定错误码与脱敏分类。
 
-登录联调使用独立的 **UOS Authentication Check**（`uos-auth-check.yml`），手动从 `main` 发起。它使用与送审相同的网页登录适配器、受保护 Environment 与互斥组，只验证开发者会话和 `com.floatboat.desktop` 的应用身份，不构建、下载、上传或提交安装包。先通过真实认证检查，再发起完整送审；本地离线测试不代表真实账号已登录。失败只输出固定错误码、白名单静态原因和受限分类，不输出实际 URL、Cookie、令牌、页面内容、Playwright 原始异常或 code/state 值。
-
-网页契约依据（2026-11-05）：[统信登录页面脚本](https://login.uniontech.com/main-es2015.c2432283df9f5420074a.js) 的 `toLogin`、`oauth2/follow` 与 `registerlogin`，以及[官方中文文案](https://login.uniontech.com/assets/i18n/zh.json)。固定 follow 页的“我已了解，立即登录”仅关闭社群宣传提示，允许点击一次；“授权并登录”等账号授权操作不自动确认。离线浏览器回归只使用假页面和假凭证，通过 `UOS_BROWSER_OFFLINE_TEST=true` 显式运行 `uniontech-browser-authenticator.integration.test.cjs`，不访问真实统信账号。
-
-UOS 包版本遵循四段规则：稳定来源 `X.Y.Z` 生成 `X.Y.Z.0`，RC 来源 `X.Y.Z-rc.N` 生成 `X.Y.Z.N`。发布器会在上传前读取商店版本历史，拒绝低于商店最高版本的候选；同版本必须通过 amd64/arm64 SHA-256 内容一致性检查后才允许幂等恢复或提交审核。
-
-更新已有应用时，平台应用 ID 与 `com.floatboat.desktop` 包名分别校验；详情支持官网的平铺结构及 `app_info` 包装。上传前确认旧版双架构模板，替换包时继承对应架构的系统适配字段，保留应用文案、截图和完整 `app_fit_info`，同步语言描述引用的包文件 key。平台架构码 `4` 是 X86、`3` 是 ARM，`0` 表示全架构，不能当作 amd64。提交后必须回读同版本双包 SHA-256；服务端未返回可验证摘要时，不宣称送审确认成功。
+`.github/scripts/uos-store-publisher.cjs` 等既有上传脚本保留作兼容与协议测试，`release.yml` 不再执行这些脚本。独立登录诊断沿用固定版本的 `.github/scripts/uos-browser-runtime`，在注入凭证前安装依赖和 Chromium；离线浏览器回归通过 `UOS_BROWSER_OFFLINE_TEST=true` 运行 `uniontech-browser-authenticator.integration.test.cjs`，只使用假页面和假凭证，不访问真实统信账号。

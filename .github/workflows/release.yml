@@ -97,17 +97,16 @@ on:
         default: false
         type: boolean
       upload_uos_store:
-        description: "Upload both verified UOS packages and submit them for review"
+        description: "Prepare verified UOS downloads for upload and review submission from Workbench"
         required: false
         default: false
         type: boolean
       uos_upload_location:
-        description: "Internal UOS upload executor (workbench prepares verified CDN downloads)"
+        description: "UOS upload executor; GitHub only prepares downloads for Workbench"
         required: false
-        default: "actions"
+        default: "workbench"
         type: choice
         options:
-          - "actions"
           - "workbench"
       reuse_uos_run_id:
         description: "Optional completed Release run whose verified UOS packages match this source SHA and version"
@@ -308,18 +307,19 @@ jobs:
             [ "$PLATFORMS" = "linux" ] || { echo "::error::UOS artifact reuse requires exactly linux"; exit 1; }
           fi
 
-          case "${UOS_UPLOAD_LOCATION:-actions}" in
-            actions) ;;
-            workbench)
-              [ "$UPLOAD_UOS_STORE" = "true" ] || { echo "::error::Workbench UOS upload requires upload_uos_store=true"; exit 1; }
+          if [ "$UPLOAD_UOS_STORE" != "true" ]; then
+            echo "UOS Workbench download preparation is disabled; continue the selected build/release scope."
+            exit 0
+          fi
+
+          case "${UOS_UPLOAD_LOCATION:-workbench}" in
+            workbench) ;;
+            actions)
+              echo "::error::GitHub no longer uploads to the UOS App Store. Use uos_upload_location=workbench to prepare downloads."
+              exit 1
               ;;
             *) echo "::error::Unsupported UOS upload location"; exit 1 ;;
           esac
-
-          if [ "$UPLOAD_UOS_STORE" != "true" ]; then
-            echo "UOS App Store publication is disabled; existing release behavior is unchanged."
-            exit 0
-          fi
 
           [ "$NOTIFY_ONLY" = "false" ] || { echo "::error::UOS App Store publication does not support notify_only"; exit 1; }
           if [[ "$VERSION" == *-rc.* ]]; then
@@ -2014,7 +2014,7 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       always() &&
-      inputs.uos_upload_location != 'workbench' &&
+      inputs.upload_uos_store != true &&
       inputs.notify_only == false &&
       inputs.is_rc == false &&
       inputs.build_profile == 'release' &&
@@ -2310,98 +2310,13 @@ jobs:
           if-no-files-found: error
 
   # ===========================================
-  # Publish UOS App Store (protected Environment)
-  # ===========================================
-  publish-uos-store:
-    name: Publish UOS App Store
-    needs: [prepare, validate-uos-publication]
-    runs-on: ubuntu-22.04
-    if: ${{ !cancelled() && inputs.uos_upload_location != 'workbench' && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
-    environment: uos-app-store-production
-    concurrency:
-      group: uos-app-store-production
-      cancel-in-progress: false
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Checkout trusted UOS publisher
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: ${{ github.sha }}
-          path: release-tooling
-          persist-credentials: false
-          sparse-checkout: .github/scripts
-
-      - name: Setup UOS authentication package manager
-        uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
-        with:
-          version: 10.24.0
-          run_install: false
-
-      - name: Install pinned UOS authentication browser
-        env:
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/uos-browser-binaries
-        run: |
-          pnpm --dir release-tooling/.github/scripts/uos-browser-runtime install --frozen-lockfile --ignore-scripts
-          pnpm --dir release-tooling/.github/scripts/uos-browser-runtime exec playwright install --with-deps --only-shell chromium
-
-      - name: Download current-run UOS artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          pattern: uos-linux-*
-          path: artifacts/uos
-          merge-multiple: true
-
-      - name: Download verified UOS publication manifest
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          artifact-ids: ${{ needs.validate-uos-publication.outputs.manifest_artifact_id }}
-          path: verified
-          merge-multiple: true
-
-      - name: Upload both UOS packages and submit review
-        env:
-          DEBUG: ''
-          PWDEBUG: ''
-          PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/uos-browser-binaries
-          UOS_STORE_USERNAME: ${{ secrets.UOS_STORE_USERNAME }}
-          UOS_STORE_PASSWORD: ${{ secrets.UOS_STORE_PASSWORD }}
-          UOS_PUBLICATION_MANIFEST_SHA256: ${{ needs.validate-uos-publication.outputs.manifest_sha256 }}
-          UOS_PUBLICATION_MANIFEST_RUN_ATTEMPT: ${{ needs.validate-uos-publication.outputs.manifest_run_attempt }}
-          UOS_SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-        run: |
-          set -euo pipefail
-          umask 077
-          mkdir -p private
-          node release-tooling/.github/scripts/uos-store-publisher.cjs \
-            artifacts/uos \
-            verified/uos-publication-manifest.json \
-            private/uos-publication-receipt.json \
-            private/uos-publication-journal.json
-
-      - name: Upload redacted UOS publication receipt
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: uos-publication-receipt-${{ needs.validate-uos-publication.outputs.package_version }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: private/uos-publication-receipt.json
-          retention-days: 30
-          if-no-files-found: error
-
-      - name: Remove UOS publication session files
-        if: always()
-        run: |
-          rm -rf artifacts/uos verified private
-
-  # ===========================================
   # Prepare verified downloads for local UOS review (no Store Secrets)
   # ===========================================
   stage-uos-review:
     name: Prepare UOS Workbench Downloads
     needs: [prepare, validate-uos-publication]
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() && inputs.uos_upload_location == 'workbench' && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
+    if: ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
     permissions:
       actions: read
       contents: read
