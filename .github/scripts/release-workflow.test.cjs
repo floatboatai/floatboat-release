@@ -708,6 +708,32 @@ test('CAM++ 模型先恢复并验证缓存，再清理工具目录并打包', ()
   }
 });
 
+test('CAM++ 推理校验失败时保留独立诊断安装包且不进入已验证制品', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  for (const [jobName, platform, arch, extensions] of [
+    ['build-macos-arm64', 'darwin', 'arm64', ['dmg', 'zip']],
+    ['build-macos-x64', 'darwin', 'x64', ['dmg', 'zip']],
+    ['build-windows', 'win32', 'x64', ['exe']],
+  ]) {
+    const job = readNamedJob(workflow, jobName);
+    const verify = readNamedStep(job, 'Verify packaged CAM++ runtime');
+    const diagnostic = readNamedStep(job, 'Upload CAM++ diagnostic test packages');
+    assert.match(verify, /id: verify_campplus/);
+    assert.match(diagnostic, /if: failure\(\) && needs\.prepare\.outputs\.is_test == 'true' && inputs\.speaker_embedding_model == 'campplus' && steps\.verify_campplus\.outcome == 'failure'/);
+    assert.ok(diagnostic.includes(`name: diagnostic-test-packages-${platform}-${arch}`));
+    for (const extension of extensions) assert.ok(diagnostic.includes(`out/make/**/*.${extension}`));
+    assert.match(diagnostic, /retention-days: 7/);
+    assert.match(diagnostic, /if-no-files-found: warn/);
+    assert.ok(job.indexOf('- name: Verify packaged CAM++ runtime') < job.indexOf('- name: Upload CAM++ diagnostic test packages'));
+    assert.doesNotMatch(verify, /continue-on-error/);
+  }
+  const upload = readNamedJob(workflow, 'upload');
+  assert.doesNotMatch(upload, /diagnostic-test-packages/);
+  assert.match(upload, /needs\.build-macos-arm64\.result == 'success'/);
+  assert.match(upload, /needs\.build-macos-x64\.result == 'success'/);
+  assert.match(upload, /needs\.build-windows\.result == 'success'/);
+});
+
 test('测试包说明不读取或公开私有源码提交历史，正式发布仍使用标签差异', () => {
   const step = readNamedStep(fs.readFileSync(workflowPath, 'utf8'), 'Generate changelog');
   const marker = '        run: |\n';

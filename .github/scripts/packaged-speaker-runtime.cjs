@@ -47,6 +47,17 @@ function validatePackagedVersion(packageVersion, identityAppVersion) {
   return packageVersion;
 }
 
+function getPackagedRuntimeRelative(archivePath, runtimePath, platform) {
+  const paths = require('node:path')[platform === 'win32' ? 'win32' : 'posix'];
+  // Windows 普通路径、长路径和 UNC 必须统一后比较；调用方先解析真实路径，拒绝包外软链接。
+  const normalize = (value) => platform === 'win32' ? paths.toNamespacedPath(paths.resolve(value)) : paths.resolve(value);
+  const relative = paths.relative(normalize(archivePath), normalize(runtimePath));
+  if (!relative || paths.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${paths.sep}`)) {
+    throw new Error('RUNTIME_RESOLVED_OUTSIDE_PACKAGE');
+  }
+  return relative.split(paths.sep).join('/');
+}
+
 async function verifyBundledModel(resources) {
   const bundledDirectory = path.join(resources, 'speaker-models');
   const modelPath = path.join(bundledDirectory, `${MODEL.sha256}.onnx`);
@@ -66,6 +77,7 @@ function electronHost(configuration) {
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let packageVersion;
+  let runtimePathFromResources;
   const started = Date.now();
   const stages = [];
   const timer = setTimeout(() => finish(false, 'INFERENCE_TIMEOUT'), configuration.timeoutMs);
@@ -82,6 +94,7 @@ function electronHost(configuration) {
       nodeVersion: process.versions.node,
       sourceSha: configuration.sourceSha,
       packageVersion,
+      runtimePathFromResources,
       model: 'campplus',
       modelSha256: configuration.model.sha256,
       modelBytes: configuration.model.bytes,
@@ -124,14 +137,19 @@ function electronHost(configuration) {
     const entry = path.join(archive, configuration.utilityEntry);
     if (!fs.existsSync(entry)) return finish(false, 'PACKAGED_UTILITY_MISSING');
     const resolver = createRequire(entry);
-    const runtime = resolver.resolve('sherpa-onnx-node');
-    const runtimeRelative = path.relative(archive, runtime).replaceAll('\\', '/');
-    if (!runtimeRelative.startsWith('node_modules/sherpa-onnx-node/')) return finish(false, 'RUNTIME_RESOLVED_OUTSIDE_PACKAGE');
+    const runtime = fs.realpathSync(resolver.resolve('sherpa-onnx-node'));
+    runtimePathFromResources = path.relative(configuration.resources, runtime).split(path.sep).join('/').slice(0, 512);
+    let runtimeRelative;
+    try {
+      runtimeRelative = getPackagedRuntimeRelative(archive, runtime, process.platform);
+    } catch (error) {
+      return finish(false, error.message);
+    }
     const nativeName = `sherpa-onnx-${process.platform === 'win32' ? 'win' : process.platform}-${process.arch}`;
     const nativeRoot = path.join(configuration.resources, 'app.asar.unpacked', 'node_modules', nativeName);
     const nativeManifest = JSON.parse(fs.readFileSync(path.join(nativeRoot, 'package.json'), 'utf8'));
-    const wrapperManifest = resolver('sherpa-onnx-node/package.json');
-    if (nativeManifest.name !== nativeName || nativeManifest.version !== configuration.runtimeVersion || wrapperManifest.version !== configuration.runtimeVersion) return finish(false, 'PACKAGED_RUNTIME_VERSION_MISMATCH');
+    const wrapperManifest = JSON.parse(fs.readFileSync(path.join(path.dirname(runtime), 'package.json'), 'utf8'));
+    if (nativeManifest.name !== nativeName || nativeManifest.version !== configuration.runtimeVersion || wrapperManifest.name !== 'sherpa-onnx-node' || wrapperManifest.version !== configuration.runtimeVersion) return finish(false, 'PACKAGED_RUNTIME_VERSION_MISMATCH');
     if (!fs.statSync(path.join(nativeRoot, 'sherpa-onnx.node')).isFile()) return finish(false, 'PACKAGED_NATIVE_BINDING_MISSING');
     const systemRoot = process.env.SystemRoot || process.env.WINDIR;
     const bootstrap = path.join(configuration.userData, 'speaker-offline-bootstrap.cjs');
@@ -222,7 +240,7 @@ process.parentPort?.postMessage({ kind: 'speaker-package-offline-guard', active:
       utilityEntry: UTILITY_ENTRY, cache, userData, hostReport, bundledDirectory, offlineGuard, timeoutMs: 120_000,
     };
     const host = path.join(scratch, 'host.cjs');
-    await fsp.writeFile(host, `${validatePackagedVersion.toString()}\n(${electronHost.toString()})(${JSON.stringify(configuration)});\n`);
+    await fsp.writeFile(host, `${validatePackagedVersion.toString()}\n${getPackagedRuntimeRelative.toString()}\n(${electronHost.toString()})(${JSON.stringify(configuration)});\n`);
     const env = { ...process.env };
     for (const name of ['ELECTRON_RUN_AS_NODE', 'NODE_OPTIONS', 'NODE_PATH']) delete env[name];
     const exitCode = await new Promise((resolve, reject) => {
@@ -267,7 +285,7 @@ function parseArguments(argv) {
   return result;
 }
 
-module.exports = { MODEL, RUNTIME_VERSION, validatePackagedConfiguration, validatePackagedVersion, validateModelBytes, verifyBundledModel, parseArguments, runVerification };
+module.exports = { MODEL, RUNTIME_VERSION, validatePackagedConfiguration, validatePackagedVersion, getPackagedRuntimeRelative, validateModelBytes, verifyBundledModel, parseArguments, runVerification };
 if (require.main === module) {
   Promise.resolve().then(() => runVerification(parseArguments(process.argv.slice(2))))
     .then((report) => console.log(`CAM++ packaged runtime verified: ${report.platform}/${report.arch}, ${report.dimensions} dimensions`))
