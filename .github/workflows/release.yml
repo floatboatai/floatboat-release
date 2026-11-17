@@ -81,6 +81,14 @@ on:
           - "release"
           - "test"
           - "internal-test"
+      speaker_embedding_model:
+        description: "Optional speaker model override for -test.N packages only"
+        required: false
+        default: "default"
+        type: choice
+        options:
+          - "default"
+          - "campplus"
       package_set:
         description: "Package set to build (auto: DeepSeek-only/non-release=app, full release=all)"
         required: false
@@ -158,6 +166,7 @@ jobs:
           INPUT_LINUX_PACKAGE: ${{ inputs.linux_package }}
           INPUT_UPLOAD_UOS_STORE: ${{ inputs.upload_uos_store }}
           INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
+          INPUT_SPEAKER_EMBEDDING_MODEL: ${{ inputs.speaker_embedding_model }}
         run: |
           set -euo pipefail
 
@@ -167,11 +176,22 @@ jobs:
             [ "$INPUT_IS_RC" = "false" ] || { echo "::error::test versions require is_rc=false"; exit 1; }
             [ "$INPUT_BUILD_PROFILE" = "release" ] || { echo "::error::test versions require build_profile=release to keep signing and production environment"; exit 1; }
             [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::test versions require desktop_variant=floatboat"; exit 1; }
-            [ "$INPUT_PLATFORMS" = "windows" ] || { echo "::error::test versions require platforms=windows"; exit 1; }
+            case "$INPUT_PLATFORMS" in
+              "macos"|"windows"|"macos,windows") ;;
+              *) echo "::error::test versions require supported platforms: macos, windows, or macos,windows"; exit 1 ;;
+            esac
             [ "$INPUT_UPLOAD_UOS_STORE" = "false" ] || { echo "::error::test versions do not support UOS publication"; exit 1; }
             [ "$INPUT_PROMOTE_MERGED_BUGS" = "false" ] || { echo "::error::test versions do not promote merged bugs"; exit 1; }
-            echo "::notice::test build uses release profile, signed Windows artifact only; no tag, Release, feed, or notification will be published."
+            echo "::notice::test build uses release profile and signed macOS/Windows artifacts; no tag, Release, feed, or notification will be published."
           fi
+
+          case "${INPUT_SPEAKER_EMBEDDING_MODEL:-default}" in
+            default) ;;
+            campplus)
+              [ "$is_test" = "true" ] || { echo "::error::speaker_embedding_model is only supported for test versions"; exit 1; }
+              ;;
+            *) echo "::error::Unsupported speaker_embedding_model"; exit 1 ;;
+          esac
 
           if [ "$INPUT_IS_RC" = "true" ]; then
             [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::RC publishing requires desktop_variant=floatboat"; exit 1; }
@@ -256,7 +276,7 @@ jobs:
         run: |
           package_set="${{ inputs.package_set }}"
           if [ "$package_set" = "auto" ]; then
-            if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ]; then
+            if [ "${{ steps.release_scope.outputs.is_test }}" = "true" ] || [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ]; then
               package_set="app"
             elif [ "${{ inputs.build_profile }}" != "release" ]; then
               package_set="app"
@@ -266,6 +286,10 @@ jobs:
           fi
           if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ] && [ "$package_set" != "app" ]; then
             echo "::error::DeepSeek-only publishing requires package_set=app"
+            exit 1
+          fi
+          if [ "${{ steps.release_scope.outputs.is_test }}" = "true" ] && [ "$package_set" != "app" ]; then
+            echo "::error::test versions require package_set=app"
             exit 1
           fi
           if [ "${{ inputs.is_rc }}" = "true" ] && [ "$package_set" != "app" ]; then
@@ -527,11 +551,22 @@ jobs:
           CURRENT_TAG="${{ steps.release_scope.outputs.release_tag }}"
           SOURCE_SHA="${{ steps.source.outputs.source_sha }}"
 
+          if [ "$IS_TEST" = "true" ]; then
+            CHANGELOG_FILE="changelog-test-${VERSION}.md"
+            {
+              echo "# Test Build ${VERSION}"
+              echo ""
+              echo "Source: ${SOURCE_SHA}"
+              echo "Platforms: ${{ inputs.platforms }}"
+            } > "/tmp/${CHANGELOG_FILE}"
+            echo "changelog_file=${CHANGELOG_FILE}" >> "$GITHUB_OUTPUT"
+            echo "prev_tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           echo "🔍 Finding previous tag for ${CURRENT_TAG} (is_rc=${IS_RC}, is_test=${IS_TEST})"
 
-          if [ "$IS_TEST" = "true" ]; then
-            PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
-          elif [ "$IS_RC" == "true" ]; then
+          if [ "$IS_RC" == "true" ]; then
             # Extract base version (e.g., 0.4.1 from 0.4.1-rc.12)
             BASE_VERSION=$(echo "$VERSION" | sed 's/-rc\.[0-9]*$//')
             # Find previous RC for this base version
@@ -566,8 +601,6 @@ jobs:
           {
             if [ "$IS_RC" == "true" ]; then
               echo "# Release Candidate ${CURRENT_TAG}"
-            elif [ "$IS_TEST" = "true" ]; then
-              echo "# Test Build ${CURRENT_TAG}"
             else
               echo "# Release ${CURRENT_TAG}"
             fi
@@ -576,11 +609,7 @@ jobs:
             if [ -n "$PREV_TAG" ]; then
               echo "**Changes since ${PREV_TAG}:**"
               echo ""
-              if [ "$IS_TEST" = "true" ]; then
-                CHANGES=$(git log "$SOURCE_SHA" --no-merges --format="- %s" -200)
-              else
-                CHANGES=$(git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200)
-              fi
+              CHANGES=$(git log "${PREV_TAG}..${CURRENT_TAG}" --no-merges --format="- %s" | head -200)
               if [ -n "$CHANGES" ]; then
                 echo "$CHANGES"
               else
@@ -627,6 +656,20 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Configure test speaker model
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const content = fs.existsSync('.env') ? fs.readFileSync('.env', 'utf8') : '';
+          const lines = content.split(/\r?\n/).filter((line) => !/^\s*(?:export\s+)?AOE_SPEAKER_EMBEDDING_MODEL\s*=/.test(line));
+          while (lines.at(-1) === '') lines.pop();
+          lines.push('AOE_SPEAKER_EMBEDDING_MODEL=campplus', '');
+          fs.writeFileSync('.env', lines.join('\n'));
+          console.log('Configured CAM++ in test package environment');
+          NODE
 
       - name: Inject build profile .env
         if: inputs.build_profile != 'release'
@@ -762,8 +805,22 @@ jobs:
       - name: Checkout release tooling for bundled sources
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           path: release-tooling
           sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Restore bundled CAM++ model cache
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/cache@v4
+        with:
+          path: resources/speaker-models
+          key: speaker-model-${{ runner.os }}-campplus-f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11-v1
+
+      - name: Prepare bundled CAM++ model
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        run: node release-tooling/.github/scripts/prepare-speaker-model.cjs resources/speaker-models
 
       - name: Seed bundled tool sources
         shell: bash
@@ -882,6 +939,38 @@ jobs:
           set -euo pipefail
           node scripts/packaging/packaged-workbench-runtime.mjs "$PWD/out/${{ matrix.app_name }}-darwin-arm64/${{ matrix.app_name }}.app/Contents/Resources" arm64
 
+      - name: Checkout speaker verification tooling
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Verify packaged CAM++ runtime
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          electron_path=$(node -p "require('electron')")
+          resources_path=$(node -e "process.stdout.write(require('node:path').resolve('out/Floatboat-darwin-arm64/Floatboat.app/Contents/Resources'))")
+          report_path=$(node -e "process.stdout.write(require('node:path').resolve('reports/speaker-runtime-darwin-arm64.json'))")
+          node release-tooling/.github/scripts/packaged-speaker-runtime.cjs \
+            --resources "$resources_path" --electron "$electron_path" \
+            --source-sha "$SOURCE_SHA" --platform "darwin" --arch "arm64" --report "$report_path"
+
+      - name: Upload CAM++ runtime report
+        if: always() && needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/upload-artifact@v4
+        with:
+          name: speaker-runtime-darwin-arm64
+          path: reports/speaker-runtime-darwin-arm64.json
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Collect arm64 production artifacts
         shell: bash
         env:
@@ -939,6 +1028,20 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Configure test speaker model
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const content = fs.existsSync('.env') ? fs.readFileSync('.env', 'utf8') : '';
+          const lines = content.split(/\r?\n/).filter((line) => !/^\s*(?:export\s+)?AOE_SPEAKER_EMBEDDING_MODEL\s*=/.test(line));
+          while (lines.at(-1) === '') lines.pop();
+          lines.push('AOE_SPEAKER_EMBEDDING_MODEL=campplus', '');
+          fs.writeFileSync('.env', lines.join('\n'));
+          console.log('Configured CAM++ in test package environment');
+          NODE
 
       - name: Inject build profile .env
         if: inputs.build_profile != 'release'
@@ -1074,8 +1177,22 @@ jobs:
       - name: Checkout release tooling for bundled sources
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           path: release-tooling
           sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Restore bundled CAM++ model cache
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/cache@v4
+        with:
+          path: resources/speaker-models
+          key: speaker-model-${{ runner.os }}-campplus-f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11-v1
+
+      - name: Prepare bundled CAM++ model
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        run: node release-tooling/.github/scripts/prepare-speaker-model.cjs resources/speaker-models
 
       - name: Seed bundled tool sources
         shell: bash
@@ -1194,6 +1311,38 @@ jobs:
           set -euo pipefail
           node scripts/packaging/packaged-workbench-runtime.mjs "$PWD/out/${{ matrix.app_name }}-darwin-x64/${{ matrix.app_name }}.app/Contents/Resources" x64
 
+      - name: Checkout speaker verification tooling
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Verify packaged CAM++ runtime
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          electron_path=$(node -p "require('electron')")
+          resources_path=$(node -e "process.stdout.write(require('node:path').resolve('out/Floatboat-darwin-x64/Floatboat.app/Contents/Resources'))")
+          report_path=$(node -e "process.stdout.write(require('node:path').resolve('reports/speaker-runtime-darwin-x64.json'))")
+          node release-tooling/.github/scripts/packaged-speaker-runtime.cjs \
+            --resources "$resources_path" --electron "$electron_path" \
+            --source-sha "$SOURCE_SHA" --platform "darwin" --arch "x64" --report "$report_path"
+
+      - name: Upload CAM++ runtime report
+        if: always() && needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/upload-artifact@v4
+        with:
+          name: speaker-runtime-darwin-x64
+          path: reports/speaker-runtime-darwin-x64.json
+          retention-days: 7
+          if-no-files-found: warn
+
       - name: Collect x64 production artifacts
         shell: bash
         env:
@@ -1250,6 +1399,20 @@ jobs:
           repository: ${{ vars.SOURCE_REPO }}
           ref: ${{ needs.prepare.outputs.source_sha }}
           token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Configure test speaker model
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const content = fs.existsSync('.env') ? fs.readFileSync('.env', 'utf8') : '';
+          const lines = content.split(/\r?\n/).filter((line) => !/^\s*(?:export\s+)?AOE_SPEAKER_EMBEDDING_MODEL\s*=/.test(line));
+          while (lines.at(-1) === '') lines.pop();
+          lines.push('AOE_SPEAKER_EMBEDDING_MODEL=campplus', '');
+          fs.writeFileSync('.env', lines.join('\n'));
+          console.log('Configured CAM++ in test package environment');
+          NODE
 
       - name: Inject build profile .env
         if: inputs.build_profile != 'release'
@@ -1335,8 +1498,22 @@ jobs:
       - name: Checkout release tooling for bundled sources
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           path: release-tooling
           sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Restore bundled CAM++ model cache
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/cache@v4
+        with:
+          path: resources/speaker-models
+          key: speaker-model-${{ runner.os }}-campplus-f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11-v1
+
+      - name: Prepare bundled CAM++ model
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        run: node release-tooling/.github/scripts/prepare-speaker-model.cjs resources/speaker-models
 
       - name: Seed bundled tool sources
         shell: msys2 {0}
@@ -1474,6 +1651,38 @@ jobs:
             exit 1
           }
           Write-Host "Authenticode signature valid: $installer"
+
+      - name: Checkout speaker verification tooling
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+          ref: ${{ github.sha }}
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Verify packaged CAM++ runtime
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        shell: bash
+        env:
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          electron_path=$(node -p "require('electron')")
+          resources_path=$(node -e "process.stdout.write(require('node:path').resolve('out/Floatboat-win32-x64/resources'))")
+          report_path=$(node -e "process.stdout.write(require('node:path').resolve('reports/speaker-runtime-win32-x64.json'))")
+          node release-tooling/.github/scripts/packaged-speaker-runtime.cjs \
+            --resources "$resources_path" --electron "$electron_path" \
+            --source-sha "$SOURCE_SHA" --platform "win32" --arch "x64" --report "$report_path"
+
+      - name: Upload CAM++ runtime report
+        if: always() && needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/upload-artifact@v4
+        with:
+          name: speaker-runtime-win32-x64
+          path: reports/speaker-runtime-win32-x64.json
+          retention-days: 7
+          if-no-files-found: warn
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
@@ -2015,6 +2224,7 @@ jobs:
     if: |
       always() &&
       inputs.upload_uos_store != true &&
+      needs.prepare.outputs.is_test != 'true' &&
       inputs.notify_only == false &&
       inputs.is_rc == false &&
       inputs.build_profile == 'release' &&
@@ -2849,11 +3059,15 @@ jobs:
         ) ||
         (
           needs.prepare.outputs.is_test == 'true' &&
-          inputs.platforms == 'windows' &&
           needs.prepare.outputs.package_set == 'app' &&
-          needs.build-windows.result == 'success'
+          (!contains(inputs.platforms, 'macos') || (
+            needs.build-macos-arm64.result == 'success' &&
+            needs.build-macos-x64.result == 'success'
+          )) &&
+          (!contains(inputs.platforms, 'windows') || needs.build-windows.result == 'success')
         ) ||
         (
+          needs.prepare.outputs.is_test != 'true' &&
           needs.prepare.outputs.package_set != 'launcher' &&
           contains(inputs.platforms, 'macos') &&
           contains(inputs.platforms, 'windows') &&
@@ -2958,6 +3172,14 @@ jobs:
           echo "🚀 Test launcher artifacts (kept out of out/make so update metadata ignores them):"
           ls -la dist/launchers/ 2>/dev/null || echo "  (none)"
 
+      - name: Download CAM++ runtime reports
+        if: needs.prepare.outputs.is_test == 'true' && inputs.speaker_embedding_model == 'campplus'
+        uses: actions/download-artifact@v4
+        with:
+          pattern: speaker-runtime-*
+          path: artifacts/speaker-runtime/
+          merge-multiple: true
+
       - name: Collect all artifacts into out/make
         run: |
           set -euo pipefail
@@ -2980,6 +3202,8 @@ jobs:
           LINUX_REQUESTED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') }}
           INCLUDE_MACOS_X64: ${{ inputs.is_rc == false && needs.prepare.outputs.is_test != 'true' }}
           IS_TEST: ${{ needs.prepare.outputs.is_test }}
+          PLATFORMS: ${{ inputs.platforms }}
+          SPEAKER_EMBEDDING_MODEL: ${{ inputs.speaker_embedding_model }}
         run: |
           set -euo pipefail
 
@@ -2995,14 +3219,7 @@ jobs:
 
           echo "🔎 Verifying Desktop release set for ${DESKTOP_VARIANT}"
           if [ "$IS_TEST" = "true" ]; then
-            require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "signed Floatboat Windows x64 test installer"
-            main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
-            updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
-            if [ "$main_installer_count" -ne 1 ] || [ "$updater_zip_count" -ne 0 ]; then
-              echo "::error::Unexpected test artifact counts: main=$main_installer_count (expected 1), mac_zip=$updater_zip_count (expected 0)"
-              exit 1
-            fi
-            echo "✅ Windows-only test artifact set verified; no public release metadata will be generated."
+            node release-tooling/.github/scripts/verify-test-artifacts.cjs out/make dist/test-package-manifest.json artifacts/speaker-runtime
             exit 0
           fi
           if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
@@ -3086,6 +3303,19 @@ jobs:
               echo "> Linux \`.deb\` 仅供手动下载：客户端自动更新只在 macOS / Windows 启用。"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified test packages
+        if: needs.prepare.outputs.is_test == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-test-packages-${{ inputs.version }}
+          path: |
+            out/make/*
+            dist/test-package-manifest.json
+            artifacts/speaker-runtime/*.json
+          retention-days: 7
+          compression-level: 0
+          if-no-files-found: error
 
       - name: Generate macOS Update Metadata
         if: needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.is_test != 'true'
