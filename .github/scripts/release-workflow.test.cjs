@@ -247,7 +247,7 @@ test('RC 强制 Floatboat app 范围，并允许 Linux 双包只产 Actions 制�
   assert.match(workflow, /publish-linux-uos:[\s\S]*inputs\.is_rc == false/);
 });
 
-test('test 版本只构建签名 Windows 包，不创建 tag、Release、feed 或通知', () => {
+test('test 版本按需构建正式环境多平台包，不创建 tag、Release、feed 或通知', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const scopeStep = readNamedStep(workflow, 'Resolve release scope');
   const sourceStep = readNamedStep(workflow, 'Resolve source release tag');
@@ -261,13 +261,16 @@ test('test 版本只构建签名 Windows 包，不创建 tag、Release、feed �
 
   assert.ok(scopeStep.includes('if [[ "$INPUT_VERSION" =~ -test\\.[0-9]+$ ]]; then'));
   assert.match(scopeStep, /test versions require build_profile=release/);
-  assert.match(scopeStep, /platforms=windows/);
+  assert.match(scopeStep, /test versions require supported platforms/);
+  assert.doesNotMatch(scopeStep, /test versions require platforms=windows/);
   assert.match(scopeStep, /is_test=\$\{is_test\}/);
   assert.match(sourceStep, /INPUT_IS_TEST/);
   assert.match(sourceStep, /test build keeps source ref/);
   assert.match(uploadJob, /needs\.prepare\.outputs\.is_test == 'true'/);
-  assert.match(uploadJob, /inputs\.platforms == 'windows'/);
-  assert.match(verifyStep, /signed Floatboat Windows x64 test installer/);
+  assert.match(uploadJob, /!contains\(inputs\.platforms, 'windows'\) \|\| needs\.build-windows\.result == 'success'/);
+  assert.match(verifyStep, /verify-test-artifacts\.cjs/);
+  assert.match(readNamedJob(workflow, 'publish-linux-uos'), /needs\.prepare\.outputs\.is_test != 'true'/);
+  assert.match(readNamedStep(uploadJob, 'Upload verified test packages'), /if: needs\.prepare\.outputs\.is_test == 'true'/);
   assert.match(releaseStep, /if: needs\.prepare\.outputs\.is_test != 'true'/);
   assert.match(stableStep, /needs\.prepare\.outputs\.is_test != 'true'/);
   assert.match(uploadJob, /Inject canonical release notes into stable metadata[\s\S]*if: needs\.prepare\.outputs\.release_notes_enabled == 'true' && needs\.prepare\.outputs\.is_test != 'true'/);
@@ -531,4 +534,230 @@ test('工作台位置不能绕过送审开关、main及既有包范围检查', (
     { UPLOAD_UOS_STORE: 'false', PLATFORMS: 'macos,windows', LINUX_PACKAGE: 'deb-and-uos' },
     { UPLOAD_UOS_STORE: 'false', WORKFLOW_REF: 'refs/heads/codex/packaging' },
   ]) assert.equal(spawnSync('bash', ['-c', script], { env: { ...base, ...override } }).status, 0, JSON.stringify(override));
+});
+
+
+test('test 范围脚本接受 macOS 和 Windows 并拒绝任何发布或环境偏移', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const step = readNamedStep(workflow, 'Resolve release scope');
+  const marker = '        run: |\n';
+  const script = step.slice(step.indexOf(marker) + marker.length)
+    .split('\n').map((line) => line.replace(/^          /, '')).join('\n');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'test-release-scope-'));
+  const base = {
+    ...process.env,
+    INPUT_DESKTOP_VARIANT: 'floatboat', INPUT_VERSION: '0.6.7-test.2785',
+    INPUT_IS_RC: 'false', INPUT_BUILD_PROFILE: 'release', INPUT_PLATFORMS: 'macos,windows',
+    INPUT_LINUX_PACKAGE: 'deb-and-uos', INPUT_UPLOAD_UOS_STORE: 'false',
+    INPUT_PROMOTE_MERGED_BUGS: 'false', GITHUB_OUTPUT: path.join(directory, 'output'),
+  };
+  try {
+    for (const platforms of ['windows', 'macos', 'macos,windows']) {
+      const result = spawnSync('bash', ['-c', script], { env: { ...base, INPUT_PLATFORMS: platforms }, encoding: 'utf8' });
+      assert.equal(result.status, 0, `${platforms}: ${result.stdout} ${result.stderr}`);
+    }
+    for (const override of [
+      { INPUT_IS_RC: 'true' }, { INPUT_BUILD_PROFILE: 'test' }, { INPUT_DESKTOP_VARIANT: 'all' },
+      { INPUT_UPLOAD_UOS_STORE: 'true' }, { INPUT_PROMOTE_MERGED_BUGS: 'true' },
+      { INPUT_PLATFORMS: '' }, { INPUT_PLATFORMS: 'windows,unknown' },
+      { INPUT_PLATFORMS: 'linux' }, { INPUT_PLATFORMS: 'macos,windows,linux' },
+    ]) {
+      const result = spawnSync('bash', ['-c', script], { env: { ...base, ...override }, encoding: 'utf8' });
+      assert.notEqual(result.status, 0, JSON.stringify(override));
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('test 自动包范围解析为 app，显式 launcher 或 all 在构建前失败', () => {
+  const step = readNamedStep(fs.readFileSync(workflowPath, 'utf8'), 'Resolve package set');
+  const marker = '        run: |\n';
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'test-package-set-'));
+  try {
+    for (const [packageSet, status] of [['auto', 0], ['app', 0], ['all', 1], ['launcher', 1]]) {
+      const script = step.slice(step.indexOf(marker) + marker.length)
+        .split('\n').map((line) => line.replace(/^          /, '')).join('\n')
+        .replaceAll('${{ inputs.package_set }}', packageSet)
+        .replaceAll('${{ steps.release_scope.outputs.is_test }}', 'true')
+        .replaceAll('${{ steps.release_scope.outputs.desktop_variant }}', 'floatboat')
+        .replaceAll('${{ inputs.build_profile }}', 'release')
+        .replaceAll('${{ inputs.is_rc }}', 'false');
+      const output = path.join(directory, packageSet);
+      const result = spawnSync('bash', ['-c', script], { env: { ...process.env, GITHUB_OUTPUT: output }, encoding: 'utf8' });
+      assert.equal(result.status, status, `${packageSet}: ${result.stdout} ${result.stderr}`);
+      if (status === 0) assert.match(fs.readFileSync(output, 'utf8'), /package_set=app/);
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test('test 汇总必须等所有请求平台成功，Mac-only 与 Windows-only 不等未请求任务', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const upload = readNamedJob(workflow, 'upload');
+  const expression = upload.slice(upload.indexOf('    if: |\n') + '    if: |\n'.length, upload.indexOf('    steps:')).trim();
+  const base = {
+    'inputs.notify_only': false, 'inputs.platforms': 'macos,windows', 'inputs.is_rc': false,
+    'inputs.linux_package': 'deb-and-uos', 'needs.prepare.outputs.is_test': 'true',
+    'needs.prepare.outputs.package_set': 'app',
+    'needs.build-macos-arm64.result': 'success', 'needs.build-macos-x64.result': 'success',
+    'needs.build-windows.result': 'success',
+  };
+  function evaluate(overrides = {}) {
+    const values = { ...base, ...overrides };
+    const code = expression.replace(/(?:inputs\.[a-z_]+|needs\.[a-z0-9-]+(?:\.outputs\.[a-z_]+|\.result))/g,
+      (name) => JSON.stringify(values[name]) ?? 'undefined');
+    return Function('always', 'contains', `return (${code})`)(() => true, (value, item) => value.includes(item));
+  }
+  assert.equal(evaluate(), true);
+  for (const job of ['build-macos-arm64', 'build-macos-x64', 'build-windows']) {
+    for (const result of ['failure', 'cancelled', 'skipped']) {
+      assert.equal(evaluate({ [`needs.${job}.result`]: result }), false, `${job}/${result}`);
+    }
+  }
+  assert.equal(evaluate({ 'inputs.platforms': 'macos', 'needs.build-windows.result': 'skipped' }), true);
+  assert.equal(evaluate({ 'inputs.platforms': 'windows', 'needs.build-macos-arm64.result': 'skipped', 'needs.build-macos-x64.result': 'skipped' }), true);
+  assert.equal(evaluate({ 'inputs.notify_only': true }), false);
+});
+
+
+test('CAM++ 选择只允许正式环境 test 包，并只修改三平台 .env 的模型键', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  assert.match(workflow, /speaker_embedding_model:[\s\S]*?default: "default"[\s\S]*?options:\n\s+- "default"\n\s+- "campplus"/);
+  const scope = readNamedStep(workflow, 'Resolve release scope');
+  assert.match(scope, /speaker_embedding_model is only supported for test versions/);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'speaker-test-env-'));
+  try {
+    for (const jobName of ['build-macos-arm64', 'build-macos-x64', 'build-windows']) {
+      const job = readNamedJob(workflow, jobName);
+      const step = readNamedStep(job, 'Configure test speaker model');
+      assert.match(step, /if: needs\.prepare\.outputs\.is_test == 'true' && inputs\.speaker_embedding_model == 'campplus'/);
+      const marker = '        run: |\n';
+      const script = step.slice(step.indexOf(marker) + marker.length).split('\n')
+        .map((line) => line.replace(/^          /, '')).join('\n');
+      const envPath = path.join(directory, '.env');
+      fs.writeFileSync(envPath, 'API_URL=https://production.example\nPRIVATE_KEY=preserved-secret\nexport AOE_SPEAKER_EMBEDDING_MODEL = wavlm\n');
+      const result = spawnSync('bash', ['-c', script], { cwd: directory, env: process.env, encoding: 'utf8' });
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(fs.readFileSync(envPath, 'utf8'), 'API_URL=https://production.example\nPRIVATE_KEY=preserved-secret\nAOE_SPEAKER_EMBEDDING_MODEL=campplus\n');
+      assert.doesNotMatch(result.stdout + result.stderr, /preserved-secret/);
+      assert.doesNotMatch(step, /TEST_BUILD_ENV_FILE|writeFileSync\([^\n]*JSON/);
+    }
+    const marker = '        run: |\n';
+    const script = scope.slice(scope.indexOf(marker) + marker.length).split('\n')
+      .map((line) => line.replace(/^          /, '')).join('\n');
+    const base = { ...process.env, INPUT_DESKTOP_VARIANT: 'floatboat', INPUT_VERSION: '0.6.7-test.2785',
+      INPUT_IS_RC: 'false', INPUT_BUILD_PROFILE: 'release', INPUT_PLATFORMS: 'macos,windows', INPUT_LINUX_PACKAGE: 'deb-and-uos',
+      INPUT_UPLOAD_UOS_STORE: 'false', INPUT_PROMOTE_MERGED_BUGS: 'false', INPUT_SPEAKER_EMBEDDING_MODEL: 'campplus', GITHUB_OUTPUT: path.join(directory, 'output') };
+    assert.equal(spawnSync('bash', ['-c', script], { env: base, encoding: 'utf8' }).status, 0);
+    for (const override of [{ INPUT_VERSION: '0.6.7' }, { INPUT_VERSION: '0.6.7-rc.1', INPUT_IS_RC: 'true' }, { INPUT_SPEAKER_EMBEDDING_MODEL: 'wavlm' }]) {
+      assert.notEqual(spawnSync('bash', ['-c', script], { env: { ...base, ...override }, encoding: 'utf8' }).status, 0, JSON.stringify(override));
+    }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test('CAM++ 测试包在签名校验后执行原生 Electron 离线推理并保存独立报告', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  for (const [jobName, platform, arch, gate, next] of [
+    ['build-macos-arm64', 'darwin', 'arm64', 'Verify packaged Node and workbench (arm64)', 'Collect arm64 production artifacts'],
+    ['build-macos-x64', 'darwin', 'x64', 'Verify packaged Node and workbench (x64)', 'Collect x64 production artifacts'],
+    ['build-windows', 'win32', 'x64', 'Verify Windows Authenticode signature', 'Upload Windows artifacts'],
+  ]) {
+    const job = readNamedJob(workflow, jobName);
+    const checkout = readNamedStep(job, 'Checkout speaker verification tooling');
+    const verify = readNamedStep(job, 'Verify packaged CAM++ runtime');
+    const report = readNamedStep(job, 'Upload CAM++ runtime report');
+    assert.match(checkout, /ref: \$\{\{ github\.sha \}\}/);
+    assert.match(checkout, /sparse-checkout: \.github\/scripts/);
+    assert.match(verify, /needs\.prepare\.outputs\.is_test == 'true' && inputs\.speaker_embedding_model == 'campplus'/);
+    assert.match(verify, /node -p "require\('electron'\)"/);
+    assert.ok(verify.includes(`--platform "${platform}" --arch "${arch}"`));
+    assert.match(verify, /--source-sha "\$SOURCE_SHA"/);
+    assert.match(verify, /packaged-speaker-runtime\.cjs/);
+    assert.ok(job.indexOf(`- name: ${gate}`) < job.indexOf('- name: Verify packaged CAM++ runtime'));
+    assert.ok(job.indexOf('- name: Verify packaged CAM++ runtime') < job.indexOf(`- name: ${next}`));
+    assert.match(report, /if: always\(\) && needs\.prepare\.outputs\.is_test == 'true'/);
+    assert.ok(report.includes(`speaker-runtime-${platform}-${arch}.json`));
+    assert.match(report, /if-no-files-found: warn/);
+  }
+  const upload = readNamedJob(workflow, 'upload');
+  assert.match(readNamedStep(upload, 'Download CAM++ runtime reports'), /pattern: speaker-runtime-\*/);
+  assert.match(readNamedStep(upload, 'Verify required artifacts'), /SPEAKER_EMBEDDING_MODEL: \$\{\{ inputs\.speaker_embedding_model \}\}/);
+  assert.match(readNamedStep(upload, 'Upload verified test packages'), /artifacts\/speaker-runtime\/\*\.json/);
+});
+
+test('CAM++ 模型先恢复并验证缓存，再清理工具目录并打包', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  for (const jobName of ['build-macos-arm64', 'build-macos-x64', 'build-windows']) {
+    const job = readNamedJob(workflow, jobName);
+    const checkout = readNamedStep(job, 'Checkout release tooling for bundled sources');
+    const restore = readNamedStep(job, 'Restore bundled CAM++ model cache');
+    const prepare = readNamedStep(job, 'Prepare bundled CAM++ model');
+    assert.match(checkout, /ref: \$\{\{ github\.sha \}\}/);
+    assert.match(checkout, /persist-credentials: false/);
+    assert.match(restore, /path: resources\/speaker-models/);
+    assert.match(restore, /f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11/);
+    assert.match(prepare, /is_test == 'true' && inputs\.speaker_embedding_model == 'campplus'/);
+    assert.match(prepare, /node release-tooling\/\.github\/scripts\/prepare-speaker-model\.cjs resources\/speaker-models/);
+    assert.ok(job.indexOf('- name: Restore bundled CAM++ model cache') < job.indexOf('- name: Prepare bundled CAM++ model'));
+    assert.ok(job.indexOf('- name: Prepare bundled CAM++ model') < job.indexOf('- name: Seed bundled tool sources'));
+    assert.ok(job.indexOf('- name: Seed bundled tool sources') < job.indexOf('- name: Build and package'));
+  }
+});
+
+test('CAM++ 推理校验失败时保留独立诊断安装包且不进入已验证制品', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  for (const [jobName, platform, arch, extensions] of [
+    ['build-macos-arm64', 'darwin', 'arm64', ['dmg', 'zip']],
+    ['build-macos-x64', 'darwin', 'x64', ['dmg', 'zip']],
+    ['build-windows', 'win32', 'x64', ['exe']],
+  ]) {
+    const job = readNamedJob(workflow, jobName);
+    const verify = readNamedStep(job, 'Verify packaged CAM++ runtime');
+    const diagnostic = readNamedStep(job, 'Upload CAM++ diagnostic test packages');
+    assert.match(verify, /id: verify_campplus/);
+    assert.match(diagnostic, /if: failure\(\) && needs\.prepare\.outputs\.is_test == 'true' && inputs\.speaker_embedding_model == 'campplus' && steps\.verify_campplus\.outcome == 'failure'/);
+    assert.ok(diagnostic.includes(`name: diagnostic-test-packages-${platform}-${arch}`));
+    for (const extension of extensions) assert.ok(diagnostic.includes(`out/make/**/*.${extension}`));
+    assert.match(diagnostic, /retention-days: 7/);
+    assert.match(diagnostic, /if-no-files-found: warn/);
+    assert.ok(job.indexOf('- name: Verify packaged CAM++ runtime') < job.indexOf('- name: Upload CAM++ diagnostic test packages'));
+    assert.doesNotMatch(verify, /continue-on-error/);
+  }
+  const upload = readNamedJob(workflow, 'upload');
+  assert.doesNotMatch(upload, /diagnostic-test-packages/);
+  assert.match(upload, /needs\.build-macos-arm64\.result == 'success'/);
+  assert.match(upload, /needs\.build-macos-x64\.result == 'success'/);
+  assert.match(upload, /needs\.build-windows\.result == 'success'/);
+});
+
+test('测试包说明不读取或公开私有源码提交历史，正式发布仍使用标签差异', () => {
+  const step = readNamedStep(fs.readFileSync(workflowPath, 'utf8'), 'Generate changelog');
+  const marker = '        run: |\n';
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'test-build-note-'));
+  const version = '0.6.7-test.2785';
+  const sourceSha = 'a'.repeat(40);
+  try {
+    const script = step.slice(step.indexOf(marker) + marker.length).split('\n')
+      .map((line) => line.replace(/^          /, '')).join('\n')
+      .replaceAll('${{ inputs.version }}', version)
+      .replaceAll('${{ inputs.is_rc }}', 'false')
+      .replaceAll('${{ steps.release_scope.outputs.is_test }}', 'true')
+      .replaceAll('${{ steps.release_scope.outputs.desktop_variant }}', 'floatboat')
+      .replaceAll('${{ steps.release_scope.outputs.release_tag }}', `v${version}`)
+      .replaceAll('${{ steps.source.outputs.source_sha }}', sourceSha)
+      .replaceAll('${{ inputs.platforms }}', 'macos,windows')
+      .replaceAll('/tmp/', `${directory}/`);
+    const result = spawnSync('bash', ['-c', `git() { echo 'unexpected private history'; return 99; }\n${script}`],
+      { cwd: directory, env: { ...process.env, GITHUB_OUTPUT: path.join(directory, 'output') }, encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(fs.readFileSync(path.join(directory, `changelog-test-${version}.md`), 'utf8'),
+      `# Test Build ${version}\n\nSource: ${sourceSha}\nPlatforms: macos,windows\n`);
+    assert.doesNotMatch(result.stdout + result.stderr, /unexpected private history/);
+    assert.match(step, /git log "\$\{PREV_TAG\}\.\.\$\{CURRENT_TAG\}"/);
+    assert.doesNotMatch(step, /git log "\$SOURCE_SHA"/);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

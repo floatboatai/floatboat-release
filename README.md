@@ -66,6 +66,16 @@ Release、RC 与 Nightly 在签名/公证检查之后、收集制品之前，使
 
 内部发布采用失败关闭门禁：任何缺失制品、版本/文件集合/大小/SHA512 不匹配、DeepSeek 污染、S3 属性异常、CloudFront 后公网内容未收敛，都会令发布步骤失败；策略文件不会在轨道内容完成验证前上传。
 
+## 正式环境测试安装包
+
+使用 `X.Y.Z-test.N`、`build_profile=release`、`is_rc=false`、`desktop_variant=floatboat` 和 `package_set=app`，从已推送的完整源码 SHA 构建。`platforms` 支持 `windows`、`macos` 或 `macos,windows`；macOS 固定生成 arm64、x64 两个 DMG 和对应 ZIP，Windows 生成签名 x64 EXE。
+
+可选 `speaker_embedding_model=campplus` 仅对 `-test.N` 生效：在三个原生平台构建前将模型键写入随包 `.env`，保留其余正式配置；默认 `default` 不修改模型选择。正式版及 RC 禁止指定该覆盖。
+
+CAM++ 测试包同时携带固定摘要的模型权重、Apache 2.0 许可证和对应架构的原生推理运行库。每个平台在打包后使用同版本 Electron 执行包内 Utility：从空缓存开始，禁用下载并要求随包加载成功、输出 192 维归一化向量。汇总任务核对三平台报告与当前源码 SHA、版本和架构，缺失或失败时不交付完整测试包集合。
+
+测试包沿用正式环境及签名流程；只有全部选定平台通过后，才将完整包和绑定源码 SHA、大小、SHA256 的清单汇总到 `verified-test-packages-<version>` Actions artifact，保留 7 天。单平台原始 artifact 仍保留。该模式不创建源码 tag、GitHub Release、updater metadata、CDN/官网指针，不通知飞书、不推进 bug 状态，也不支持 Linux/UOS 发布。
+
 ## UOS 工作台审核包准备
 
 统信商店的包上传、提交审核和状态回读由 **UOS 工作台** 执行。`release.yml` 负责构建或复用 amd64/arm64 双包、校验内容，以及准备工作台可下载的 CDN 制品；它不登录统信平台，不读取统信账号凭证，也不执行商店发布器。Actions 运行成功只表示审核下载已准备好，不表示已经送审。
