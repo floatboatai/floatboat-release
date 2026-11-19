@@ -4,26 +4,26 @@
 
 ## 默认发行矩阵
 
-正常发布仍只需要提供一次 Desktop 源码 `repo_ref` 和一次 Floatboat 基础 `version`。流水线会从同一源码提交自动派生两个应用版本，并并行生成六个主安装包：
+正常发布仍只需要提供一次 Desktop 源码 `repo_ref` 和一次 Floatboat 基础 `version`。正式版流水线从同一源码提交自动派生两个应用版本，macOS/Windows 部分包含六个主安装包：
 
 | 发行变体 | 应用版本 | macOS arm64 | macOS x64 | Windows x64 |
 | --- | --- | --- | --- | --- |
 | Floatboat | `X.Y.Z[-qualifier]` | DMG | DMG | EXE |
 | Floatboat DeepSeek Agent | `X.Y.Z-deepseek[-qualifier]` | DMG | DMG | EXE |
 
-每个 macOS 构建还会生成对应架构的 updater ZIP，因此完整应用制品集合为 6 个主安装包加 4 个 macOS ZIP。
+每个 macOS 构建还会生成对应架构的 updater ZIP，因此 macOS/Windows 制品集合为 6 个主安装包加 4 个 macOS ZIP。
 
-RC 和正式 stable 默认选择 `platforms=macos,windows,linux`、`linux_package=uos-floatboat`、`upload_uos_store=false`，在 macOS/Windows 集合之外再构建 Floatboat UOS amd64、arm64 两个安装包。UOS 只供手动下载安装，不进入 updater metadata；流水线不登录统信商店、不上传商店、不提交审核。
+RC 和正式 stable 默认选择 `platforms=macos,windows,linux`、`linux_package=auto`、`upload_uos_store=false`。准备阶段将 `auto` 按发布类型解析：RC 构建 Floatboat UOS amd64、arm64 两包；正式 stable 构建通用 Linux 和 UOS 两套 amd64、arm64 安装包。两套 DEB 仅供手动下载安装，不进入 updater metadata；流水线不登录统信商店、不上传商店、不提交审核。
 
 - `release.yml` 默认仍通过 `desktop_variant=all` 构建双变体六包。
 - 仅在 DeepSeek 正式版灰度或自动更新验收时，可使用 `desktop_variant=deepseek-agent`：流水线只构建三个 DeepSeek 主安装包和两个 macOS updater ZIP，使用独立 `deepseek-vX.Y.Z` tag，只发布 `deepseek-agent/` S3 前缀，不更新 Floatboat feed、制品或网站下载地址。
 - DeepSeek-only 仅允许 `is_rc=false`、`build_profile=release`、`package_set=app` 和 macOS + Windows 完整平台组合，避免把部分制品误标成正式发布。
 - `nightly.yml` 只构建 Floatboat macOS arm64、Windows x64 两个主安装包及 macOS arm64 updater ZIP。RC 默认另有两份 UOS DEB；两者不构建 DeepSeek Agent、macOS x64 或 test launcher。RC 使用 `desktop_variant=floatboat`、`package_set=app`。
-- 正式 stable 发布要求两个变体的 macOS arm64、macOS x64、Windows x64 全部成功；Nightly/RC 要求 Floatboat macOS arm64 与 Windows x64 同时成功。选择 UOS 的 RC/stable 还要求 UOS 双包构建及 CDN 回读校验成功，缺少任一必需平台都不创建 Release 或写 feed。
+- 正式 stable 默认包含六个 macOS/Windows 主安装包、两个通用 Linux DEB 和两个 UOS DEB，必须全部构建成功；Nightly/RC 要求 Floatboat macOS arm64 与 Windows x64 同时成功。选择 UOS 的 RC/stable 还要求 UOS 双包构建及 CDN 回读校验成功，缺少任一必需平台都不创建 Release 或写 feed。
 - 正式版分别生成 Floatboat 与 DeepSeek Agent 自动更新元数据。DeepSeek RC 与 Nightly 只提供手动下载，不写入自动更新 feed。
 - Floatboat 正式制品与 `latest*.yml` 上传到 S3 根路径；DeepSeek 正式制品与 `deepseek-agent*.yml` 上传到 `deepseek-agent/` 前缀。
 - 正式版发布会先校验四份 updater 元数据中的版本、文件集合、大小和 SHA512，再上传并通过 S3 `head-object`
-  核对对象；CloudFront 失效完成后还会从公网回读两个 feed 及 HEAD 全部十个更新制品，任一不一致都会阻止发布任务成功。
+  核对对象；CloudFront 失效完成后还会从公网回读 feed 及 HEAD 所选全部制品，任一不一致都会阻止发布任务成功。
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
 
@@ -69,19 +69,21 @@ Linux/UOS 和 test launcher 不接入该缓存。可运行 `node --test .github/
 
 ## Linux 双通道打包
 
-当 `release.yml` 的 `platforms` 包含 `linux` 时，`linux_package` 默认使用 `uos-floatboat`，构建 UOS amd64/arm64 两包。需要同时构建普通 Linux 包时显式选 `deb-and-uos`，生成以下四包（完整 RC 只接受 `uos-floatboat`）：
+当 `release.yml` 的 `platforms` 包含 `linux` 时，`linux_package=auto` 默认在 RC 解析为 `uos-floatboat`，在正式 stable 解析为 `deb-and-uos`。显式选择 `deb`、`uos-floatboat` 或 `deb-and-uos` 仍受支持；完整 RC 只接受解析后的 `uos-floatboat`。正式版默认生成以下四包：
 
 | 包类型 | amd64 | arm64 | 用途 |
 | --- | --- | --- | --- |
 | 普通 Linux DEB | `Floatboat-<version>-amd64.deb` | `Floatboat-<version>-arm64.deb` | 通用 Debian 系发行与手动下载 |
 | UOS 专用 DEB | `Floatboat-<version>-amd64.deb` | `Floatboat-<version>-arm64.deb` | UOS 手动安装，固定使用 `control.tar.gz` 与 `data.tar.gz` |
 
-两套包使用独立的 Actions artifact 名称与目录，避免同名包互相覆盖。普通 Linux 包进入正式 CDN 根路径；UOS 安装包分别发布到：
+两套包使用独立的 Actions artifact 名称与目录，避免同名包互相覆盖。普通 Linux 包位于 `https://release.aoe.chat/Floatboat-<version>-<amd64|arm64>.deb`；UOS 安装包分别发布到：
 
 - RC：`https://release.aoe.chat/internal/rc/uos/Floatboat-<version>-<amd64|arm64>.deb`
 - stable：`https://release.aoe.chat/uos/Floatboat-<version>-<amd64|arm64>.deb`
 
 UOS 双包先验证包身份、架构和版本，再上传 S3、校验远端 SHA256 并完整下载回验 CDN，成功后才允许发布 updater feed 或切换 RC 首选轨道。同一版本对象只允许复用相同内容，禁止覆盖不同内容。下载链接写入 Actions Summary 和既有发布通知。RC 不修改官网稳定版下载地址；stable 沿用官网 UOS 下载地址同步。该路径始终使用 `upload_uos_store=false`，不需要统信账号或密码。
+
+官网当前标为“Linux”的入口读取 `DOWNLOAD_UOS_AMD64_INSTALLER_URL` 和 `DOWNLOAD_UOS_ARM64_INSTALLER_URL`，正式发布通过现有接口更新并回读这两个 UOS 专包地址。官网没有独立的 `DOWNLOAD_LINUX_*` 配置字段；通用 Linux DEB 以 CDN 直链提供，不覆盖官网 UOS 地址。
 
 仅运行 Linux 平台的正式 release-profile 时，普通包保留为 Actions artifact，UOS 包沿用原有的构建成功条件发布。`uos_upload_location` 默认值不影响这条普通分发路径。
 
