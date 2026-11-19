@@ -30,11 +30,12 @@ on:
           - "windows"
           - "linux"
       linux_package:
-        description: "Linux package set"
+        description: "Linux packages (auto: RC UOS only, stable generic DEB and UOS)"
         required: false
-        default: "uos-floatboat"
+        default: "auto"
         type: choice
         options:
+          - "auto"
           - "deb"
           - "uos-floatboat"
           - "deb-and-uos"
@@ -134,6 +135,7 @@ jobs:
       desktop_variant: ${{ steps.release_scope.outputs.desktop_variant }}
       desktop_matrix: ${{ steps.release_scope.outputs.desktop_matrix }}
       linux_matrix: ${{ steps.release_scope.outputs.linux_matrix }}
+      linux_package: ${{ steps.release_scope.outputs.linux_package }}
       release_tag: ${{ steps.release_scope.outputs.release_tag }}
       is_test: ${{ steps.release_scope.outputs.is_test }}
       source_sha: ${{ steps.source.outputs.source_sha }}
@@ -160,6 +162,19 @@ jobs:
           INPUT_PROMOTE_MERGED_BUGS: ${{ inputs.promote_merged_bugs }}
         run: |
           set -euo pipefail
+
+          # 按轨道解析一次，所有构建与分发步骤消费同一个包集合。
+          case "$INPUT_LINUX_PACKAGE" in
+            auto)
+              if [ "$INPUT_IS_RC" = "true" ]; then
+                INPUT_LINUX_PACKAGE=uos-floatboat
+              else
+                INPUT_LINUX_PACKAGE=deb-and-uos
+              fi
+              ;;
+            deb|uos-floatboat|deb-and-uos) ;;
+            *) echo "::error::Unsupported linux_package: $INPUT_LINUX_PACKAGE"; exit 1 ;;
+          esac
 
           is_test=false
           if [[ "$INPUT_VERSION" =~ -test\.[0-9]+$ ]]; then
@@ -248,6 +263,7 @@ jobs:
           echo "desktop_variant=${INPUT_DESKTOP_VARIANT}" >> "$GITHUB_OUTPUT"
           echo "desktop_matrix=${desktop_matrix}" >> "$GITHUB_OUTPUT"
           echo "linux_matrix=${linux_matrix}" >> "$GITHUB_OUTPUT"
+          echo "linux_package=${INPUT_LINUX_PACKAGE}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${release_tag}" >> "$GITHUB_OUTPUT"
           echo "is_test=${is_test}" >> "$GITHUB_OUTPUT"
           echo "🎯 Desktop release scope: ${INPUT_DESKTOP_VARIANT} (${release_tag})"
@@ -288,7 +304,7 @@ jobs:
           REPO_REF: ${{ inputs.repo_ref }}
           VERSION: ${{ inputs.version }}
           PLATFORMS: ${{ inputs.platforms }}
-          LINUX_PACKAGE: ${{ inputs.linux_package }}
+          LINUX_PACKAGE: ${{ steps.release_scope.outputs.linux_package }}
           DESKTOP_VARIANT: ${{ inputs.desktop_variant }}
           IS_RC: ${{ inputs.is_rc }}
           NOTIFY_ONLY: ${{ inputs.notify_only }}
@@ -1501,7 +1517,7 @@ jobs:
     name: Build Floatboat Linux (${{ matrix.arch }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    if: inputs.notify_only == false && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') && needs.prepare.outputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
+    if: inputs.notify_only == false && (needs.prepare.outputs.linux_package == 'deb' || needs.prepare.outputs.linux_package == 'deb-and-uos') && needs.prepare.outputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.prepare.outputs.linux_matrix) }}
@@ -1744,7 +1760,7 @@ jobs:
     name: Build Floatboat UOS Linux (${{ matrix.arch }})
     needs: prepare
     runs-on: ${{ matrix.runner }}
-    if: inputs.reuse_uos_run_id == '' && inputs.notify_only == false && (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') && inputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
+    if: inputs.reuse_uos_run_id == '' && inputs.notify_only == false && (needs.prepare.outputs.linux_package == 'uos-floatboat' || needs.prepare.outputs.linux_package == 'deb-and-uos') && inputs.desktop_variant != 'deepseek-agent' && needs.prepare.outputs.package_set != 'launcher' && contains(inputs.platforms, 'linux')
     strategy:
       fail-fast: false
       matrix:
@@ -2021,7 +2037,7 @@ jobs:
       inputs.notify_only == false &&
       needs.prepare.result == 'success' &&
       inputs.build_profile == 'release' &&
-      (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') &&
+      (needs.prepare.outputs.linux_package == 'uos-floatboat' || needs.prepare.outputs.linux_package == 'deb-and-uos') &&
       inputs.desktop_variant != 'deepseek-agent' &&
       needs.prepare.outputs.package_set != 'launcher' &&
       contains(inputs.platforms, 'linux') &&
@@ -2033,13 +2049,13 @@ jobs:
           needs.build-macos-arm64.result == 'success' &&
           (inputs.is_rc == true || needs.build-macos-x64.result == 'success') &&
           needs.build-windows.result == 'success' &&
-          (inputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success')
+          (needs.prepare.outputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success')
         ) ||
         (
           inputs.is_rc == false &&
           inputs.platforms == 'linux' &&
           (
-            inputs.linux_package == 'uos-floatboat' ||
+            needs.prepare.outputs.linux_package == 'uos-floatboat' ||
             needs.build-linux.result == 'success'
           )
         )
@@ -2848,9 +2864,9 @@ jobs:
           (inputs.is_rc == true || needs.build-macos-x64.result == 'success') &&
           needs.build-windows.result == 'success' &&
           (!contains(inputs.platforms, 'linux') || (
-            (inputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success') &&
-            (inputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success') &&
-            (inputs.build_profile != 'release' || inputs.upload_uos_store == true || inputs.linux_package == 'deb' || needs.publish-linux-uos.result == 'success')
+            (needs.prepare.outputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success') &&
+            (needs.prepare.outputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success') &&
+            (inputs.build_profile != 'release' || inputs.upload_uos_store == true || needs.prepare.outputs.linux_package == 'deb' || needs.publish-linux-uos.result == 'success')
           ))
         )
       )
@@ -2965,7 +2981,7 @@ jobs:
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
-          LINUX_REQUESTED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') }}
+          LINUX_REQUESTED: ${{ contains(inputs.platforms, 'linux') && (needs.prepare.outputs.linux_package == 'deb' || needs.prepare.outputs.linux_package == 'deb-and-uos') }}
           INCLUDE_MACOS_X64: ${{ inputs.is_rc == false && needs.prepare.outputs.is_test != 'true' }}
           IS_TEST: ${{ needs.prepare.outputs.is_test }}
         run: |
@@ -3017,7 +3033,7 @@ jobs:
             fi
           fi
 
-          # 通用 Linux 是可选平台，只构建 Floatboat amd64 与 arm64 两个 deb。
+          # 通用 Linux 只构建 Floatboat amd64 与 arm64 两个 deb，不混入 UOS 专包。
           # UOS 送审包由独立 job 验证和发布，不进入此目录或普通 Release 制品计数。
           if [ "$LINUX_REQUESTED" = "true" ]; then
             for deb_arch in amd64 arm64; do
@@ -3457,7 +3473,7 @@ jobs:
           RELEASE_NOTES_PAYLOAD: /tmp/release-notes/payload.json
           RELEASE_NOTES_SHA256: ${{ needs.prepare.outputs.release_notes_sha256 }}
           RELEASE_NOTES_BASE_VERSION: ${{ inputs.version }}
-          LINUX_DEB_ENABLED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') }}
+          LINUX_DEB_ENABLED: ${{ contains(inputs.platforms, 'linux') && (needs.prepare.outputs.linux_package == 'deb' || needs.prepare.outputs.linux_package == 'deb-and-uos') }}
         run: bash release-tooling/.github/scripts/publish-stable-updater.sh
 
       - name: Sync Floatboat website installer URLs
@@ -3598,7 +3614,7 @@ jobs:
     name: Release Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload, publish-linux-uos]
     runs-on: ubuntu-latest
-    if: always() && needs.prepare.outputs.is_test != 'true' && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
+    if: always() && needs.prepare.outputs.is_test != 'true' && !(needs.prepare.outputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
 
     steps:
       - name: Download changelog
@@ -3658,7 +3674,7 @@ jobs:
           desktop_variant = "${{ needs.prepare.outputs.desktop_variant }}"
           build_profile = "${{ inputs.build_profile }}"
           package_set = "${{ needs.prepare.outputs.package_set }}"
-          linux_package = "${{ inputs.linux_package }}"
+          linux_package = "${{ needs.prepare.outputs.linux_package }}"
           is_rc = "${{ inputs.is_rc }}" == "true"
           prev_tag = "${{ needs.prepare.outputs.prev_tag }}"
 
