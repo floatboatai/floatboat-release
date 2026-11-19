@@ -30,6 +30,35 @@ function readNamedJob(workflow, jobName) {
   return workflow.slice(start, nextJob ? start + startMarker.length + nextJob.index : workflow.length);
 }
 
+function resolveScope(workflow, overrides) {
+  const step = readNamedStep(workflow, 'Resolve release scope');
+  const marker = '        run: |\n';
+  const script = step.slice(step.indexOf(marker) + marker.length).replace(/^          /gm, '');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'uos-release-scope-'));
+  const output = path.join(directory, 'output');
+  try {
+    const result = spawnSync('bash', ['-c', script], { encoding: 'utf8', env: {
+      ...process.env, INPUT_DESKTOP_VARIANT: 'floatboat', INPUT_VERSION: '0.6.3-rc.6',
+      INPUT_IS_RC: 'true', INPUT_BUILD_PROFILE: 'release', INPUT_PLATFORMS: 'macos,windows,linux',
+      INPUT_LINUX_PACKAGE: 'auto', INPUT_UPLOAD_UOS_STORE: 'false', INPUT_PROMOTE_MERGED_BUGS: 'false',
+      ...overrides, GITHUB_OUTPUT: output,
+    } });
+    const outputs = Object.fromEntries((fs.existsSync(output) ? fs.readFileSync(output, 'utf8') : '')
+      .split('\n').filter(Boolean).map((line) => [line.slice(0, line.indexOf('=')), line.slice(line.indexOf('=') + 1)]));
+    return { ...result, outputs };
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+}
+
+function enabledJob(workflow, jobName, inputs, needs) {
+  const job = readNamedJob(workflow, jobName);
+  const condition = job.match(/^    if: (.+)$/m)[1];
+  const expression = (condition === '|' ? job.match(/    if: \|\n([^]*?)\n    steps:/)[1] : condition)
+    .replace(/needs\.([a-z][a-z0-9-]*)/g, (_, name) => `needs[${JSON.stringify(name)}]`);
+  return Function('inputs', 'needs', 'contains', 'always', `return (${expression});`)(
+    inputs, needs, (value, part) => value.includes(part), () => true,
+  );
+}
+
 test('只有正式 release 会发布并验证选定范围的 stable feed', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const publishStep = readNamedStep(workflow, 'Publish and verify stable updater feeds');
@@ -40,7 +69,7 @@ test('只有正式 release 会发布并验证选定范围的 stable feed', () =>
   assert.match(publishStep, /DESKTOP_VARIANT: \$\{\{ needs\.prepare\.outputs\.desktop_variant \}\}/);
   assert.match(publishStep, /FLOATBOAT_VERSION: \$\{\{ needs\.prepare\.outputs\.floatboat_version \}\}/);
   assert.match(publishStep, /DEEPSEEK_VERSION: \$\{\{ needs\.prepare\.outputs\.deepseek_version \}\}/);
-  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && \(inputs\.linux_package == 'deb' \|\| inputs\.linux_package == 'deb-and-uos'\) \}\}/);
+  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && \(needs\.prepare\.outputs\.linux_package == 'deb' \|\| needs\.prepare\.outputs\.linux_package == 'deb-and-uos'\) \}\}/);
   assert.match(publishStep, /bash release-tooling\/\.github\/scripts\/publish-stable-updater\.sh/);
 });
 
@@ -119,7 +148,7 @@ test('通用 Linux 固定只构建 Floatboat amd64 与 arm64', () => {
     { variant: 'floatboat', display_name: 'Floatboat', artifact_base: 'Floatboat', app_name: 'Floatboat', arch: 'arm64', debArch: 'arm64', runner: 'ubuntu-24.04-arm' },
   ]);
   assert.match(job, /needs\.prepare\.outputs\.desktop_variant != 'deepseek-agent'/);
-  assert.match(job, /inputs\.linux_package == 'deb-and-uos'/);
+  assert.match(job, /needs\.prepare\.outputs\.linux_package == 'deb-and-uos'/);
   assert.doesNotMatch(job, /Floatboat-DeepSeek|deepseek_version|matrix\.variant ==/);
   assert.match(buildStep, /run: pnpm run forge:make:linux:deb --platform linux --arch \$\{\{ matrix\.arch \}\}\n/);
   assert.doesNotMatch(buildStep, /run: pnpm run [^\n]* -- /);
@@ -130,7 +159,7 @@ test('正式通用 Linux 双架构 deb 会随 stable 制品上传 S3', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const publishStep = readNamedStep(workflow, 'Publish and verify stable updater feeds');
 
-  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && \(inputs\.linux_package == 'deb' \|\| inputs\.linux_package == 'deb-and-uos'\) \}\}/);
+  assert.match(publishStep, /LINUX_DEB_ENABLED: \$\{\{ contains\(inputs\.platforms, 'linux'\) && \(needs\.prepare\.outputs\.linux_package == 'deb' \|\| needs\.prepare\.outputs\.linux_package == 'deb-and-uos'\) \}\}/);
 });
 
 test('通用 Linux 不覆盖官网 UOS 专包下载地址', () => {
@@ -146,22 +175,26 @@ test('UOS 双架构送审包独立构建、强制 gzip 并同步专用下载地�
   const verifyStep = readNamedStep(job, 'Verify UOS package metadata and layout');
   const uploadStep = readNamedStep(job, 'Upload UOS artifacts');
   const publishJob = readNamedJob(workflow, 'publish-linux-uos');
-  const uosStep = readNamedStep(workflow, 'Publish UOS packages and sync installer URLs');
+  const uosStep = readNamedStep(workflow, 'Sync stable UOS installer URLs');
+  const publishStep = readNamedStep(publishJob, 'Publish and verify UOS installers');
 
-  assert.match(workflow, /linux_package:[\s\S]*default: "deb-and-uos"[\s\S]*- "deb-and-uos"/);
-  assert.match(job, /inputs\.linux_package == 'deb-and-uos'/);
+  assert.match(workflow, /linux_package:[\s\S]*default: "auto"[\s\S]*- "deb-and-uos"/);
+  assert.match(job, /needs\.prepare\.outputs\.linux_package == 'deb-and-uos'/);
   assert.match(job, /inputs\.desktop_variant != 'deepseek-agent'/);
   assert.match(job, /- arch: x64[\s\S]*debArch: amd64[\s\S]*- arch: arm64[\s\S]*debArch: arm64/);
   assert.match(verifyStep, /expected_members=\$'debian-binary\\ncontrol\.tar\.gz\\ndata\.tar\.gz'/);
   assert.match(uploadStep, /name: uos-linux-\$\{\{ matrix\.arch \}\}/);
-  assert.match(publishJob, /needs: \[prepare, build-linux, build-linux-uos, upload\]/);
+  assert.match(publishJob, /needs: \[prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos\]/);
   assert.match(publishJob, /always\(\)/);
-  assert.match(publishJob, /inputs\.linux_package == 'deb-and-uos'/);
-  assert.match(publishJob, /needs\.upload\.result == 'success'/);
+  assert.match(publishJob, /needs\.prepare\.outputs\.linux_package == 'deb-and-uos'/);
+  assert.doesNotMatch(publishJob, /needs\.upload/);
   assert.match(publishJob, /inputs\.platforms == 'linux'/);
   assert.match(publishJob, /needs\.build-linux\.result == 'success'/);
   assert.match(publishJob, /pattern: uos-linux-\*/);
-  assert.match(uosStep, /s3:\/\/\$\{RELEASE_BUCKET\}\/\$\{key\}/);
+  assert.match(publishStep, /publish-uos-installers\.sh/);
+  assert.match(publishStep, /UOS_CHANNEL: \$\{\{ inputs\.is_rc && 'rc' \|\| 'stable' \}\}/);
+  assert.doesNotMatch(publishStep, /INSTALLER_URLS_API_TOKEN|UOS_STORE/);
+  assert.match(uosStep, /if: inputs\.is_rc == false/);
   assert.match(uosStep, /DOWNLOAD_UOS_AMD64_INSTALLER_URL: \$amd64/);
   assert.match(uosStep, /DOWNLOAD_UOS_ARM64_INSTALLER_URL: \$arm64/);
   assert.match(uosStep, /\.data\.DOWNLOAD_UOS_AMD64_INSTALLER_URL == \$amd64/);
@@ -235,9 +268,9 @@ test('RC 强制 Floatboat app 范围，并允许 Linux 双包只产 Actions 制�
 
   assert.match(scopeStep, /RC publishing requires desktop_variant=floatboat/);
   assert.match(scopeStep, /"macos,windows"\) ;;/);
-  assert.match(scopeStep, /"linux"\)[\s\S]*INPUT_LINUX_PACKAGE[\s\S]*deb-and-uos/);
+  assert.match(scopeStep, /"linux"\)[\s\S]*linux_package[\s\S]*deb-and-uos/);
   assert.match(scopeStep, /Linux-only RC builds Actions artifacts without publishing CDN or installer URLs/);
-  assert.match(scopeStep, /RC publishing requires exactly macos,windows/);
+  assert.match(scopeStep, /RC publishing requires macos,windows or macos,windows,linux/);
   assert.match(scopeStep, /RC UOS publishing requires exactly linux/);
   assert.match(scopeStep, /RC UOS publishing requires linux_package=uos-floatboat/);
   assert.match(packageStep, /RC publishing requires package_set=app/);
@@ -370,47 +403,86 @@ test('无凭证校验后只准备工作台下载，release 不再执行统信上
   assert.ok(workflow.indexOf('  validate-uos-publication:') < workflow.indexOf('  stage-uos-review:'));
   assert.doesNotMatch(workflow, /publish-uos-store:|uos-store-publisher\.cjs|UOS_STORE_USERNAME|UOS_STORE_PASSWORD|uos-app-store-production/);
   assert.match(existingPublishJob, /inputs\.upload_uos_store != true/);
-  assert.match(existingPublishJob, /needs: \[prepare, build-linux, build-linux-uos, upload\]/);
+  assert.match(existingPublishJob, /needs: \[prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos\]/);
   assert.match(existingPublishJob, /inputs\.is_rc == false/);
 });
 
-test('RC 范围脚本允许 UOS 双包仅构建，保留普通双平台和 Linux 四包路径', () => {
+test('Linux 默认 auto 按发布轨道解析，所有后续步骤消费解析结果', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
-  const step = readNamedStep(workflow, 'Resolve release scope');
-  const marker = '        run: |\n';
-  const script = step.slice(step.indexOf(marker) + marker.length)
-    .split('\n').map((line) => line.replace(/^          /, '')).join('\n');
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'uos-release-scope-'));
-  try {
-    const cases = [
-      ['macos,windows', 'deb-and-uos', 'false', 0],
-      ['linux', 'deb-and-uos', 'false', 0],
-      ['linux', 'uos-floatboat', 'true', 0],
-      ['linux', 'uos-floatboat', 'false', 0],
-      ['linux', 'deb', 'false', 1],
-      ['linux', 'deb-and-uos', 'true', 1],
-      ['macos,windows', 'uos-floatboat', 'true', 1],
-    ];
-    for (const [platforms, linuxPackage, upload, expected] of cases) {
-      const result = spawnSync('bash', ['-c', script], {
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          INPUT_DESKTOP_VARIANT: 'floatboat',
-          INPUT_VERSION: '0.6.3-rc.6',
-          INPUT_IS_RC: 'true',
-          INPUT_BUILD_PROFILE: 'release',
-          INPUT_PLATFORMS: platforms,
-          INPUT_LINUX_PACKAGE: linuxPackage,
-          INPUT_UPLOAD_UOS_STORE: upload,
-          INPUT_PROMOTE_MERGED_BUGS: 'false',
-          GITHUB_OUTPUT: path.join(directory, 'output'),
-        },
-      });
-      assert.equal(result.status, expected, `${platforms}/${linuxPackage}/${upload}: ${result.stderr} ${result.stdout}`);
+  const linuxInput = workflow.match(/      linux_package:\n([^]*?)(?=\n      [a-z_]+:)/)[1];
+  assert.match(linuxInput, /default: "auto"/);
+  for (const option of ['auto', 'deb', 'uos-floatboat', 'deb-and-uos']) assert.ok(linuxInput.includes(`- "${option}"`));
+  assert.match(readNamedJob(workflow, 'prepare'), /linux_package: \$\{\{ steps\.release_scope\.outputs\.linux_package \}\}/);
+  assert.match(readNamedStep(workflow, 'Validate UOS Store dispatch'), /LINUX_PACKAGE: \$\{\{ steps\.release_scope\.outputs\.linux_package \}\}/);
+  assert.equal((workflow.match(/inputs\.linux_package/g) || []).length, 1, '原始输入只能用于 Resolve release scope');
+});
+
+test('真实范围脚本按 RC 与 stable 解析 auto，并保留显式包集合边界', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  const cases = [
+    ['true', 'macos,windows,linux', 'auto', 'false', 'uos-floatboat'],
+    ['false', 'macos,windows,linux', 'auto', 'false', 'deb-and-uos'],
+    ['false', 'macos,windows,linux', 'deb', 'false', 'deb'],
+    ['false', 'macos,windows,linux', 'uos-floatboat', 'false', 'uos-floatboat'],
+    ['false', 'macos,windows,linux', 'deb-and-uos', 'false', 'deb-and-uos'],
+    ['true', 'macos,windows,linux', 'uos-floatboat', 'false', 'uos-floatboat'],
+    ['true', 'macos,windows,linux', 'deb-and-uos', 'false', null],
+    ['true', 'macos,windows,linux', 'uos-floatboat', 'true', null],
+    ['true', 'macos,windows', 'deb-and-uos', 'false', 'deb-and-uos'],
+    ['true', 'linux', 'deb-and-uos', 'false', 'deb-and-uos'],
+    ['true', 'linux', 'auto', 'true', 'uos-floatboat'],
+    ['true', 'linux', 'uos-floatboat', 'true', 'uos-floatboat'],
+    ['true', 'linux', 'uos-floatboat', 'false', 'uos-floatboat'],
+    ['true', 'linux', 'deb', 'false', null],
+    ['true', 'linux', 'deb-and-uos', 'true', null],
+    ['true', 'macos,windows', 'uos-floatboat', 'true', null],
+  ];
+  for (const [isRc, platforms, linuxPackage, upload, expected] of cases) {
+    const result = resolveScope(workflow, { INPUT_IS_RC: isRc, INPUT_VERSION: isRc === 'true' ? '0.6.3-rc.6' : '0.6.3',
+      INPUT_DESKTOP_VARIANT: isRc === 'true' ? 'floatboat' : 'all', INPUT_PLATFORMS: platforms,
+      INPUT_LINUX_PACKAGE: linuxPackage, INPUT_UPLOAD_UOS_STORE: upload });
+    const message = `${isRc}/${platforms}/${linuxPackage}/${upload}: ${result.stderr} ${result.stdout}`;
+    assert.equal(result.status, expected === null ? 1 : 0, message);
+    if (expected !== null) assert.equal(result.outputs.linux_package, expected, message);
+  }
+});
+
+test('stable 默认等待普通 Linux、UOS 双构建与上传，RC 默认只等 UOS', () => {
+  const workflow = fs.readFileSync(workflowPath, 'utf8');
+  assert.match(workflow, /platforms:\n[^]*?default: "macos,windows,linux"/);
+  for (const isRc of [true, false]) {
+    const scope = resolveScope(workflow, { INPUT_IS_RC: String(isRc), INPUT_VERSION: isRc ? '0.6.3-rc.6' : '0.6.3',
+      INPUT_DESKTOP_VARIANT: isRc ? 'floatboat' : 'all' });
+    assert.equal(scope.status, 0, `${scope.stderr} ${scope.stdout}`);
+    const inputs = { platforms: 'macos,windows,linux', linux_package: 'auto', reuse_uos_run_id: '',
+      is_rc: isRc, desktop_variant: isRc ? 'floatboat' : 'all', build_profile: 'release',
+      notify_only: false, upload_uos_store: false };
+    const needs = { prepare: { result: 'success', outputs: { ...scope.outputs, package_set: 'app' } } };
+    for (const job of ['build-macos-arm64', 'build-macos-x64', 'build-windows', 'build-linux', 'build-linux-uos', 'publish-linux-uos']) {
+      needs[job] = { result: isRc && ['build-macos-x64', 'build-linux'].includes(job) ? 'skipped' : 'success' };
     }
-  } finally {
-    fs.rmSync(directory, { recursive: true, force: true });
+    assert.equal(enabledJob(workflow, 'build-linux', inputs, needs), !isRc);
+    assert.equal(enabledJob(workflow, 'build-linux-uos', inputs, needs), true);
+    assert.equal(enabledJob(workflow, 'publish-linux-uos', inputs, needs), true);
+    assert.equal(enabledJob(workflow, 'upload', inputs, needs), true);
+    for (const job of isRc ? ['build-linux-uos', 'publish-linux-uos'] : ['build-linux', 'build-linux-uos', 'publish-linux-uos']) {
+      for (const result of ['failure', 'cancelled', 'skipped']) {
+        needs[job].result = result;
+        assert.equal(enabledJob(workflow, 'upload', inputs, needs), false, `${isRc}/${job}/${result}`);
+        if (job !== 'publish-linux-uos') assert.equal(enabledJob(workflow, 'publish-linux-uos', inputs, needs), false);
+      }
+      needs[job].result = 'success';
+    }
+    needs['build-windows'].result = 'failure';
+    assert.equal(enabledJob(workflow, 'publish-linux-uos', inputs, needs), false);
+    needs['build-windows'].result = 'success';
+    inputs.platforms = 'macos,windows';
+    needs['publish-linux-uos'].result = 'skipped';
+    assert.equal(enabledJob(workflow, 'upload', inputs, needs), true);
+    inputs.platforms = 'linux';
+    assert.equal(enabledJob(workflow, 'publish-linux-uos', inputs, needs), !isRc);
+    inputs.upload_uos_store = true;
+    assert.equal(enabledJob(workflow, 'publish-linux-uos', inputs, needs), false);
   }
 });
 
