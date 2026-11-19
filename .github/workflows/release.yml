@@ -21,7 +21,7 @@ on:
       platforms:
         description: "Platforms to build"
         required: false
-        default: "macos,windows"
+        default: "macos,windows,linux"
         type: choice
         options:
           - "macos,windows"
@@ -32,7 +32,7 @@ on:
       linux_package:
         description: "Linux package set"
         required: false
-        default: "deb-and-uos"
+        default: "uos-floatboat"
         type: choice
         options:
           - "deb"
@@ -181,6 +181,9 @@ jobs:
             else
               case "$INPUT_PLATFORMS" in
                 "macos,windows") ;;
+                "macos,windows,linux")
+                  [ "$INPUT_LINUX_PACKAGE" = "uos-floatboat" ] || { echo "::error::Full RC publishing requires linux_package=uos-floatboat"; exit 1; }
+                  ;;
                 "linux")
                   case "$INPUT_LINUX_PACKAGE" in
                     "deb-and-uos"|"uos-floatboat") ;;
@@ -192,7 +195,7 @@ jobs:
                   echo "::notice::Linux-only RC builds Actions artifacts without publishing CDN or installer URLs."
                   ;;
                 *)
-                  echo "::error::RC publishing requires exactly macos,windows; Linux artifact validation requires exactly linux with linux_package=deb-and-uos or uos-floatboat"
+                  echo "::error::RC publishing requires macos,windows or macos,windows,linux; Linux artifact validation requires exactly linux with linux_package=deb-and-uos or uos-floatboat"
                   exit 1
                   ;;
               esac
@@ -2010,13 +2013,13 @@ jobs:
   # ===========================================
   publish-linux-uos:
     name: Publish Floatboat UOS Linux
-    needs: [prepare, build-linux, build-linux-uos, upload]
+    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos]
     runs-on: ubuntu-latest
     if: |
       always() &&
       inputs.upload_uos_store != true &&
       inputs.notify_only == false &&
-      inputs.is_rc == false &&
+      needs.prepare.result == 'success' &&
       inputs.build_profile == 'release' &&
       (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') &&
       inputs.desktop_variant != 'deepseek-agent' &&
@@ -2024,8 +2027,16 @@ jobs:
       contains(inputs.platforms, 'linux') &&
       needs.build-linux-uos.result == 'success' &&
       (
-        needs.upload.result == 'success' ||
         (
+          contains(inputs.platforms, 'macos') &&
+          contains(inputs.platforms, 'windows') &&
+          needs.build-macos-arm64.result == 'success' &&
+          (inputs.is_rc == true || needs.build-macos-x64.result == 'success') &&
+          needs.build-windows.result == 'success' &&
+          (inputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success')
+        ) ||
+        (
+          inputs.is_rc == false &&
           inputs.platforms == 'linux' &&
           (
             inputs.linux_package == 'uos-floatboat' ||
@@ -2034,6 +2045,11 @@ jobs:
         )
       )
     steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@v4
+        with:
+          path: release-tooling
+
       - name: Download UOS artifacts
         uses: actions/download-artifact@v4
         with:
@@ -2048,64 +2064,35 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
 
-      - name: Publish UOS packages and sync installer URLs
+      - name: Publish and verify UOS installers
+        id: uos_downloads
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          UOS_CHANNEL: ${{ inputs.is_rc && 'rc' || 'stable' }}
+          UOS_ARTIFACT_DIR: artifacts/uos
+          INSTALLER_DOWNLOAD_BASE_URL: ${{ vars.INSTALLER_DOWNLOAD_BASE_URL }}
+        run: bash release-tooling/.github/scripts/publish-uos-installers.sh
+
+      - name: Sync stable UOS installer URLs
+        if: inputs.is_rc == false
+        shell: bash
         env:
           INSTALLER_URLS_API_TOKEN: ${{ secrets.INSTALLER_URLS_API_TOKEN }}
           INSTALLER_URLS_API_BASE_URL: ${{ vars.INSTALLER_URLS_API_BASE_URL }}
-          INSTALLER_DOWNLOAD_BASE_URL: ${{ vars.INSTALLER_DOWNLOAD_BASE_URL }}
+          UOS_AMD64_URL: ${{ steps.uos_downloads.outputs.uos_amd64_url }}
+          UOS_ARM64_URL: ${{ steps.uos_downloads.outputs.uos_arm64_url }}
           VERSION: ${{ needs.prepare.outputs.floatboat_version }}
-          RELEASE_BUCKET: aoe-desktop-releases
-          CLOUDFRONT_DISTRIBUTION_ID: EOFLQQ0A8KCX1
         run: |
           set -euo pipefail
-          for name in INSTALLER_URLS_API_TOKEN INSTALLER_URLS_API_BASE_URL INSTALLER_DOWNLOAD_BASE_URL; do
+          for name in INSTALLER_URLS_API_TOKEN INSTALLER_URLS_API_BASE_URL UOS_AMD64_URL UOS_ARM64_URL; do
             if [ -z "${!name:-}" ]; then
-              echo "::error::${name} is required to publish UOS installers"
+              echo "::error::${name} is required to sync stable UOS installer URLs"
               exit 1
             fi
           done
-
           INSTALLER_URLS_API_URL="${INSTALLER_URLS_API_BASE_URL%/}/api/ops/installer-urls"
-          DOWNLOAD_BASE_URL="${INSTALLER_DOWNLOAD_BASE_URL%/}/uos"
-          declare -A package_urls
-          for arch in amd64 arm64; do
-            package="artifacts/uos/Floatboat-${VERSION}-${arch}.deb"
-            if [ ! -f "$package" ]; then
-              echo "::error::Missing Floatboat UOS ${arch} package: ${package}"
-              exit 1
-            fi
-            key="uos/$(basename "$package")"
-            aws s3 cp "$package" "s3://${RELEASE_BUCKET}/${key}" \
-              --no-progress \
-              --checksum-algorithm SHA256 \
-              --cache-control "public,max-age=31536000,immutable"
-            local_size=$(wc -c < "$package" | tr -d ' ')
-            remote_size=$(aws s3api head-object --bucket "$RELEASE_BUCKET" --key "$key" --query ContentLength --output text)
-            if [ "$remote_size" != "$local_size" ]; then
-              echo "::error::S3 object size mismatch for ${key}: local=${local_size}, remote=${remote_size}"
-              exit 1
-            fi
-            package_urls[$arch]="${DOWNLOAD_BASE_URL}/$(basename "$package")"
-          done
-
-          invalidation_id=$(aws cloudfront create-invalidation \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-            --paths '/uos/*' \
-            --query 'Invalidation.Id' \
-            --output text)
-          aws cloudfront wait invalidation-completed \
-            --distribution-id "$CLOUDFRONT_DISTRIBUTION_ID" \
-            --id "$invalidation_id" || echo "::warning::CloudFront waiter unavailable; continuing with CDN checks"
-
-          for arch in amd64 arm64; do
-            expected_size=$(wc -c < "artifacts/uos/Floatboat-${VERSION}-${arch}.deb" | tr -d ' ')
-            remote_size=$(curl --fail --silent --show-error --location --retry 6 --retry-all-errors \
-              --head "${package_urls[$arch]}" | awk 'BEGIN { IGNORECASE=1 } /^content-length:/ { value=$2; gsub("\r", "", value) } END { print value }')
-            if [ "$remote_size" != "$expected_size" ]; then
-              echo "::error::CDN package size mismatch for ${arch}: local=${expected_size}, remote=${remote_size:-missing}"
-              exit 1
-            fi
-          done
+          declare -A package_urls=([amd64]="$UOS_AMD64_URL" [arm64]="$UOS_ARM64_URL")
 
           payload=$(jq -n \
             --arg amd64 "${package_urls[amd64]}" \
@@ -2833,7 +2820,7 @@ jobs:
   # ===========================================
   upload:
     name: Upload All Artifacts
-    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
+    needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, publish-linux-uos, build-test-launcher-macos-arm64, build-test-launcher-macos-x64, build-test-launcher-windows]
     runs-on: ubuntu-latest
     if: |
       inputs.notify_only == false &&
@@ -2862,7 +2849,8 @@ jobs:
           needs.build-windows.result == 'success' &&
           (!contains(inputs.platforms, 'linux') || (
             (inputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success') &&
-            (inputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success')
+            (inputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success') &&
+            (inputs.build_profile != 'release' || inputs.upload_uos_store == true || inputs.linux_package == 'deb' || needs.publish-linux-uos.result == 'success')
           ))
         )
       )
@@ -3775,7 +3763,7 @@ jobs:
           )
           uos_deb_links = (
               "\n".join(f"- {name}: {release_base_url}/uos/{name}" for name in uos_deb_names)
-              if release_base_url and uos_deb_names and package_set != "launcher" and not is_rc and uos_publish == "success"
+              if release_base_url and uos_deb_names and package_set != "launcher" and uos_publish == "success"
               else "_本次未发布。_"
           )
 
@@ -3795,7 +3783,7 @@ jobs:
             macOS x64：  {icon(macos_x64)} {macos_x64}
             Windows x64：{icon(windows)} {windows}
             Linux 通用 amd64+arm64：{icon(linux)} {linux}
-            UOS 送审 amd64+arm64：{icon(uos_linux)} {uos_linux}
+            UOS 安装包 amd64+arm64：{icon(uos_linux)} {uos_linux}
             UOS 下载地址发布：{icon(uos_publish)} {uos_publish}
             上传：       {icon(upload)} {upload}
 
@@ -3808,7 +3796,7 @@ jobs:
           普通 Linux .deb（仅手动下载）：
           {linux_deb_links}
 
-          UOS Linux 送审 .deb（control.tar.gz）：
+          UOS Linux .deb（仅手动下载）：
           {uos_deb_links}
 
           测试录制 launcher：
