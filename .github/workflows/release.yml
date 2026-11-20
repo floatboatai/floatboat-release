@@ -82,7 +82,7 @@ on:
           - "test"
           - "internal-test"
       package_set:
-        description: "Package set to build (auto: DeepSeek-only/non-release=app, full release=all)"
+        description: "Package set to build (auto: test versions/DeepSeek-only/non-release=app, full release=all)"
         required: false
         default: "auto"
         type: choice
@@ -167,10 +167,19 @@ jobs:
             [ "$INPUT_IS_RC" = "false" ] || { echo "::error::test versions require is_rc=false"; exit 1; }
             [ "$INPUT_BUILD_PROFILE" = "release" ] || { echo "::error::test versions require build_profile=release to keep signing and production environment"; exit 1; }
             [ "$INPUT_DESKTOP_VARIANT" = "floatboat" ] || { echo "::error::test versions require desktop_variant=floatboat"; exit 1; }
-            [ "$INPUT_PLATFORMS" = "windows" ] || { echo "::error::test versions require platforms=windows"; exit 1; }
+            case "$INPUT_PLATFORMS" in
+              "macos"|"windows"|"linux"|"macos,windows"|"macos,windows,linux") ;;
+              *) echo "::error::test versions require a supported platforms selection"; exit 1 ;;
+            esac
+            if [[ ",$INPUT_PLATFORMS," == *,linux,* ]]; then
+              case "$INPUT_LINUX_PACKAGE" in
+                "deb"|"uos-floatboat"|"deb-and-uos") ;;
+                *) echo "::error::test versions require a supported linux_package selection"; exit 1 ;;
+              esac
+            fi
             [ "$INPUT_UPLOAD_UOS_STORE" = "false" ] || { echo "::error::test versions do not support UOS publication"; exit 1; }
             [ "$INPUT_PROMOTE_MERGED_BUGS" = "false" ] || { echo "::error::test versions do not promote merged bugs"; exit 1; }
-            echo "::notice::test build uses release profile, signed Windows artifact only; no tag, Release, feed, or notification will be published."
+            echo "::notice::test build uses release profile for the selected platforms; only Actions artifacts are retained, with no tag, Release, feed, website, UOS publication, or notification."
           fi
 
           if [ "$INPUT_IS_RC" = "true" ]; then
@@ -256,7 +265,9 @@ jobs:
         run: |
           package_set="${{ inputs.package_set }}"
           if [ "$package_set" = "auto" ]; then
-            if [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ]; then
+            if [ "${{ steps.release_scope.outputs.is_test }}" = "true" ]; then
+              package_set="app"
+            elif [ "${{ steps.release_scope.outputs.desktop_variant }}" = "deepseek-agent" ]; then
               package_set="app"
             elif [ "${{ inputs.build_profile }}" != "release" ]; then
               package_set="app"
@@ -270,6 +281,10 @@ jobs:
           fi
           if [ "${{ inputs.is_rc }}" = "true" ] && [ "$package_set" != "app" ]; then
             echo "::error::RC publishing requires package_set=app"
+            exit 1
+          fi
+          if [ "${{ steps.release_scope.outputs.is_test }}" = "true" ] && [ "$package_set" != "app" ]; then
+            echo "::error::test versions require package_set=app"
             exit 1
           fi
           echo "package_set=$package_set" >> "$GITHUB_OUTPUT"
@@ -2096,7 +2111,7 @@ jobs:
           const root = process.env.PACKAGE_ROOT;
           const arch = process.env.DEB_ARCH;
           const inputVersion = process.env.VERSION;
-          const match = /^(\d+\.\d+\.\d+)(?:\.(\d+)|-rc\.(\d+))?$/.exec(inputVersion);
+          const match = /^(\d+\.\d+\.\d+)(?:\.(\d+)|-(?:rc|test)\.(\d+))?$/.exec(inputVersion);
           assert.ok(match, `UOS 不支持的版本格式：${inputVersion}`);
           const version = `${match[1]}.${match[2] ?? match[3] ?? '0'}`;
           assert.match(version, /^\d+\.\d+\.\d+\.\d+$/);
@@ -2207,6 +2222,8 @@ jobs:
     runs-on: ubuntu-latest
     if: |
       always() &&
+      needs.prepare.result == 'success' &&
+      needs.prepare.outputs.is_test != 'true' &&
       inputs.upload_uos_store != true &&
       inputs.notify_only == false &&
       inputs.is_rc == false &&
@@ -2354,7 +2371,7 @@ jobs:
     name: Restore Verified UOS Artifacts
     needs: prepare
     runs-on: ubuntu-latest
-    if: inputs.reuse_uos_run_id != '' && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success'
+    if: inputs.reuse_uos_run_id != '' && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.prepare.outputs.is_test != 'true'
     permissions:
       actions: read
       contents: read
@@ -2440,7 +2457,7 @@ jobs:
     needs: [prepare, build-linux-uos, restore-uos-artifacts]
     runs-on: ubuntu-latest
     if: >-
-      ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' &&
+      ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.prepare.outputs.is_test != 'true' &&
       ((inputs.reuse_uos_run_id == '' && needs.build-linux-uos.result == 'success' && needs.restore-uos-artifacts.result == 'skipped') ||
       (inputs.reuse_uos_run_id != '' && needs.build-linux-uos.result == 'skipped' && needs.restore-uos-artifacts.result == 'success')) }}
     permissions:
@@ -2509,7 +2526,7 @@ jobs:
     name: Prepare UOS Workbench Downloads
     needs: [prepare, validate-uos-publication]
     runs-on: ubuntu-latest
-    if: ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.validate-uos-publication.result == 'success' }}
+    if: ${{ !cancelled() && inputs.upload_uos_store == true && github.ref == 'refs/heads/main' && needs.prepare.result == 'success' && needs.prepare.outputs.is_test != 'true' && needs.validate-uos-publication.result == 'success' }}
     permissions:
       actions: read
       contents: read
@@ -3031,6 +3048,7 @@ jobs:
     if: |
       inputs.notify_only == false &&
       always() &&
+      needs.prepare.result == 'success' &&
       (
         (
           needs.prepare.outputs.package_set == 'launcher' &&
@@ -3042,11 +3060,19 @@ jobs:
         ) ||
         (
           needs.prepare.outputs.is_test == 'true' &&
-          inputs.platforms == 'windows' &&
           needs.prepare.outputs.package_set == 'app' &&
-          needs.build-windows.result == 'success'
+          (!contains(inputs.platforms, 'macos') || (
+            needs.build-macos-arm64.result == 'success' &&
+            needs.build-macos-x64.result == 'success'
+          )) &&
+          (!contains(inputs.platforms, 'windows') || needs.build-windows.result == 'success') &&
+          (!contains(inputs.platforms, 'linux') || (
+            (inputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success') &&
+            (inputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success')
+          ))
         ) ||
         (
+          needs.prepare.outputs.is_test != 'true' &&
           needs.prepare.outputs.package_set != 'launcher' &&
           contains(inputs.platforms, 'macos') &&
           contains(inputs.platforms, 'windows') &&
@@ -3118,11 +3144,20 @@ jobs:
           path: /tmp/changelog/
 
       - name: Download Desktop app artifacts
-        if: needs.prepare.outputs.package_set != 'launcher'
+        if: needs.prepare.outputs.package_set != 'launcher' && (contains(inputs.platforms, 'macos') || contains(inputs.platforms, 'windows') || (contains(inputs.platforms, 'linux') && inputs.linux_package != 'uos-floatboat'))
         uses: actions/download-artifact@v4
         with:
           pattern: desktop-*
           path: artifacts/apps/
+          merge-multiple: true
+
+      - name: Download UOS test artifacts
+        if: needs.prepare.outputs.is_test == 'true' && contains(inputs.platforms, 'linux') && (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos')
+        uses: actions/download-artifact@v4
+        with:
+          pattern: uos-linux-*
+          # UOS 与普通 Linux 安装包同名，必须保留独立目录以免覆盖。
+          path: artifacts/uos-test/
           merge-multiple: true
 
       - name: Download test launcher (macOS arm64)
@@ -3170,8 +3205,11 @@ jobs:
           FLOATBOAT_VERSION: ${{ needs.prepare.outputs.floatboat_version }}
           DEEPSEEK_VERSION: ${{ needs.prepare.outputs.deepseek_version }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          MACOS_REQUESTED: ${{ contains(inputs.platforms, 'macos') }}
+          WINDOWS_REQUESTED: ${{ contains(inputs.platforms, 'windows') }}
           LINUX_REQUESTED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'deb' || inputs.linux_package == 'deb-and-uos') }}
-          INCLUDE_MACOS_X64: ${{ inputs.is_rc == false && needs.prepare.outputs.is_test != 'true' }}
+          UOS_REQUESTED: ${{ contains(inputs.platforms, 'linux') && (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos') }}
+          INCLUDE_MACOS_X64: ${{ inputs.is_rc == false }}
           IS_TEST: ${{ needs.prepare.outputs.is_test }}
         run: |
           set -euo pipefail
@@ -3188,14 +3226,49 @@ jobs:
 
           echo "🔎 Verifying Desktop release set for ${DESKTOP_VARIANT}"
           if [ "$IS_TEST" = "true" ]; then
-            require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "signed Floatboat Windows x64 test installer"
+            expected_main=0
+            expected_zip=0
+            expected_deb=0
+            expected_uos=0
+            if [ "$MACOS_REQUESTED" = "true" ]; then
+              for mac_arch in arm64 x64; do
+                require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-${mac_arch}.dmg" "Floatboat macOS ${mac_arch} test DMG"
+                require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-${mac_arch}.zip" "Floatboat macOS ${mac_arch} test updater ZIP"
+              done
+              expected_main=$((expected_main + 2))
+              expected_zip=2
+            fi
+            if [ "$WINDOWS_REQUESTED" = "true" ]; then
+              require_file "out/make/Floatboat-Setup-${FLOATBOAT_VERSION}-x64.exe" "signed Floatboat Windows x64 test installer"
+              expected_main=$((expected_main + 1))
+            fi
+            if [ "$LINUX_REQUESTED" = "true" ]; then
+              for deb_arch in amd64 arm64; do
+                require_file "out/make/Floatboat-${FLOATBOAT_VERSION}-${deb_arch}.deb" "Floatboat Linux ${deb_arch} test deb"
+              done
+              expected_deb=2
+            fi
+            if [ "$UOS_REQUESTED" = "true" ]; then
+              for deb_arch in amd64 arm64; do
+                require_file "artifacts/uos-test/Floatboat-${FLOATBOAT_VERSION}-${deb_arch}.deb" "Floatboat UOS ${deb_arch} test deb"
+                require_file "artifacts/uos-test/Floatboat-${FLOATBOAT_VERSION}-${deb_arch}-dependency-audit.json" "Floatboat UOS ${deb_arch} dependency audit"
+              done
+              expected_uos=4
+            fi
             main_installer_count=$(find out/make -maxdepth 1 -type f \( -name "*.dmg" -o -name "*.exe" \) | wc -l | tr -d ' ')
             updater_zip_count=$(find out/make -maxdepth 1 -type f -name "*.zip" | wc -l | tr -d ' ')
-            if [ "$main_installer_count" -ne 1 ] || [ "$updater_zip_count" -ne 0 ]; then
-              echo "::error::Unexpected test artifact counts: main=$main_installer_count (expected 1), mac_zip=$updater_zip_count (expected 0)"
+            deb_count=$(find out/make -maxdepth 1 -type f -name "*.deb" | wc -l | tr -d ' ')
+            artifact_count=$(find out/make -type f | wc -l | tr -d ' ')
+            uos_count=0
+            if [ -d artifacts/uos-test ]; then
+              uos_count=$(find artifacts/uos-test -type f | wc -l | tr -d ' ')
+            fi
+            expected_artifacts=$((expected_main + expected_zip + expected_deb))
+            if [ "$main_installer_count" -ne "$expected_main" ] || [ "$updater_zip_count" -ne "$expected_zip" ] || [ "$deb_count" -ne "$expected_deb" ] || [ "$artifact_count" -ne "$expected_artifacts" ] || [ "$uos_count" -ne "$expected_uos" ]; then
+              echo "::error::Unexpected test artifact counts: main=$main_installer_count (expected $expected_main), mac_zip=$updater_zip_count (expected $expected_zip), deb=$deb_count (expected $expected_deb), total=$artifact_count (expected $expected_artifacts), uos=$uos_count (expected $expected_uos)"
               exit 1
             fi
-            echo "✅ Windows-only test artifact set verified; no public release metadata will be generated."
+            echo "✅ Selected test artifact set verified; no public release metadata will be generated."
             exit 0
           fi
           if [ "$DESKTOP_VARIANT" != "deepseek-agent" ]; then
@@ -3435,6 +3508,7 @@ jobs:
       - name: Check bug handoff configuration
         id: bug_handoff
         if: |
+          needs.prepare.outputs.is_test != 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
@@ -3495,6 +3569,7 @@ jobs:
       - name: Setup pnpm for bug handoff
         if: |
           steps.bug_handoff.outputs.enabled == 'true' &&
+          needs.prepare.outputs.is_test != 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
@@ -3503,6 +3578,7 @@ jobs:
       - name: Setup Node.js for bug handoff
         if: |
           steps.bug_handoff.outputs.enabled == 'true' &&
+          needs.prepare.outputs.is_test != 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
@@ -3513,6 +3589,7 @@ jobs:
       - name: Install bug handoff tooling
         if: |
           steps.bug_handoff.outputs.enabled == 'true' &&
+          needs.prepare.outputs.is_test != 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
@@ -3523,6 +3600,7 @@ jobs:
       - name: Configure Lark CLI for bug handoff
         if: |
           steps.bug_handoff.outputs.enabled == 'true' &&
+          needs.prepare.outputs.is_test != 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
@@ -3542,6 +3620,7 @@ jobs:
         id: bug_handoff_access
         if: |
           steps.bug_handoff.outputs.enabled == 'true' &&
+          needs.prepare.outputs.is_test != 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
@@ -3578,6 +3657,7 @@ jobs:
         if: |
           steps.bug_handoff_access.outputs.accessible == 'true' &&
           steps.bug_handoff.outputs.enabled == 'true' &&
+          needs.prepare.outputs.is_test != 'true' &&
           inputs.promote_merged_bugs == true &&
           needs.prepare.outputs.package_set != 'launcher' &&
           (needs.build-macos-arm64.result == 'success' || needs.build-macos-x64.result == 'success' || needs.build-windows.result == 'success')
@@ -3625,7 +3705,7 @@ jobs:
           fi
 
       - name: Configure AWS credentials for internal RC updater
-        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        if: needs.prepare.outputs.is_test != 'true' && inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -3633,7 +3713,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Publish and verify internal RC updater
-        if: inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
+        if: needs.prepare.outputs.is_test != 'true' && inputs.is_rc == true && inputs.build_profile == 'release' && needs.prepare.outputs.package_set != 'launcher' && needs.prepare.outputs.desktop_variant == 'floatboat' && contains(inputs.platforms, 'macos') && contains(inputs.platforms, 'windows')
         shell: bash
         env:
           TRACK: rc
@@ -3803,7 +3883,8 @@ jobs:
     name: Release Summary
     needs: [prepare, build-macos-arm64, build-macos-x64, build-windows, build-linux, build-linux-uos, upload, publish-linux-uos]
     runs-on: ubuntu-latest
-    if: always() && needs.prepare.outputs.is_test != 'true' && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
+    # prepare 提前拒绝参数时可能没有 is_test 输出，仍需阻止测试版本发送失败通知。
+    if: always() && !contains(inputs.version, '-test.') && needs.prepare.outputs.is_test != 'true' && !(inputs.linux_package == 'uos-floatboat' && inputs.platforms == 'linux')
 
     steps:
       - name: Download changelog
