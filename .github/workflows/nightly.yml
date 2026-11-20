@@ -325,8 +325,57 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Checkout speaker cache tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: speaker-cache-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Resolve speaker runtime cache key
+        id: speaker_cache_key
+        shell: bash
+        env:
+          TARGET_PLATFORM: darwin
+          TARGET_ARCH: arm64
+        run: |
+          set -euo pipefail
+          PNPM_VERSION="$(pnpm --version)"
+          PNPM_STORE_PATH="$(pnpm store path --silent)"
+          export PNPM_VERSION PNPM_STORE_PATH
+          node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs key
+
+      - name: Restore speaker runtime dependency cache
+        id: speaker_cache_restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --prefer-offline --verify-store-integrity=true --side-effects-cache=false
+
+      - name: Verify speaker runtime dependencies
+        id: speaker_cache_verify
+        shell: bash
+        run: node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs verify
+        env:
+          TARGET_PLATFORM: darwin
+          TARGET_ARCH: arm64
+
+      # 依赖经冻结安装和原生加载校验后立即保存，不缓存安装脚本生成的原生重建结果。
+      - name: Save speaker runtime dependency cache
+        if: steps.speaker_cache_restore.outputs.cache-hit != 'true' && steps.speaker_cache_verify.outcome == 'success'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
+      - name: Remove speaker cache tooling
+        shell: bash
+        run: rm -rf speaker-cache-tooling
 
       - name: Check code signing
         id: signing
@@ -518,8 +567,57 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Checkout speaker cache tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: speaker-cache-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Resolve speaker runtime cache key
+        id: speaker_cache_key
+        shell: bash
+        env:
+          TARGET_PLATFORM: darwin
+          TARGET_ARCH: x64
+        run: |
+          set -euo pipefail
+          PNPM_VERSION="$(pnpm --version)"
+          PNPM_STORE_PATH="$(pnpm store path --silent)"
+          export PNPM_VERSION PNPM_STORE_PATH
+          node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs key
+
+      - name: Restore speaker runtime dependency cache
+        id: speaker_cache_restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --prefer-offline --verify-store-integrity=true --side-effects-cache=false
+
+      - name: Verify speaker runtime dependencies
+        id: speaker_cache_verify
+        shell: bash
+        run: node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs verify
+        env:
+          TARGET_PLATFORM: darwin
+          TARGET_ARCH: x64
+
+      # 依赖经冻结安装和原生加载校验后立即保存，不缓存安装脚本生成的原生重建结果。
+      - name: Save speaker runtime dependency cache
+        if: steps.speaker_cache_restore.outputs.cache-hit != 'true' && steps.speaker_cache_verify.outcome == 'success'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
+      - name: Remove speaker cache tooling
+        shell: bash
+        run: rm -rf speaker-cache-tooling
 
       - name: Check code signing
         id: signing
@@ -710,8 +808,57 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Checkout speaker cache tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: speaker-cache-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Resolve speaker runtime cache key
+        id: speaker_cache_key
+        shell: bash
+        env:
+          TARGET_PLATFORM: win32
+          TARGET_ARCH: x64
+        run: |
+          set -euo pipefail
+          PNPM_VERSION="$(pnpm --version)"
+          PNPM_STORE_PATH="$(pnpm store path --silent)"
+          export PNPM_VERSION PNPM_STORE_PATH
+          node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs key
+
+      - name: Restore speaker runtime dependency cache
+        id: speaker_cache_restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --frozen-lockfile --prefer-offline --verify-store-integrity=true --side-effects-cache=false
+
+      - name: Verify speaker runtime dependencies
+        id: speaker_cache_verify
+        shell: bash
+        run: node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs verify
+        env:
+          TARGET_PLATFORM: win32
+          TARGET_ARCH: x64
+
+      # 依赖经冻结安装和原生加载校验后立即保存，不缓存安装脚本生成的原生重建结果。
+      - name: Save speaker runtime dependency cache
+        if: steps.speaker_cache_restore.outputs.cache-hit != 'true' && steps.speaker_cache_verify.outcome == 'success'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
+      - name: Remove speaker cache tooling
+        shell: bash
+        run: rm -rf speaker-cache-tooling
 
       - name: Setup FFmpeg build toolchain
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884

@@ -38,6 +38,22 @@ Release（含 test）和 Nightly 的 Windows x64 job 共用 FFmpeg 编译产物�
 缓存只保存 Windows FFmpeg 输入目录，不保存应用安装包或签名结果。macOS 和 Linux/UOS 的现有构建流程保持原样。
 本仓库的缓存契约与工作流接线测试通过 `node --test .github/scripts/windows-ffmpeg-cache*.test.cjs` 运行。
 
+## 声纹推理依赖缓存
+
+Release 和 Nightly 的 macOS arm64/x64、Windows x64 应用 job 缓存 pnpm store 中的原始依赖，
+其中包含 Sherpa/CAM++ 与 ONNX 的预编译运行库。每次仍执行冻结锁文件的安装、pnpm store 完整性检查和目标平台原生库加载检查，
+通过后立即保存缓存；不会因为命中缓存而跳过依赖安装或应用后续的原生模块重建。
+
+完整缓存键绑定依赖、安装配置、目标平台与架构、Node 和 pnpm 版本，应用版本变化不会单独使其失效。
+缓存恢复不使用宽泛前缀；缓存服务不可用时正常下载依赖，依赖或原生库校验失败则停止打包。
+历史源码未声明的声纹依赖会由校验脚本明确跳过。
+
+此缓存不保存模型、`node_modules`、安装脚本生成的重建结果或签名应用，不改变模型的运行时下载方式；
+Linux/UOS 和 test launcher 不接入该缓存。可运行 `node --test .github/scripts/speaker-runtime-cache*.test.cjs` 验证缓存身份与工作流契约。
+
+同仓 PR 修改缓存逻辑时，`verify-speaker-runtime-cache.yml` 在三个目标平台各执行两轮独立 job：首轮安装、验证并保存，
+第二轮必须命中相同缓存并再次通过安装与原生加载验证。两轮固定使用同一源码 SHA；该验收不制作或发布安装包。
+
 ## Linux 双通道打包
 
 当 `release.yml` 的 `platforms` 包含 `linux` 时，`linux_package` 默认使用 `deb-and-uos`，分别构建四个 Floatboat 安装包：
