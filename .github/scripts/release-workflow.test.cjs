@@ -247,7 +247,7 @@ test('RC 强制 Floatboat app 范围，并允许 Linux 双包只产 Actions 制�
   assert.match(workflow, /publish-linux-uos:[\s\S]*inputs\.is_rc == false/);
 });
 
-test('test 版本只构建签名 Windows 包，不创建 tag、Release、feed 或通知', () => {
+test('test 版本构建所选平台应用包，不创建 tag、Release、feed 或通知', () => {
   const workflow = fs.readFileSync(workflowPath, 'utf8');
   const scopeStep = readNamedStep(workflow, 'Resolve release scope');
   const sourceStep = readNamedStep(workflow, 'Resolve source release tag');
@@ -261,13 +261,15 @@ test('test 版本只构建签名 Windows 包，不创建 tag、Release、feed �
 
   assert.ok(scopeStep.includes('if [[ "$INPUT_VERSION" =~ -test\\.[0-9]+$ ]]; then'));
   assert.match(scopeStep, /test versions require build_profile=release/);
-  assert.match(scopeStep, /platforms=windows/);
+  assert.match(scopeStep, /"macos"\|"windows"\|"linux"\|"macos,windows"\|"macos,windows,linux"/);
   assert.match(scopeStep, /is_test=\$\{is_test\}/);
   assert.match(sourceStep, /INPUT_IS_TEST/);
   assert.match(sourceStep, /test build keeps source ref/);
   assert.match(uploadJob, /needs\.prepare\.outputs\.is_test == 'true'/);
-  assert.match(uploadJob, /inputs\.platforms == 'windows'/);
-  assert.match(verifyStep, /signed Floatboat Windows x64 test installer/);
+  assert.match(uploadJob, /!contains\(inputs\.platforms, 'windows'\) \|\| needs\.build-windows\.result == 'success'/);
+  assert.match(verifyStep, /MACOS_REQUESTED/);
+  assert.match(verifyStep, /WINDOWS_REQUESTED/);
+  assert.match(verifyStep, /UOS_REQUESTED/);
   assert.match(releaseStep, /if: needs\.prepare\.outputs\.is_test != 'true'/);
   assert.match(stableStep, /needs\.prepare\.outputs\.is_test != 'true'/);
   assert.match(uploadJob, /Inject canonical release notes into stable metadata[\s\S]*if: needs\.prepare\.outputs\.release_notes_enabled == 'true' && needs\.prepare\.outputs\.is_test != 'true'/);

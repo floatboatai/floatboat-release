@@ -25,6 +25,17 @@
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
 
+## 多平台 test 安装包
+
+`release.yml` 的 `X.Y.Z-test.N` 版本使用 `desktop_variant=floatboat`、`is_rc=false`、
+`build_profile=release`、`package_set=app`。`platforms` 可选择 macOS、Windows、Linux 或现有多平台组合；
+macOS 包含 arm64/x64，Windows 为 x64，Linux 按 `linux_package` 构建普通 DEB、UOS 或两者的 amd64/arm64 包。
+
+test 保留正常签名、公证、运行时与包结构检查，仅保存 Actions artifacts，不创建 tag、GitHub Release、
+更新 feed 或通知，也不更新官网及 UOS 下载地址。所有选中平台都成功后，汇总任务核验安装包集合；
+普通 Linux 与 UOS 的同名 DEB 分目录保存，避免相互覆盖。UOS 包内部版本按要求转换为 `X.Y.Z.N`，
+下载文件名仍保留 `-test.N`。
+
 ## Windows 音频组件缓存
 
 Release（含 test）和 Nightly 的 Windows x64 job 共用 FFmpeg 编译产物缓存。首次编译后，流水线校验
