@@ -101,6 +101,29 @@ test('缺少锁文件、无效 store 路径、未支持或交叉目标必须拒�
   assert.throws(() => createCacheKey(f.options), /pnpm-lock/);
 });
 
+test('允许 pnpm action 安装目录内的独立 store，不能误把路径中的 node_modules 当项目依赖', (t) => {
+  const f = fixture(t);
+  const storePath = path.resolve(f.root, '..', 'setup-pnpm/node_modules/.bin/store/v10');
+  const values = createCacheKey({ ...f.options, env: { ...f.env, PNPM_STORE_PATH: storePath } });
+  assert.equal(values.store_path, storePath);
+  assert.equal(values.key, createCacheKey(f.options).key);
+});
+
+test('拒绝把源码祖先或项目依赖目录当 store，但允许项目自己的独立 store', (t) => {
+  const f = fixture(t);
+  for (const storePath of [
+    path.dirname(f.root),
+    path.parse(f.root).root,
+    path.join(f.root, 'node_modules/.pnpm/store/v10'),
+    path.join(f.root, 'packages/example/node_modules/store'),
+    path.resolve(f.root, '..', 'setup-pnpm/node_modules'),
+  ]) {
+    assert.throws(() => createCacheKey({ ...f.options, env: { ...f.env, PNPM_STORE_PATH: storePath } }), /不能缓存/);
+  }
+  const storePath = path.join(f.root, '.pnpm-store/v10');
+  assert.equal(createCacheKey({ ...f.options, env: { ...f.env, PNPM_STORE_PATH: storePath } }).store_path, storePath);
+});
+
 for (const [platform, arch] of [['darwin', 'arm64'], ['darwin', 'x64'], ['win32', 'x64']]) {
   test(`${platform}/${arch} 安装后直接验证 Sherpa 与 ONNX binding 可加载`, (t) => {
     const f = fixture(t, platform, arch);
