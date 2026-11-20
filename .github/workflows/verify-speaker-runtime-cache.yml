@@ -1,0 +1,127 @@
+name: Verify speaker runtime cache
+
+on:
+  pull_request:
+    paths:
+      - '.github/scripts/speaker-runtime-cache*'
+      - '.github/workflows/verify-speaker-runtime-cache.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/nightly.yml'
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Desktop source ref to verify without publishing
+        default: dev
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ inputs.source_ref || 'dev' }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+      - id: source
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  populate:
+    name: Prepare cache (${{ matrix.platform }}/${{ matrix.arch }})
+    needs: source
+    runs-on: ${{ matrix.runner }}
+    strategy: &platform_matrix
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: darwin, arch: arm64, runner: macos-26 }
+          - { platform: darwin, arch: x64, runner: macos-26-intel }
+          - { platform: win32, arch: x64, runner: windows-latest }
+    env:
+      REQUIRE_CACHE_HIT: 'false'
+    steps: &verify_cache_steps
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.SOURCE_REPO }}
+          ref: ${{ needs.source.outputs.sha }}
+          token: ${{ secrets.SOURCE_REPO_PAT }}
+
+      - name: Checkout cache verification tooling
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: speaker-cache-tooling
+          sparse-checkout: .github/scripts
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve speaker runtime cache key
+        id: speaker_cache_key
+        shell: bash
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          PNPM_VERSION="$(pnpm --version)"
+          PNPM_STORE_PATH="$(pnpm store path --silent)"
+          export PNPM_VERSION PNPM_STORE_PATH
+          node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs key
+
+      - name: Restore speaker runtime dependencies
+        id: speaker_cache_restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
+      - name: Require cache reuse in the second job
+        if: env.REQUIRE_CACHE_HIT == 'true'
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.speaker_cache_restore.outputs.cache-hit }}
+        run: test "$CACHE_HIT" = true
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline --verify-store-integrity=true --side-effects-cache=false
+
+      - name: Verify speaker runtime dependencies
+        id: speaker_cache_verify
+        shell: bash
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: node speaker-cache-tooling/.github/scripts/speaker-runtime-cache.cjs verify
+
+      - name: Test cache contracts
+        run: node --test speaker-cache-tooling/.github/scripts/speaker-runtime-cache.test.cjs
+
+      - name: Save verified speaker runtime dependencies
+        if: steps.speaker_cache_restore.outputs.cache-hit != 'true' && steps.speaker_cache_verify.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.speaker_cache_key.outputs.store_path }}
+          key: ${{ steps.speaker_cache_key.outputs.key }}
+
+  reuse:
+    name: Reuse cache (${{ matrix.platform }}/${{ matrix.arch }})
+    needs: [source, populate]
+    runs-on: ${{ matrix.runner }}
+    strategy: *platform_matrix
+    env:
+      REQUIRE_CACHE_HIT: 'true'
+    steps: *verify_cache_steps
