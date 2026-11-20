@@ -129,7 +129,17 @@ for (const [filename, jobs] of Object.entries(CONSUMERS)) {
       assert.ok(checkout.start < seed.start && seed.start < consumer.start);
       assert.match(seed.source, new RegExp(`shell: ${shell.replace(/[{}]/g, '\\$&')}\\n`));
       assert.match(seed.source, /SOURCE_REPO_TOKEN: \$\{\{ secrets\.SOURCE_REPO_PAT \}\}/);
-      assert.match(seed.source, /rm -rf release-tooling/);
+      if (job === 'build-windows') {
+        // Windows 还要使用本次工作流的缓存校验脚本，保存成功后再移除 tooling。
+        const save = stepSource(workflow, 'Save Windows FFmpeg cache', jobStart);
+        const cleanup = stepSource(workflow, 'Remove bundled source tooling', jobStart);
+        assert.ok(consumer.start < save.start && save.start < cleanup.start);
+        assert.doesNotMatch(seed.source, /rm -rf release-tooling/);
+        assert.match(cleanup.source, /rm -rf release-tooling/);
+        assert.match(checkout.source, /ref: \$\{\{ github\.sha \}\}/);
+      } else {
+        assert.match(seed.source, /rm -rf release-tooling/);
+      }
       assert.doesNotMatch(seed.source, /continue-on-error/);
     });
   }

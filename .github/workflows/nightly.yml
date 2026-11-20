@@ -729,6 +729,7 @@ jobs:
       - name: Checkout release tooling for bundled sources
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.sha }}
           path: release-tooling
           sparse-checkout: .github/scripts
 
@@ -737,17 +738,62 @@ jobs:
         env:
           SOURCE_REPO: ${{ vars.SOURCE_REPO }}
           SOURCE_REPO_TOKEN: ${{ secrets.SOURCE_REPO_PAT }}
-        run: |
-          node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
-          rm -rf release-tooling
+        run: node release-tooling/.github/scripts/seed-bundled-tool-sources.cjs
+
+      - name: Resolve Windows FFmpeg cache key
+        id: windows_ffmpeg_key
+        shell: msys2 {0}
+        run: node release-tooling/.github/scripts/windows-ffmpeg-cache.cjs key
+        env:
+          TARGET_PLATFORM: win32
+          TARGET_ARCH: x64
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
+
+      - name: Restore Windows FFmpeg cache
+        id: windows_ffmpeg_restore
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}\floatboat-ffmpeg-x64
+          key: ${{ steps.windows_ffmpeg_key.outputs.key }}
+
+      - name: Inspect Windows FFmpeg cache
+        id: windows_ffmpeg_inspect
+        shell: msys2 {0}
+        run: node release-tooling/.github/scripts/windows-ffmpeg-cache.cjs inspect
+        env:
+          FFMPEG_CACHE_METADATA: ${{ steps.windows_ffmpeg_key.outputs.metadata }}
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
 
       - name: Build bundled FFmpeg (Windows x64)
+        if: steps.windows_ffmpeg_inspect.outputs.valid != 'true'
         shell: msys2 {0}
         run: node scripts/build-windows-ffmpeg.mjs
         env:
           TARGET_PLATFORM: win32
           TARGET_ARCH: x64
           FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
+
+      - name: Verify and seal Windows FFmpeg cache
+        id: windows_ffmpeg_seal
+        shell: msys2 {0}
+        run: node release-tooling/.github/scripts/windows-ffmpeg-cache.cjs seal
+        env:
+          FFMPEG_CACHE_METADATA: ${{ steps.windows_ffmpeg_key.outputs.metadata }}
+          FFMPEG_BUNDLE_SOURCE_DIR: ${{ runner.temp }}\floatboat-ffmpeg-x64
+
+      # 音频组件校验成功即保存，后续应用打包失败仍可复用；缓存网络故障不跳过产物校验。
+      - name: Save Windows FFmpeg cache
+        if: steps.windows_ffmpeg_restore.outputs.cache-hit != 'true' && steps.windows_ffmpeg_seal.outcome == 'success'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: ${{ runner.temp }}\floatboat-ffmpeg-x64
+          key: ${{ steps.windows_ffmpeg_key.outputs.key }}
+
+      - name: Remove bundled source tooling
+        shell: msys2 {0}
+        run: rm -rf release-tooling
 
       - name: Verify Racent signing configuration
         if: needs.prepare.outputs.build_profile == 'release'

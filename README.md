@@ -25,6 +25,19 @@
 
 社区与产品信息见 [floatboat.ai](https://floatboat.ai)。问题可在本仓库提交，或联系 contact@floatboat.ai。
 
+## Windows 音频组件缓存
+
+Release（含 test）和 Nightly 的 Windows x64 job 共用 FFmpeg 编译产物缓存。首次编译后，流水线校验
+`ffmpeg.exe`、`ffprobe.exe` 的版本、PE 架构、文件摘要和许可证，并立即保存未签名的音频组件；后续应用打包失败也不会丢掉这次缓存。
+
+缓存身份包含目标平台和架构、FFmpeg 源码 SHA-256、构建脚本与参数、实际 GCC/binutils/MinGW 工具链身份。
+相同输入可跨应用版本及 Floatboat/DeepSeek Agent 变体复用；源码、构建配置或工具链变化会使用新缓存键。
+恢复仅使用完整键，命中后仍重新校验产物；缺失、损坏或身份不符时重新编译。缓存服务暂时不可用时也会继续编译与校验，
+不会用缓存命中状态替代实际产物检查。
+
+缓存只保存 Windows FFmpeg 输入目录，不保存应用安装包或签名结果。macOS 和 Linux/UOS 的现有构建流程保持原样。
+本仓库的缓存契约与工作流接线测试通过 `node --test .github/scripts/windows-ffmpeg-cache*.test.cjs` 运行。
+
 ## Linux 双通道打包
 
 当 `release.yml` 的 `platforms` 包含 `linux` 时，`linux_package` 默认使用 `deb-and-uos`，分别构建四个 Floatboat 安装包：
