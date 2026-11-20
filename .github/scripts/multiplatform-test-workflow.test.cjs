@@ -7,7 +7,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 const vm = require('node:vm');
 const test = require('node:test');
 
@@ -38,7 +38,7 @@ function readStep(job, name) {
 
 function evaluate(expression, context) {
   const code = expression.trim().replace(/^\$\{\{\s*|\s*\}\}$/g, '')
-    .replace(/\b(?:inputs|needs|steps|github)(?:\.[A-Za-z_][\w-]*)+/g, (reference) => `lookup(${JSON.stringify(reference)})`);
+    .replace(/\b(?:inputs|needs|steps|github|matrix|secrets|vars)(?:\.[A-Za-z_][\w-]*)+/g, (reference) => `lookup(${JSON.stringify(reference)})`);
   return vm.runInNewContext(code, {
     lookup: (reference) => reference.split('.').reduce((value, key) => value?.[key], context),
     contains: (container, value) => container.includes(value),
@@ -105,7 +105,7 @@ function stepEnvironment(step, ctx) {
   const environment = {};
   const start = step.indexOf('        env:\n');
   if (start === -1) return environment;
-  const block = step.slice(start, step.indexOf('        run:', start));
+  const block = step.slice(start).split(/\n(?=        \S)/)[0];
   for (const [, name, value] of block.matchAll(/^          ([A-Z][A-Z0-9_]*): (.+)$/gm)) {
     environment[name] = value.startsWith('${{') ? String(evaluate(value, ctx)) : value;
   }
@@ -231,6 +231,88 @@ test('UOS 包校验将 test 和 RC 来源映射为四段版本，保持 stable �
     ['0.6.7', '0.6.7.0'], ['0.6.7.17', '0.6.7.17'],
   ]) assert.equal(convert(input), expected);
   for (const input of ['0.6.7-test', '0.6.7-test.bad', '0.6.7-nightly.17']) assert.throws(() => convert(input));
+});
+
+test('UOS 正式修订发布使用四段标签与下载文件名，Electron 和更新日志使用三段版本', () => {
+  const ctx = context({ version: '0.6.7.1', platforms: 'linux', linux_package: 'uos-floatboat', repo_ref: 'v0.6.7.1' });
+  const scope = runStep(readStep('prepare', 'Resolve release scope'), ctx);
+  assert.equal(scope.status, 0, scope.log);
+  const outputs = Object.fromEntries(scope.outputs.trim().split('\n').map((entry) => entry.split(/=(.*)/s).slice(0, 2)));
+  assert.equal(outputs.is_test, 'false');
+  assert.equal(outputs.release_tag, 'v0.6.7.1');
+  assert.equal(outputs.uos_revision, '0.6.7.1');
+  assert.equal(outputs.uos_desktop_version, '0.6.7');
+  ctx.steps.release_scope = { outputs };
+  Object.assign(ctx.needs.prepare.outputs, outputs, { floatboat_version: '0.6.7' });
+
+  const stepEnv = (job, name) => stepEnvironment(readStep(job, name), ctx);
+  assert.equal(stepEnv('prepare', 'Resolve Desktop variant versions').INPUT_VERSION, '0.6.7');
+  assert.equal(stepEnv('prepare', 'Generate canonical release notes payload').BASE_VERSION, '0.6.7');
+  assert.equal(stepEnv('build-linux-uos', 'Inject Floatboat version into package.json').VERSION, '0.6.7');
+  assert.equal(stepEnv('build-linux-uos', 'Build Floatboat UOS package').AOE_UOS_PACKAGE_VERSION, '0.6.7.1');
+  assert.equal(stepEnv('build-linux-uos', 'Verify UOS package metadata and layout').VERSION, '0.6.7.1');
+  assert.equal(stepEnv('publish-linux-uos', 'Publish UOS packages and sync installer URLs').VERSION, '0.6.7.1');
+  const upload = readStep('build-linux-uos', 'Upload UOS artifacts');
+  for (const arch of ['amd64', 'arm64']) {
+    const resolved = upload.replaceAll('${{ matrix.debArch }}', arch)
+      .replace(/\$\{\{ (needs\.prepare\.outputs\.[^}]+) \}\}/g, (_, expression) => evaluate(expression, ctx));
+    const prefix = `out/make/uos/${arch}/Floatboat-0.6.7.1-${arch}`;
+    assert.ok(resolved.includes(`${prefix}.deb\n`));
+    assert.ok(resolved.includes(`${prefix}-dependency-audit.json\n`));
+  }
+  for (const job of buildJobs) {
+    const selected = condition(readJob(job), ctx);
+    assert.equal(selected, job === 'build-linux-uos', job);
+    ctx.needs[job].result = selected ? 'success' : 'skipped';
+  }
+  assert.equal(condition(readJob('upload'), ctx), false);
+  ctx.needs.upload.result = 'skipped';
+  assert.equal(condition(readJob('publish-linux-uos'), ctx), true);
+  for (const job of ['validate-uos-publication', 'stage-uos-review', 'notify']) {
+    assert.equal(condition(readJob(job), ctx), false, job);
+  }
+});
+
+test('四段版本仅用于正式 UOS 双架构官网包', () => {
+  const inputs = { version: '0.6.7.1', platforms: 'linux', linux_package: 'uos-floatboat' };
+  const step = readStep('prepare', 'Resolve release scope');
+  const valid = runStep(step, context(inputs));
+  assert.equal(valid.status, 0, valid.log);
+  const invalid = [
+    { platforms: 'macos' }, { platforms: 'windows' }, { platforms: 'macos,windows,linux' },
+    { linux_package: 'deb' }, { linux_package: 'deb-and-uos' },
+    { desktop_variant: 'all' }, { desktop_variant: 'deepseek-agent' }, { is_rc: true },
+    { build_profile: 'test' }, { build_profile: 'internal-test' },
+    { notify_only: true }, { upload_uos_store: true }, { promote_merged_bugs: true },
+    { package_set: 'launcher' }, { package_set: 'all' },
+    { repo_ref: 'v0.6.7' }, { repo_ref: 'dev' }, { repo_ref: 'nightly-20261120' },
+    { version: '0.6.7.0' }, { version: '0.6.7.01' }, { version: '0.06.7.1' },
+  ];
+  for (const overrides of invalid) {
+    const result = runStep(step, context({ ...inputs, ...overrides }));
+    assert.notEqual(result.status, 0, JSON.stringify(overrides));
+    assert.match(result.log, /::error::/);
+  }
+});
+
+test('UOS 修订只复用指向当前源码提交的正式标签', () => {
+  for (const scenario of ['matching', 'missing', 'mismatching']) {
+    const ctx = context({ version: '0.6.7.1', platforms: 'linux', linux_package: 'uos-floatboat' });
+    Object.assign(ctx.steps.release_scope.outputs, { is_test: 'false', release_tag: 'v0.6.7.1' });
+    const result = runStep(readStep('prepare', 'Resolve source release tag'), ctx, {}, (directory) => {
+      const git = (...args) => execFileSync('git', ['-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+        '-c', 'commit.gpgSign=false', '-c', 'tag.gpgSign=false', ...args], { cwd: directory, encoding: 'utf8' }).trim();
+      git('init', '--quiet');
+      git('remote', 'add', 'origin', directory);
+      git('commit', '--allow-empty', '--quiet', '-m', 'source');
+      if (scenario !== 'missing') git('tag', '-a', 'v0.6.7.1', '-m', 'UOS revision');
+      if (scenario === 'mismatching') git('commit', '--allow-empty', '--quiet', '-m', 'different commit');
+      ctx.inputs.repo_ref = git('rev-parse', 'HEAD');
+    });
+    assert.equal(result.status === 0, scenario === 'matching', `${scenario}: ${result.log}`);
+    if (scenario === 'matching') assert.match(result.outputs, /^release_tag=v0\.6\.7\.1$/m);
+    else assert.match(result.log, /::error::/);
+  }
 });
 
 test('所选 test 平台全部成功后才汇总，任一必需 job 失败或跳过均阻断', () => {
