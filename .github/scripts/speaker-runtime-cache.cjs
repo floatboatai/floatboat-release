@@ -63,7 +63,12 @@ function createCacheKey({ sourceRoot = process.cwd(), env = process.env, runtime
   if (!/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(env.PNPM_VERSION || '')) throw new Error('缺少有效 PNPM_VERSION');
   if (!env.PNPM_STORE_PATH || !path.isAbsolute(env.PNPM_STORE_PATH)) throw new Error('PNPM_STORE_PATH 必须为绝对路径');
   const storePath = path.resolve(env.PNPM_STORE_PATH);
-  if (storePath.split(path.sep).includes('node_modules') || storePath === path.resolve(sourceRoot)) {
+  const relativeToSource = path.relative(path.resolve(sourceRoot), storePath);
+  const sourceInsideStore = path.relative(storePath, path.resolve(sourceRoot));
+  const isWithin = (relative) => relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+  // pnpm/action-setup 的合法 store 可位于外部 node_modules/.bin 下；只禁止覆盖项目或缓存实际依赖目录。
+  if (isWithin(sourceInsideStore) || path.basename(storePath).toLowerCase() === 'node_modules' ||
+      (isWithin(relativeToSource) && relativeToSource.split(path.sep).some((part) => part.toLowerCase() === 'node_modules'))) {
     throw new Error('只允许缓存 pnpm store，不能缓存源码或 node_modules');
   }
   const pkg = readPackage(sourceRoot);
