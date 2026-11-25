@@ -2316,7 +2316,7 @@ jobs:
         id: uos_downloads
         shell: bash
         env:
-          VERSION: ${{ needs.prepare.outputs.floatboat_version }}
+          VERSION: ${{ needs.prepare.outputs.uos_revision || needs.prepare.outputs.floatboat_version }}
           UOS_CHANNEL: ${{ inputs.is_rc && 'rc' || 'stable' }}
           UOS_ARTIFACT_DIR: artifacts/uos
           INSTALLER_DOWNLOAD_BASE_URL: ${{ vars.INSTALLER_DOWNLOAD_BASE_URL }}
@@ -3092,8 +3092,8 @@ jobs:
           )) &&
           (!contains(inputs.platforms, 'windows') || needs.build-windows.result == 'success') &&
           (!contains(inputs.platforms, 'linux') || (
-            (inputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success') &&
-            (inputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success')
+            (needs.prepare.outputs.linux_package == 'uos-floatboat' || needs.build-linux.result == 'success') &&
+            (needs.prepare.outputs.linux_package == 'deb' || needs.build-linux-uos.result == 'success')
           ))
         ) ||
         (
@@ -3170,7 +3170,7 @@ jobs:
           path: /tmp/changelog/
 
       - name: Download Desktop app artifacts
-        if: needs.prepare.outputs.package_set != 'launcher' && (contains(inputs.platforms, 'macos') || contains(inputs.platforms, 'windows') || (contains(inputs.platforms, 'linux') && inputs.linux_package != 'uos-floatboat'))
+        if: needs.prepare.outputs.package_set != 'launcher' && (contains(inputs.platforms, 'macos') || contains(inputs.platforms, 'windows') || (contains(inputs.platforms, 'linux') && needs.prepare.outputs.linux_package != 'uos-floatboat'))
         uses: actions/download-artifact@v4
         with:
           pattern: desktop-*
@@ -3178,7 +3178,7 @@ jobs:
           merge-multiple: true
 
       - name: Download UOS test artifacts
-        if: needs.prepare.outputs.is_test == 'true' && contains(inputs.platforms, 'linux') && (inputs.linux_package == 'uos-floatboat' || inputs.linux_package == 'deb-and-uos')
+        if: needs.prepare.outputs.is_test == 'true' && contains(inputs.platforms, 'linux') && (needs.prepare.outputs.linux_package == 'uos-floatboat' || needs.prepare.outputs.linux_package == 'deb-and-uos')
         uses: actions/download-artifact@v4
         with:
           pattern: uos-linux-*
@@ -3966,6 +3966,7 @@ jobs:
 
           version = "${{ inputs.version }}"
           floatboat_version = "${{ needs.prepare.outputs.floatboat_version }}"
+          uos_version = "${{ needs.prepare.outputs.uos_revision }}" or floatboat_version
           deepseek_version = "${{ needs.prepare.outputs.deepseek_version }}"
           desktop_variant = "${{ needs.prepare.outputs.desktop_variant }}"
           build_profile = "${{ inputs.build_profile }}"
@@ -4047,7 +4048,7 @@ jobs:
           uos_deb_names = []
           if uos_linux_requested:
               for deb_arch in ("amd64", "arm64"):
-                  uos_deb_names.append(f"Floatboat-{floatboat_version}-{deb_arch}.deb")
+                  uos_deb_names.append(f"Floatboat-{uos_version}-{deb_arch}.deb")
           launcher_names = [
               f"floatboat-test-launcher-{version}-macos-arm64.zip",
               f"floatboat-test-launcher-{version}-macos-x64.zip",
