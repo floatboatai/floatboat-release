@@ -26,7 +26,8 @@ function writeDeb(f, arch, overrides = {}) {
   fs.mkdirSync(controlRoot, { recursive: true });
   const fields = {
     Package: 'com.floatboat.desktop',
-    Version: f.version.includes('-rc.') ? f.version.replace('-rc.', '.') : `${f.version}.0`,
+    Version: f.version.includes('-rc.') ? f.version.replace('-rc.', '.')
+      : /^\d+\.\d+\.\d+\.\d+$/.test(f.version) ? f.version : `${f.version}.0`,
     Architecture: arch,
     ...overrides,
   };

@@ -73,7 +73,7 @@ function context(inputOverrides = {}) {
     ...inputOverrides,
   };
   const outputs = {
-    is_test: 'true', desktop_variant: inputs.desktop_variant, package_set: 'app',
+    is_test: 'true', desktop_variant: inputs.desktop_variant, package_set: 'app', linux_package: inputs.linux_package,
     floatboat_version: inputs.version, deepseek_version: inputs.version, source_sha: sourceSha,
     release_tag: `test-v${inputs.version}`, release_notes_enabled: 'true',
   };
@@ -251,7 +251,8 @@ test('UOS 正式修订发布使用四段标签与下载文件名，Electron 和�
   assert.equal(stepEnv('build-linux-uos', 'Inject Floatboat version into package.json').VERSION, '0.6.7');
   assert.equal(stepEnv('build-linux-uos', 'Build Floatboat UOS package').AOE_UOS_PACKAGE_VERSION, '0.6.7.1');
   assert.equal(stepEnv('build-linux-uos', 'Verify UOS package metadata and layout').VERSION, '0.6.7.1');
-  assert.equal(stepEnv('publish-linux-uos', 'Publish UOS packages and sync installer URLs').VERSION, '0.6.7.1');
+  assert.equal(stepEnv('publish-linux-uos', 'Publish and verify UOS installers').VERSION, '0.6.7.1');
+  assert.equal(stepEnv('publish-linux-uos', 'Sync stable UOS installer URLs').VERSION, '0.6.7.1');
   const upload = readStep('build-linux-uos', 'Upload UOS artifacts');
   for (const arch of ['amd64', 'arm64']) {
     const resolved = upload.replaceAll('${{ matrix.debArch }}', arch)
